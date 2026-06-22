@@ -13,14 +13,14 @@
 
 ## Status snapshot
 
-**Fresh start — nothing is implemented yet.** The repo holds only the rules/meta: `specs/01–16` (+ `99`), `docs/`, `AGENTS.md`, `PROMPT_build.md`/`PROMPT_plan.md`, `loop.sh`, `.gitignore`, `LICENSE`, and this plan. There is **no** `package.json`, `src/`, or `test/` — the loop builds **everything** from `01-scaffold-a` onward against the updated specs/rules. Expected transient: until `01-scaffold-a` lands `package.json` and `01-config` lands the first `src/*.ts`, `npm run typecheck`/`lint` report empty-glob artifacts and `npm test` stays green via `--passWithNoTests`. Do **not** commit stubs to suppress those.
+**Scaffold done (spec 01, `01-scaffold-a`–`d`):** `package.json`, `tsconfig.json`, `biome.json`, `.env.example`, `vitest.config.ts`, and an empty `src/` are in place. **No `src/*.ts` or `test/` yet** — the first source file lands in `01-config` (`src/config.ts`), the first tests in `T-harness`. **Accepted transient until `01-config`:** with no `src/*.ts`, `npm run typecheck` errors `TS18003` (no inputs) and `npm run lint` (`biome check src`) exits 1 ("no files processed" — same on a missing *or* empty `src/`); `npm test` stays green via `--passWithNoTests`. Do **not** commit stubs to suppress those — both clear the moment `src/config.ts` exists.
 
 ### Project scaffold (spec 01)
 
 - [x] **01-scaffold-a.** `package.json` (deps `fastify`/`@fastify/cors`/`@modelcontextprotocol/sdk`; devDeps `typescript`/`tsx`/`vitest`/`@types/node`/`@biomejs/biome`/`pino-pretty`; scripts build/start/dev/test/typecheck/lint/format; `engines.node >=20`) + `npm install` — spec 01
 - [x] **01-scaffold-b.** `tsconfig.json` (NodeNext, `.ts` import extensions via `allowImportingTsExtensions`+`rewriteRelativeImportExtensions`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, strict knobs) — spec 01
 - [x] **01-scaffold-c.** `biome.json` (tabs, indentWidth 3, lineWidth 120, double quotes; `useConst`/`useNodejsImportProtocol`/`noExplicitAny`=error, `noNonNullAssertion`=off; `organizeImports:on`) — spec 01
-- [ ] **01-scaffold-d.** `.env.example` (PORT/HOST/MCP_ROOT_DIR/MCP_AUTH_TOKEN/MCP_MAX_RESPONSE_BYTES/LOG_LEVEL) + `vitest.config.ts` + empty `src/` skeleton (subdirs created by their first file) — spec 01
+- [x] **01-scaffold-d.** `.env.example` (PORT/HOST/MCP_ROOT_DIR/MCP_AUTH_TOKEN/MCP_MAX_RESPONSE_BYTES/LOG_LEVEL) + `vitest.config.ts` + empty `src/` skeleton (subdirs created by their first file) — spec 01
 
 ---
 
