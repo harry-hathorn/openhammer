@@ -1,0 +1,43 @@
+# Build context filter for the OpenHammer multi-stage image (spec 16).
+# Excludes regenerated/heavy artifacts, secrets, and loop/agent state so `COPY . .`
+# stays lean and never leaks host `node_modules`/`dist` into a stage (which would
+# override the in-image `npm ci`/`npm run build` and break platform resolution).
+
+# Dependencies & build output (regenerated in-image via npm ci / npm run build)
+node_modules
+dist
+coverage
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Local environment & secrets (keep the example for reference)
+.env
+.env.*
+!.env.example
+
+# Build-loop & agent tooling state
+.loop-complete
+.claude
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docs & planning (not needed in any image stage)
+README.md
+LICENSE
+docs
+specs
+PROMPT_*.md
+AGENTS.md
+IMPLEMENTATION_PLAN.md
+loop.sh
+
+# Docker metadata (not needed inside the image)
+Dockerfile
+.dockerignore
