@@ -32,7 +32,7 @@
 
 ### Shared utilities (spec 02) + tool types (spec 10-types)
 
-- [ ] **02a.** `src/tools/result.ts` (NEW) — `Result<T,E=Error>` + `ok`/`err`/`map`/`andThen`/`getOrElse`/`combine`; pure, no imports. + tests (success propagation, `combine` short-circuit on err). *deps: none. Most-imported module — do first.*
+- [x] **02a.** `src/tools/result.ts` (NEW) — `Result<T,E=Error>` + `ok`/`err`/`map`/`andThen`/`getOrElse`/`combine`; pure, no imports. + tests (success propagation, `combine` short-circuit on err). *deps: none. Most-imported module — do first.*
 - [ ] **02c.** `src/tools/truncate.ts` — verbatim port from `pi/.../tools/truncate.ts` (`DEFAULT_MAX_LINES=2000`, `DEFAULT_MAX_BYTES=50*1024`, `GREP_MAX_LINE_LENGTH=500`, `formatSize`, `truncateHead`, `truncateTail`, `truncateLine`, types). + tests (`truncateHead` 3000→2000 lines; 60KB single line → `firstLineExceedsLimit`; `truncateTail` keeps last 2000; `formatSize(512*1024)`→`"512.0KB"`). *deps: none.*
 - [ ] **02d.** `src/tools/path-utils.ts` — verbatim port from `pi/.../tools/path-utils.ts` (`expandPath`, `resolveToCwd`). **Do NOT port `resolveReadPath`'s macOS screenshot variants.** + tests (`resolveToCwd("~/x","/root")`→`/root/x`; relative→under cwd; absolute passes through). *deps: none.*
 - [ ] **02b.** `src/tools/io.ts` (NEW) — Result-wrappers over `node:fs`/`node:fs/promises` (**fs surface only — NOT spawn**): `readFile`/`access`/`stat`/`statSync`/`readdir`/`readdirSync`/`writeFile`/`mkdir`/`exists`. + tests (success + errno-failure → `err` with `Error`). *deps: 02a.*
