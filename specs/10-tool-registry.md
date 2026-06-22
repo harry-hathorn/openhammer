@@ -30,7 +30,7 @@ export interface ToolOk {
 export interface ToolModule {
   name: "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
   description: string;
-  inputSchema: Record<string, unknown>; // plain JSON-Schema object
+  inputSchema: Tool["inputSchema"]; // SDK's JSON-Schema-object type (requires type:"object"; index sig absorbs extra keys)
   execute: (args: Record<string, unknown>, rootDir: string) => Promise<Result<ToolOk>>;
 }
 
@@ -73,6 +73,7 @@ export function createAllTools(rootDir: string): McpToolEntry[] {
 - **Result error model** — `execute` returns `Promise<Result<ToolOk, Error>>`; expected failures are `err(new Error(msg))`, never thrown. The MCP `CallTool` handler narrows (spec 12). This is a deliberate deviation from pi's throw-style. See `docs/coding-standards.md`.
 - **No separate `schema.ts`** — schemas live inline in each tool module (faithful to pi); `index.ts` lifts them onto `tool.inputSchema`.
 - Tool modules are plain objects (`ToolModule`), not pi's `ToolDefinition`/`AgentTool` wrappers — we strip the TUI/agent coupling entirely.
+- **`ToolModule.inputSchema` is `Tool["inputSchema"]`, not `Record<string, unknown>`** — the SDK's `Tool.inputSchema` requires `type:"object"` as a literal; the spec's earlier `Record<string, unknown>` (which has `type: unknown`) made the spec's own `createAllTools` fail `tsc`. Reusing the SDK's canonical JSON-Schema-object type is the single source of truth and lets `createAllTools` lift it onto `tool.inputSchema` with no `as` cast. Its `[x: string]: unknown` index signature keeps it permissive enough that every tool's hand-written inline literal satisfies it (no Typebox/zod — see AGENTS.md). The acceptance criterion (each `tool.inputSchema` is "a plain JSON-Schema object") still holds.
 
 ## Suggested plan items (atomic checkboxes)
 - [ ] Author `src/mcp/types.ts` (`ToolContent`, `ToolOk`, `ToolModule` w/ `Result<ToolOk>` execute, `McpToolEntry`). *deps: 02a (result.ts).*
