@@ -1,0 +1,9 @@
+pi/
+.loop-complete
+node_modules/
+dist/
+coverage/
+.env
+
+# Claude Code local config (contains personal API tokens / model overrides)
+.claude/
