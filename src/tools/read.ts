@@ -1,24 +1,49 @@
 /**
- * The `read` tool — text path only (spec 03, item 03a).
+ * The `read` tool — text + image paths (spec 03, items 03a + 03b).
  *
- * Ports pi's `read` execute logic verbatim for text files, stripping everything
- * that is UI/agent-coupled: `resolveReadPath` (→ `resolveToCwd`), the compact-read
+ * Ports pi's `read` execute logic verbatim, stripping everything that is
+ * UI/agent-coupled: `resolveReadPath` (→ `resolveToCwd`), the compact-read
  * classification, `getReadmePath`, theme/syntax-highlight rendering, image resize,
- * and magic-byte MIME detection. The image-content-block path lands in 03b; this
- * module ships the text path: `resolveToCwd` → `access(R_OK)` → UTF-8 read →
- * `split("\n")` → offset/limit window → `truncateHead` with continuation/limit
- * notices. Output is raw content — **no line-number prefixes** (locked: match pi).
+ * and magic-byte MIME detection. Two paths:
+ *  - **Text** (03a): `resolveToCwd` → `access(R_OK)` → UTF-8 read → `split("\n")` →
+ *    offset/limit window → `truncateHead` with continuation/limit notices. Output is
+ *    raw content — **no line-number prefixes** (locked: match pi).
+ *  - **Image** (03b): extension detection (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`) →
+ *    base64 image block + `Read image file [<mime>]` text note. No resize — oversized
+ *    images are caught by the universal `MAX_RESPONSE_BYTES` backstop (spec 12).
  *
  * Expected failures (missing/unreadable file, offset past EOF) return `err`, never
  * throw — the MCP `CallTool` handler (spec 12) is the single narrowing point. File
  * I/O goes through `io.ts` Result-wrappers, so the body has zero try/catch.
  */
 import { constants } from "node:fs";
+import { extname } from "node:path";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
 import { access, readFile } from "./io.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok } from "./result.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "./truncate.ts";
+
+/**
+ * Detect an image MIME type by file extension (v1 simplification — pi sniffs magic
+ * bytes + resizes; OpenHammer does neither). Case-insensitive; `null` for non-images.
+ * Oversized images are caught by the universal `MAX_RESPONSE_BYTES` backstop (spec 12).
+ */
+function detectImageMimeType(filePath: string): string | null {
+	switch (extname(filePath).toLowerCase()) {
+		case ".png":
+			return "image/png";
+		case ".jpg":
+		case ".jpeg":
+			return "image/jpeg";
+		case ".gif":
+			return "image/gif";
+		case ".webp":
+			return "image/webp";
+		default:
+			return null;
+	}
+}
 
 export const readTool: ToolModule = {
 	name: "read",
@@ -48,12 +73,31 @@ export const readTool: ToolModule = {
 		if (!accessRes.ok) {
 			return err(accessRes.error);
 		}
+
+		// Image path (spec 03b): extension detection → base64 image block + text note.
+		// No resize — oversized images are caught by the universal MAX_RESPONSE_BYTES
+		// backstop at the MCP layer (spec 12). offset/limit do not apply to images.
+		const imageMime = detectImageMimeType(absolutePath);
+		if (imageMime) {
+			const imageBufferRes = await readFile(absolutePath);
+			if (!imageBufferRes.ok) {
+				return err(imageBufferRes.error);
+			}
+			const toolOk: ToolOk = {
+				content: [
+					{ type: "text", text: `Read image file [${imageMime}]` },
+					{ type: "image", data: imageBufferRes.value.toString("base64"), mimeType: imageMime },
+				],
+			};
+			return ok(toolOk);
+		}
+
+		// --- Text path (verbatim from pi: read.ts, text branch) ---
 		const bufferRes = await readFile(absolutePath);
 		if (!bufferRes.ok) {
 			return err(bufferRes.error);
 		}
 
-		// --- Text path (verbatim from pi: read.ts, text branch) ---
 		const allLines = bufferRes.value.toString("utf-8").split("\n");
 		const totalFileLines = allLines.length;
 		// offset is 1-indexed input → 0-indexed array access.

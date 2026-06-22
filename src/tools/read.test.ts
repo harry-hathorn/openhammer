@@ -46,6 +46,24 @@ function textOf(r: { ok: true; value: ToolOk } | { ok: false; error: Error }): s
 	return block.text;
 }
 
+/** The text note + image block of a `read` image result (exactly two blocks). */
+function imageOf(r: { ok: true; value: ToolOk } | { ok: false; error: Error }): {
+	note: { type: "text"; text: string };
+	image: { type: "image"; data: string; mimeType: string };
+} {
+	const ok = unwrap(r);
+	expect(ok.content).toHaveLength(2);
+	const note = ok.content[0];
+	const image = ok.content[1];
+	if (note === undefined || note.type !== "text") {
+		throw new Error(`expected a text note, got ${JSON.stringify(note)}`);
+	}
+	if (image === undefined || image.type !== "image") {
+		throw new Error(`expected an image block, got ${JSON.stringify(image)}`);
+	}
+	return { note, image };
+}
+
 describe("read tool — text path", () => {
 	it("returns the full file with no line-number prefixes (spec acceptance)", async () => {
 		const lines = Array.from({ length: 10 }, (_, i) => `line-${i + 1}`);
@@ -155,5 +173,64 @@ describe("read tool — text path", () => {
 		writeFileSync(join(rootDir, "sub", "nested.txt"), "nested");
 		const r = await readTool.execute({ path: "sub/nested.txt" }, rootDir);
 		expect(textOf(r)).toBe("nested");
+	});
+});
+
+describe("read tool — image path", () => {
+	/** Write `bytes` to `name` under rootDir; return the Buffer written. */
+	function writeImage(name: string, bytes: number[]): Buffer {
+		const buf = Buffer.from(bytes);
+		writeFileSync(join(rootDir, name), buf);
+		return buf;
+	}
+
+	it("returns a text note + base64 image block for a .png (spec acceptance)", async () => {
+		// Bytes are arbitrary — detection is extension-based, so the file need not be a valid PNG.
+		const buf = writeImage("pic.png", [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+		const { note, image } = imageOf(await readTool.execute({ path: "pic.png" }, rootDir));
+
+		expect(note.text).toBe("Read image file [image/png]");
+		expect(image.mimeType).toBe("image/png");
+		expect(image.data).toBe(buf.toString("base64"));
+	});
+
+	it.each([
+		["photo.jpg", "image/jpeg"],
+		["photo.jpeg", "image/jpeg"],
+		["anim.gif", "image/gif"],
+		["drawing.webp", "image/webp"],
+	])("maps extension %s → %s", async (name, mime) => {
+		const buf = writeImage(name, [1, 2, 3, 4, 5]);
+		const { image } = imageOf(await readTool.execute({ path: name }, rootDir));
+
+		expect(image.mimeType).toBe(mime);
+		expect(image.data).toBe(buf.toString("base64"));
+	});
+
+	it("detects image extensions case-insensitively", async () => {
+		const buf = writeImage("UPPER.PNG", [9, 9, 9]);
+		const { image } = imageOf(await readTool.execute({ path: "UPPER.PNG" }, rootDir));
+
+		expect(image.mimeType).toBe("image/png");
+		expect(image.data).toBe(buf.toString("base64"));
+	});
+
+	it("gates the image path behind the access check (missing image → err)", async () => {
+		const r = await readTool.execute({ path: "missing.png" }, rootDir);
+
+		expect(r.ok).toBe(false);
+	});
+
+	it("ignores offset/limit on images", async () => {
+		writeImage("pic.png", [1, 2, 3, 4]);
+		// offset 99999 would error on a text file's line count; images bypass the text path.
+		const result = unwrap(await readTool.execute({ path: "pic.png", offset: 99999, limit: 5 }, rootDir));
+
+		expect(result.content).toHaveLength(2);
+	});
+
+	it("treats an unknown extension as a text file", async () => {
+		writeFileSync(join(rootDir, "data.csv"), "a,b,c\n1,2,3");
+		expect(textOf(await readTool.execute({ path: "data.csv" }, rootDir))).toBe("a,b,c\n1,2,3");
 	});
 });
