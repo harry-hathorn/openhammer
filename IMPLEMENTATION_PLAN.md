@@ -18,7 +18,7 @@
 ### Project scaffold (spec 01)
 
 - [x] **01-scaffold-a.** `package.json` (deps `fastify`/`@fastify/cors`/`@modelcontextprotocol/sdk`; devDeps `typescript`/`tsx`/`vitest`/`@types/node`/`@biomejs/biome`/`pino-pretty`; scripts build/start/dev/test/typecheck/lint/format; `engines.node >=20`) + `npm install` — spec 01
-- [ ] **01-scaffold-b.** `tsconfig.json` (NodeNext, `.ts` import extensions via `allowImportingTsExtensions`+`rewriteRelativeImportExtensions`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, strict knobs) — spec 01
+- [x] **01-scaffold-b.** `tsconfig.json` (NodeNext, `.ts` import extensions via `allowImportingTsExtensions`+`rewriteRelativeImportExtensions`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, strict knobs) — spec 01
 - [ ] **01-scaffold-c.** `biome.json` (tabs, indentWidth 3, lineWidth 120, double quotes; `useConst`/`useNodejsImportProtocol`/`noExplicitAny`=error, `noNonNullAssertion`=off; `organizeImports:on`) — spec 01
 - [ ] **01-scaffold-d.** `.env.example` (PORT/HOST/MCP_ROOT_DIR/MCP_AUTH_TOKEN/MCP_MAX_RESPONSE_BYTES/LOG_LEVEL) + `vitest.config.ts` + empty `src/` skeleton (subdirs created by their first file) — spec 01
 

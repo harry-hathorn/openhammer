@@ -1,0 +1,44 @@
+{
+	"compilerOptions": {
+		/* Language and Environment */
+		"target": "ES2022",
+		"lib": ["ES2022"],
+
+		/* Modules — NodeNext so SDK `.js` subpath imports resolve under ESM ("type":"module") */
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+
+		/* Emit */
+		"rootDir": "src",
+		"outDir": "dist",
+		"declaration": false,
+		"sourceMap": true,
+
+		/*
+		 * `.ts` import extensions (pi fidelity): source uses `import "./foo.ts"`.
+		 * `allowImportingTsExtensions` permits that; `rewriteRelativeImportExtensions`
+		 * (TS 5.7+) rewrites `.ts`→`.js` on emit, so we can BOTH build (emit) and typecheck.
+		 */
+		"allowImportingTsExtensions": true,
+		"rewriteRelativeImportExtensions": true,
+
+		/* Interop / module semantics */
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		"esModuleInterop": true,
+		"resolveJsonModule": true,
+		"forceConsistentCasingInFileNames": true,
+
+		/* Type-checking — strict + pi parity. `noUncheckedIndexedAccess` and
+		 * `exactOptionalPropertyTypes` are deliberately OFF (deferred until after v1 port). */
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noImplicitReturns": true,
+		"noFallthroughCasesInSwitch": true,
+
+		/* Completeness */
+		"skipLibCheck": true
+	},
+	"include": ["src/**/*"]
+}
