@@ -100,7 +100,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 ## Testing (specs 15/16)
 
 - **Trio (hermetic, every iteration):** Tier-0 units (`src/**/*.test.ts`), Tier-1 in-process MCP E2E, Tier-2 boot E2E (`test/e2e-hermetic/**`).
-- **Containerized (on-demand, non-blocking):** `npm run test:compose`, `npm run test:in-container`, gated `npm run test:tunnel`.
+- **Containerized (on-demand, non-blocking):** `npm run test:compose`, `npm run test:compose:real`, `npm run test:in-container`, gated `npm run test:tunnel`.
 - **Deterministic, no LLM** — the real client is the SDK `Client` asserting on `callTool` text. Each test independent/deterministic (fake timers/network); cover failure paths; add a regression test per bug.
 
 ## Definition of done (per checkbox)

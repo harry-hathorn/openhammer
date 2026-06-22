@@ -21,7 +21,7 @@
  * try/catch-free body composes via `Result` (the spawn lifecycle already
  * resolves to a `Result`, narrowed at the `await`).
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
@@ -32,6 +32,22 @@ import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "./truncate.ts";
 
 const DEFAULT_LIMIT = 1000;
 const FD_MISSING = "fd is not installed. Install fd to use the find tool.";
+
+/**
+ * Whether this `fd` build supports `--no-require-git` (added in a later fd 8.x;
+ * the flag applies hierarchical `.gitignore` rules even outside a git repo).
+ * Debian bookworm's `fd-find` (8.6.0) predates it and rejects the flag — without
+ * this guard the real server's container would fail every `find` call. Probed
+ * once per process + cached (a `spawnSync` of ~ms, only on the first `find`).
+ */
+let noRequireGitSupported: boolean | undefined;
+function supportsNoRequireGit(): boolean {
+	if (noRequireGitSupported === undefined) {
+		const res = spawnSync("fd", ["--no-require-git", "--help"], { stdio: "ignore" });
+		noRequireGitSupported = res.status === 0;
+	}
+	return noRequireGitSupported;
+}
 
 /** Convert an OS-native path to POSIX forward-slash separators. */
 function toPosixPath(value: string): string {
@@ -121,15 +137,13 @@ export const findTool: ToolModule = {
 		// Build fd args (verbatim from pi). --no-require-git applies hierarchical
 		// .gitignore semantics whether or not the search path is inside a git repo,
 		// without leaking sibling-directory rules the way --ignore-file (a global
-		// source) would.
-		const fdArgs: string[] = [
-			"--glob",
-			"--color=never",
-			"--hidden",
-			"--no-require-git",
-			"--max-results",
-			String(effectiveLimit),
-		];
+		// source) would. Older fd builds (Debian bookworm's 8.6.0) lack the flag, so
+		// include it only when the build supports it (probed once + cached above).
+		const fdArgs: string[] = ["--glob", "--color=never", "--hidden"];
+		if (supportsNoRequireGit()) {
+			fdArgs.push("--no-require-git");
+		}
+		fdArgs.push("--max-results", String(effectiveLimit));
 
 		// fd --glob matches against the basename unless --full-path is set; in
 		// --full-path mode it matches the whole candidate path, so a path-containing
