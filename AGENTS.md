@@ -1,43 +1,118 @@
-## Build & Run
+# AGENTS.md
 
-OpenHammer is a **standalone MCP server with no LLM** — it only executes tools; intelligence lives in the remote agent. Node 20+, ESM, TypeScript strict.
+Guidance for the build loop (`loop.sh` + `PROMPT_build.md`) and any AI agent in this repo.
+Imperative and non-negotiable unless a line says otherwise. Chat instructions override this file;
+this file overrides your defaults. Detail/rationale lives in `docs/coding-standards.md` — this is the
+high-signal distillation that applies to **every** iteration.
 
-- Install: `npm install`
-- Build: `npm run build` (tsc → `dist/`)
-- Start: `npm start` (`node dist/main.js`) — or `npm run dev` for `tsx watch src/main.ts`
-- Tests: `npm test` (vitest run)
+> Keep this file high-signal. Add a rule only when an agent would otherwise get it wrong; delete rules
+> that stop earning their place. Do **not** restate the specs or architecture here — agents read the repo.
 
-Configure via env (see `.env.example`): `PORT` (3000), `HOST` (127.0.0.1), `MCP_ROOT_DIR` (empty = launch cwd), `MCP_AUTH_TOKEN` (override the minted token), `MCP_MAX_RESPONSE_BYTES` (512000), `LOG_LEVEL`.
+---
 
-On first boot it mints a bearer token to `~/.openhammer/credential.json` and prints the URL + token + a ready-to-paste MCP client config block. Verify with the MCP Inspector: `npx @modelcontextprotocol/inspector` → POST `http://127.0.0.1:<PORT>/mcp` with `Authorization: Bearer <token>` → `initialize` → `tools/list` (expect 7 tools) → call each.
+## Setup & commands
 
-## Validation
+- Package manager: **`npm`** (NOT pnpm/yarn — the whole pipeline is npm: `Dockerfile` `npm ci`, `package-lock.json`, scripts).
+- Install: `npm install` · Dev (watch): `npm run dev` · Build: `npm run build` · Start: `npm start`
+- **Validation trio (run before declaring done):** `npm run typecheck` · `npm run lint` · `npm test`.
 
-Run these after implementing to get immediate feedback (the loop's backpressure — all three must pass before checking off a task):
+Run all three until green before checking off a task. Fix the errors you introduce; do not suppress them.
 
-- Tests: `npm test` (vitest; `--passWithNoTests` keeps it green for scaffold tasks). Runs the **hermetic** tiers: Tier-0 units (`src/**/*.test.ts`), Tier-1 in-process MCP E2E, Tier-2 boot E2E (`test/e2e-hermetic/**`).
-- Typecheck: `npm run typecheck` (`tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit` — covers `src` **and** `test`).
-- Lint/format: `npm run lint` (`biome check src test`).
+## The build loop (how this repo ships)
 
-**Containerized tiers (on-demand, non-blocking for the loop):** `npm run test:compose` (deterministic server+test-runner E2E via Docker Compose), `npm run test:in-container` (`docker compose run --rm dev npm test`), `npm run test:tunnel` (gated cloudflared E2E — skips unless `OPENHAMMER_TUNNEL_E2E=1` + binary present). Full strategy: `specs/15-testing-strategy.md`, `specs/16-containerized-e2e.md`. Each task in `IMPLEMENTATION_PLAN.md` names the test tier it activates.
+- **One `- [ ]` checkbox in `IMPLEMENTATION_PLAN.md` = one iteration = one commit.** Pick the first unchecked box whose `deps:` are done, implement it **fully** (no stubs/placeholders), validate, check off **exactly one** box, commit, tag, write `.loop-complete`, stop. Fresh context per iteration.
+- **Conventional Commits**: `feat:`/`fix:`/`chore:`/`docs:`/`test:`/`refactor:` (optionally scoped, e.g. `feat(read): …`). Plain message, imperative, ≤72-char subject. **No AI-attribution trailers.**
+- The trio is the gate. Containerized tiers (`test:compose` etc.) are non-blocking extras — see *Testing*.
 
-## Operational Notes
+## Hard constraints (do not violate)
 
-- **No LLM.** Server only executes tools.
-- **Stateless MCP.** No `sessionIdGenerator` (Streamable HTTP, `enableJsonResponse:true`), like the-reference. Per-request `Server` + `Transport`.
-- **Auth = opaque bearer token**, constant-time compared. One token per instance in `~/.openhammer/credential.json` (0600); `MCP_AUTH_TOKEN` env overrides. No OAuth AS — only a `/.well-known/oauth-protected-resource` discovery pointer.
-- **Filesystem root = `MCP_ROOT_DIR`** (default: launch cwd). Tool paths resolve via `resolveToCwd` (~ expansion + absolute pass-through). **Not hard-jailed** — the `bash` tool reaches anything the OS user can (documented; gated by the token). **For isolation, run OpenHammer in a container** with only the target dir mounted — that bounds what the shell can touch.
-- **Output backstops:** per-tool truncation (2000 lines / 50KB; `bash` keeps the **tail**, `read` keeps the **head**) + a universal `MAX_RESPONSE_BYTES` (512KB) backstop that emits a `response_too_large` text block.
-- **`rg` + `fd` required.** `grep` needs `rg` (ripgrep), `find` needs `fd`; both error with an install hint if absent (no auto-download, no Node fallback).
-- **`--tunnel` is optional.** Spawns `cloudflared` quick-tunnel; falls back to localhost-only if the binary is missing.
-- **Imports:** relative imports use **`.ts`** extensions (`./path-utils.ts`, via `allowImportingTsExtensions` + `rewriteRelativeImportExtensions`); `import type` for type-only imports (`verbatimModuleSyntax`); `node:` protocol on every built-in (`useNodejsImportProtocol`). Details in `docs/coding-standards.md`.
+- **No LLM.** OpenHammer only executes tools; the agent loop lives in the MCP client (the LLM provider).
+- **Node ≥20, ESM** (`"type":"module"`), TypeScript `strict`. Do not relax `tsconfig`. Node 22 LTS is the dev/CI runtime.
+- **No dependency without a clear need; prefer the `node:` standard library.** No `jose`/`sharp`/`dotenv`/`diff`/`zod`.
+- **Stateless MCP**: per-request `Server` + `Transport`, no `sessionIdGenerator` (Streamable HTTP, `enableJsonResponse:true`).
+- **Isolation = containerize** (mount the target dir, set `MCP_ROOT_DIR`); not hard-jailed — `bash` reaches anything the OS user can, gated by the bearer token.
+- Do not hand-edit `dist/`, the lockfile, or generated files.
 
-## Codebase Patterns
+## TypeScript rules
 
-- **Read `docs/coding-standards.md` — it applies to every task.** Shared utilities live in `src/tools/` (`result.ts`, `io.ts`, `path-utils.ts`, `truncate.ts`, `output-accumulator.ts`, `edit-diff.ts`, `bin.ts`) — this project's "standard library." Tools are plain `ToolModule` objects (`{ name, description, inputSchema, execute(args, rootDir) → Promise<Result<ToolOk>> }`); `src/tools/index.ts` → `createAllTools(rootDir): McpToolEntry[]`.
-- **Port tool execute logic from pi verbatim** (schemas + behavior), stripping all `@earendil-works/pi-*` and TUI (`pi-tui`) coupling. Authoritative upstream: `/home/haz/source/pi/packages/coding-agent/src/core/tools/` (a vendored copy may live in `./pi/`, which is gitignored). Convert pi's **throws to `err(...)`** (Result model); use `src/tools/io.ts` wrappers over throwing `node:fs`/`spawn` so tool bodies have zero try/catch.
-- **Copy MCP wiring from the-reference**: `src/mcp-server/{server,http-transport,types}.ts`, boot in `src/api/server.ts`. Authoritative upstream: `/home/haz/source/redacted/the-reference/`. Key pattern: per-request `StreamableHTTPServerTransport({ enableJsonResponse:true })`, flush Fastify headers to `reply.raw`, `transport.handleRequest(req.raw, reply.raw, body)`, `reply.hijack()`.
-- **No `Operations` interface seams** — every tool is a direct local implementation, and none is planned. `bash` runs natively wherever OpenHammer runs, so isolation is a deployment choice, not a code path: **run OpenHammer inside a Docker container** (mount only the target dir, set `MCP_ROOT_DIR` to it) and the container *is* the sandbox. No `--sandbox` mode.
-- **Tool/resource surface only — never host the agent loop.** OpenHammer executes tools and (later, step two) serves agent definitions as MCP resources/prompts; the **MCP client (the LLM provider) owns the agent loop, model calls, and compaction.** Do not add an in-server LLM loop, provider integration, or session-state. See `specs/99-roadmap-agent-harness.md` and `docs/agent-harness-design.md`.
-- **Error model — Result, not throws.** Tool `execute` returns `Promise<Result<ToolOk, Error>>` (`ok({ content })` / `err(new Error(msg))`); expected failures never throw. The MCP `CallTool` handler is the single narrowing point (`if (!r.ok) return { content:[{type:"text", text:r.error.message}], isError:true }`) with a fallback `try/catch` only for genuine bugs. Exceptions remain at framework boundaries (Fastify `reply`, SDK transport, boot). Full rules: `docs/coding-standards.md`.
-- `src/mcp/server.ts` applies the universal `MAX_RESPONSE_BYTES` backstop (replace oversized content with a single `response_too_large` text block) on every `tools/call` success.
+**Types**
+- **Never `any`.** Use `unknown` at boundaries; narrow with a type guard (`if (e.type === "match")`). No `{}` type — use `unknown`/`Record`/`object`.
+- **Discriminated unions for mutually-exclusive states** — the `Result` type *is* this (`{ ok:true; value } | { ok:false; error }`). Make `switch` over a union exhaustive (`default: assertNever(x)`).
+- **`interface` for object shapes; `type` for unions/intersections/mapped.** No `enum` (`erasableSyntaxOnly` bans them — use a `const` object + derived union).
+- **Assertions/non-null**: prefer runtime narrowing (`instanceof`, type guards) over `as`/`!`. **Documented exceptions (pi fidelity + SDK friction):** `!` is allowed (biome `noNonNullAssertion: off` — pi uses it); `as unknown as Transport` in the MCP transport wiring is required (SDK optional-callback type friction) — add a why-comment.
+- **`noUncheckedIndexedAccess` is deferred (off)** for the port — it fights a pi port's heavy indexing; flip it on in a consolidation pass after v1.
+
+**Validation & boundaries**
+- Validate external input (env, CLI args, file contents, JSON) **at the boundary, by hand** (no `zod` — standard library only). See `src/config.ts`. Inside the trusted core, assume validated; don't re-check.
+
+**Errors (the Result spine)**
+- Tool `execute → Promise<Result<ToolOk, Error>>`. Expected failures return `err(new Error(msg))`, **never throw**; success returns `ok({ content })`.
+- The MCP `CallTool` handler is the single narrowing point (`if (!r.ok) return { content:[{type:"text", text:r.error.message}], isError:true }`) with a fallback `try/catch` only for genuine bugs.
+- Throw only `new Error(…)` (or a subclass) — never strings/objects. Exceptions stay at framework boundaries (Fastify `reply`, SDK transport, boot).
+- No empty `catch`. `catch (e)` is `unknown` — narrow before use.
+
+**Functions & data**
+- Prefer pure functions; treat parameters as `readonly`. No default exports from OpenHammer's own modules (named exports); importing pi/fastify defaults is fine.
+
+## Style (biome — do NOT change; pi fidelity)
+
+- **Tabs, indent 3, lineWidth 120, double quotes.** NOT 2-space / single-quote. These match pi so **verbatim ports pass `biome check` unchanged** — do not "fix" them. (This is the deliberate divergence from the Google TS guide.)
+- `useConst`/`useNodejsImportProtocol`/`noExplicitAny` = error. `node:` on every built-in.
+- Relative imports use **`.ts`** extensions (`./path-utils.ts`); `import type` for type-only (`verbatimModuleSyntax`). **No `@/` path aliases** — relative `.ts` only (pi fidelity).
+
+## Modules & structure (layer-based, mirrors pi)
+
+- `src/{tools,mcp,auth,tunnel}`, `src/config.ts`, `src/server.ts`, `src/main.ts`, `src/startup-print.ts`.
+  **Not** feature-first — layer-based to mirror pi for verbatim porting. `src/tools/` is the project's standard library (`result`/`io`/`path-utils`/`truncate`/`output-accumulator`/`edit-diff`/`bin`).
+- Co-locate `*.test.ts` next to the source. No circular imports; no wide barrel files.
+- **No `Operations` interface seams** (locked: every tool is a direct local implementation).
+
+## Porting (the core of the work)
+
+- Port tool `execute` **verbatim** from `pi/.../core/tools/<x>.ts`; strip `@earendil-works/pi-*`, `pi-tui`, `ToolDefinition`/render, every `*Operations` seam, `ensureTool`→`isToolAvailable`. Convert pi's throws → `err(...)` (mechanical; control flow unchanged).
+- Use `src/tools/io.ts` Result-wrappers over throwing `node:fs` so tool bodies have **zero try/catch**.
+- Copy MCP/Fastify wiring from `the-reference` (`/home/haz/source/redacted/the-reference/src/{mcp-server,api}/`).
+
+## Security & spawn hygiene
+
+- Spawn `rg`/`fd`/`cloudflared` with **arg arrays** (never interpolate into a shell string) and **`--` before user-controlled operands** so a pattern like `-foo` can't become a flag. (`bash` is the intentional shell-string exception — its purpose, gated by the token.)
+- Constant-time bearer compare; cred file `0600`; never log/secrets beyond the token.
+
+## Exit codes, signals & async
+
+- `main.ts`: exit **0** on clean `SIGINT`/`SIGTERM` shutdown; **non-zero** on boot failure (unwritable cred dir, `EADDRINUSE`) with an actionable message.
+- `async/await` only. No floating promises — mark fire-and-forget `void p`. `Promise.all` for independent parallel work. Thread timeout/`AbortSignal` through I/O (bash timeout kills the detached process group).
+- **Lockfile:** commit `package-lock.json` — the `Dockerfile` runs `npm ci`, which fails without it.
+
+## Output backstops
+
+- Per-tool truncation (2000 lines / 50KB; `bash` keeps the **tail**, `read` keeps the **head**) + universal `MAX_RESPONSE_BYTES` (512KB) backstop in `src/mcp/server.ts` → one `response_too_large` text block. Never return unbounded content.
+
+## Toolchain notes
+
+- `rg` + `fd` required at runtime (presence-checked via `isToolAvailable`, graceful `err`/`null` if missing — no auto-download, no Node fallback). `cloudflared` optional (`--tunnel`).
+- Auth = opaque bearer token in `~/.openhammer/credential.json` (0600); `MCP_AUTH_TOKEN` overrides. No OAuth AS — only a `/.well-known/oauth-protected-resource` pointer.
+
+## Naming
+
+- `camelCase` vars/funcs · `PascalCase` types/classes · `UPPER_SNAKE` module constants. Booleans read as predicates (`isReady`, `hasAccess`, `shouldRetry`). Filenames lowercase (kebab for multi-word). No non-standard abbreviations.
+
+## Testing (specs 15/16)
+
+- **Trio (hermetic, every iteration):** Tier-0 units (`src/**/*.test.ts`), Tier-1 in-process MCP E2E, Tier-2 boot E2E (`test/e2e-hermetic/**`).
+- **Containerized (on-demand, non-blocking):** `npm run test:compose`, `npm run test:in-container`, gated `npm run test:tunnel`.
+- **Deterministic, no LLM** — the real client is the SDK `Client` asserting on `callTool` text. Each test independent/deterministic (fake timers/network); cover failure paths; add a regression test per bug.
+
+## Definition of done (per checkbox)
+
+1. `npm run typecheck` — no errors.
+2. `npm run lint` — no errors.
+3. `npm test` — green, including the test you added.
+4. No new `any`; `!`/`as` only with the documented exceptions; no `@ts-ignore`/`eslint-disable`.
+5. Conventional Commit; tag; **exactly one** box checked off.
+
+## Project-specific conventions
+
+- All MCP server/tool access goes through `src/mcp/server.ts` + `createAllTools(rootDir)`; tool paths resolve via `resolveToCwd` under `MCP_ROOT_DIR`.
+- We use the `Result` type from `src/tools/result.ts` — do not install a Result library.
+- Tool schemas are plain JSON-Schema object literals (no Typebox/zod).
