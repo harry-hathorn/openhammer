@@ -68,9 +68,11 @@ services:
     image: openhammer:dev
     profiles: ["dev"]
 
-  # The real OpenHammer server, `node dist/main.js` over the `prod` stage
-  # (task T-real-compose). `test:compose:real` retargets the runner at
-  # `http://server:3000/mcp` over the compose network for all 7 tools.
+  # The real OpenHammer server, `node dist/main.js` over the `prod` stage. The
+  # `/health` healthcheck (mirroring `fixture-server`) lets the real runner gate
+  # on `service_healthy` instead of racing a not-yet-listening server. `HOST=
+  # 0.0.0.0` is load-bearing — `loadConfig`'s `127.0.0.1` default binds loopback
+  # INSIDE the container and is unreachable over the Docker network.
   server:
     build:
       context: .
@@ -82,6 +84,39 @@ services:
       PORT: "3000"
       MCP_ROOT_DIR: "/data"
       MCP_AUTH_TOKEN: "real-compose-bearer-token"
+    healthcheck:
+      # node 22's global `fetch` probes `/health` (spec 16) — no curl dep, no
+      # sleep. Exec form so the `-e` script is one arg to node (no shell quoting).
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+
+  # Tier-3 real-server runner (task T-real-compose): the SAME `run-e2e.ts`, but
+  # pointed at the real `server` over the compose network — `run-e2e.ts` selects
+  # its 7-tool sweep from `tools/list` (vs the fixture's single `echo`). Shares
+  # the `dev` image with `test-runner` (tsx + test source); profile `real` so it
+  # never starts on plain `up`. `test:compose:real` names ONLY this service, so
+  # the unprofiled fixture pair doesn't start (and can't abort the run first);
+  # `server` rides in via `depends_on`.
+  real-test-runner:
+    build:
+      context: .
+      target: dev
+    image: openhammer:dev
+    command: ["./node_modules/.bin/tsx", "test/compose/run-e2e.ts"]
+    environment:
+      MCP_URL: "http://server:3000/mcp"
+      MCP_TOKEN: "real-compose-bearer-token"
+    depends_on:
+      server:
+        condition: service_healthy
+    profiles: ["real"]
 
   # Quick-tunnel bridge for the Tier-4 public-URL E2E (task T-tunnel-e2e): the
   # runner is retargeted at the parsed `https://*.trycloudflare.com` URL.
