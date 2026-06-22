@@ -54,7 +54,7 @@
 
 ### Registry (spec 10-index)
 
-- [ ] **10-index.** `src/tools/index.ts` — `createAllTools(rootDir): McpToolEntry[]`: import the 7 `ToolModule`s, map each to `{tool:{name,description,inputSchema}, handler:(args)=>m.execute(args??{},rootDir)}`. + test (`createAllTools("/srv")` → exactly 7 entries with names `read,bash,edit,write,grep,find,ls`; handler returns a `Result<ToolOk>`). *deps: 10-types + 03–09.*
+- [x] **10-index.** `src/tools/index.ts` — `createAllTools(rootDir): McpToolEntry[]`: import the 7 `ToolModule`s, map each to `{tool:{name,description,inputSchema}, handler:(args)=>m.execute(args??{},rootDir)}`. + test (`createAllTools("/srv")` → exactly 7 entries with names `read,bash,edit,write,grep,find,ls`; handler returns a `Result<ToolOk>`). *deps: 10-types + 03–09.* **Note:** the `tool` descriptor is built by explicit `{ name, description, inputSchema }` listing (not spread) so it is excess-property-clean against the SDK `Tool` type — `ToolModule.inputSchema` is already `Tool["inputSchema"]`, so it lifts with **no `as` cast** (the single-source-of-truth payoff from `10-types`). `MODULES` is a module-level `ToolModule[]` constant giving a stable `tools/list` order (`read,bash,edit,write,grep,find,ls`). Handler `(args?) => module.execute(args ?? {}, rootDir)` closes over `rootDir`; the test proves args-forwarding (bash echo) and the `args ?? {}` default (read with no path → `err`, never throws).
 
 ### Auth (spec 11)
 
