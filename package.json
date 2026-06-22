@@ -13,9 +13,12 @@
 		"start": "node dist/main.js",
 		"dev": "tsx watch src/main.ts",
 		"test": "vitest run --passWithNoTests",
-		"typecheck": "tsc --noEmit",
-		"lint": "biome check src",
-		"format": "biome format --write src"
+		"typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+		"lint": "biome check src test",
+		"format": "biome format --write src test",
+		"test:compose": "docker compose up --build --exit-code-from test-runner --abort-on-container-exit",
+		"test:in-container": "docker compose run --rm dev npm test",
+		"test:tunnel": "bash scripts/test-tunnel.sh"
 	},
 	"dependencies": {
 		"@fastify/cors": "^8.5.0",

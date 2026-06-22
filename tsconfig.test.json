@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		// Typecheck-only: the test suite is never emitted — this project exists so
+		// `npm run typecheck` covers `test/` as well as `src/` (spec 15/16).
+		"noEmit": true,
+		// Drop the `src`-only `rootDir` inherited from tsconfig.json so `test/**`
+		// is in scope. `outDir` is inert under `noEmit`.
+		"rootDir": "."
+	},
+	"include": ["src/**/*", "test/**/*"]
+}
