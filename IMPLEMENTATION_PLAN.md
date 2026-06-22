@@ -17,7 +17,7 @@
 
 ### Project scaffold (spec 01)
 
-- [ ] **01-scaffold-a.** `package.json` (deps `fastify`/`@fastify/cors`/`@modelcontextprotocol/sdk`; devDeps `typescript`/`tsx`/`vitest`/`@types/node`/`@biomejs/biome`/`pino-pretty`; scripts build/start/dev/test/typecheck/lint/format; `engines.node >=20`) + `npm install` — spec 01
+- [x] **01-scaffold-a.** `package.json` (deps `fastify`/`@fastify/cors`/`@modelcontextprotocol/sdk`; devDeps `typescript`/`tsx`/`vitest`/`@types/node`/`@biomejs/biome`/`pino-pretty`; scripts build/start/dev/test/typecheck/lint/format; `engines.node >=20`) + `npm install` — spec 01
 - [ ] **01-scaffold-b.** `tsconfig.json` (NodeNext, `.ts` import extensions via `allowImportingTsExtensions`+`rewriteRelativeImportExtensions`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, strict knobs) — spec 01
 - [ ] **01-scaffold-c.** `biome.json` (tabs, indentWidth 3, lineWidth 120, double quotes; `useConst`/`useNodejsImportProtocol`/`noExplicitAny`=error, `noNonNullAssertion`=off; `organizeImports:on`) — spec 01
 - [ ] **01-scaffold-d.** `.env.example` (PORT/HOST/MCP_ROOT_DIR/MCP_AUTH_TOKEN/MCP_MAX_RESPONSE_BYTES/LOG_LEVEL) + `vitest.config.ts` + empty `src/` skeleton (subdirs created by their first file) — spec 01
@@ -121,6 +121,7 @@ once Tier N−1's underlying code has shipped:
 - **Result model is the spine.** Tool `execute` never throws for expected failures; only the `CallTool` handler narrows, and its `try/catch` is a bug safety-net only. Spawn-based tools (`bash`/`grep`/`find`/tunnel) manage their own streaming and return `Result` at the end — they do **not** use `io.ts` (fs-surface only).
 - **`rg` + `fd` + `cloudflared` are presence-checked at runtime** (via `isToolAvailable`) with graceful `err`/`null` — no auto-download, no Node fallback, no install-time hard dep.
 - **Image support is extension-based, no `sharp`** (no resize; oversized images hit the backstop). **No `diff`/`jose`/`sharp`/`dotenv` deps** — do not add them.
+- **`npm audit` reports 5 high-severity advisories in `fast-uri`** (path-traversal/host-confusion), transitive via `fastify@4` → `@fastify/ajv-compiler`/`fast-json-stringify`. The only fix is `fastify@5` (breaking major; needs `@fastify/cors@10` + API changes). `the-reference` (the porting reference) is on the same `fastify@4.x`, and all MCP/Fastify wiring is copied against v4 — so this is a **deliberate, deferred** major bump, not a scaffold concern. Do **not** `npm audit fix --force` (it major-bumps fastify and breaks the port). Revisit after v1 ships.
 
 ## Out of scope (v1)
 
