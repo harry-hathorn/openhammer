@@ -13,7 +13,7 @@
 
 ## Status snapshot
 
-**Scaffold done (spec 01, `01-scaffold-a`–`d`):** `package.json`, `tsconfig.json`, `biome.json`, `.env.example`, `vitest.config.ts`, and an empty `src/` are in place. **No `src/*.ts` or `test/` yet** — the first source file lands in `01-config` (`src/config.ts`), the first tests in `T-harness`. **Accepted transient until `01-config`:** with no `src/*.ts`, `npm run typecheck` errors `TS18003` (no inputs) and `npm run lint` (`biome check src`) exits 1 ("no files processed" — same on a missing *or* empty `src/`); `npm test` stays green via `--passWithNoTests`. Do **not** commit stubs to suppress those — both clear the moment `src/config.ts` exists.
+**Scaffold done (spec 01, `01-scaffold-a`–`d`):** `package.json`, `tsconfig.json`, `biome.json`, `.env.example`, `vitest.config.ts`, and `src/` are in place. **`01-config` done:** `src/config.ts` + `src/config.test.ts` shipped (first source file + first tests); the earlier `TS18003`/`biome "no files"` transient is cleared and the full trio is green. No `test/` dir yet — first E2E tests land in `T-harness`/`T-canary`.
 
 ### Project scaffold (spec 01)
 
@@ -28,7 +28,7 @@
 
 ### Config (spec 01)
 
-- [ ] **01-config.** `src/config.ts` — `Config` interface + `loadConfig(env = process.env)` (coerce PORT/MCP_MAX_RESPONSE_BYTES with `Number()`; `rootDir = path.resolve(MCP_ROOT_DIR || process.cwd())`; defaults port 3000 / host `127.0.0.1` / maxResponseBytes 512000 / logLevel `info`; do **not** fail boot if `rootDir` missing). + unit tests (`loadConfig({})` → defaults; `loadConfig({PORT:"4242",MCP_ROOT_DIR:"/tmp/x"})` → coerced). *deps: 01-scaffold-a.*
+- [x] **01-config.** `src/config.ts` — `Config` interface + `loadConfig(env = process.env)` (coerce PORT/MCP_MAX_RESPONSE_BYTES with `Number()`; `rootDir = path.resolve(MCP_ROOT_DIR || process.cwd())`; defaults port 3000 / host `127.0.0.1` / maxResponseBytes 512000 / logLevel `info`; do **not** fail boot if `rootDir` missing). + unit tests (`loadConfig({})` → defaults; `loadConfig({PORT:"4242",MCP_ROOT_DIR:"/tmp/x"})` → coerced). *deps: 01-scaffold-a.*
 
 ### Shared utilities (spec 02) + tool types (spec 10-types)
 
