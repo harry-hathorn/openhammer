@@ -30,32 +30,47 @@ const fakeStatic: ChannelProvider = {
 afterEach(() => {
 	unregisterChannel("cloudflare");
 	unregisterChannel("ngrok");
+	unregisterChannel("nginx");
 	unregisterChannel("static-url");
 });
 
 describe("getChannel", () => {
-	it("pre-registers the cloudflare and ngrok providers (17h/17i wiring)", () => {
+	it("pre-registers all four channel providers (17h/17i/17j wiring)", () => {
 		// Must be the first test: this reads the module-load registrations, before any
-		// afterEach unregisters them. index.ts calls registerChannel(cloudflareProvider)
-		// and registerChannel(ngrokProvider).
+		// afterEach unregisters them. index.ts calls registerChannel for each provider.
 		const cloudflare = getChannel("cloudflare");
 		expect(cloudflare).toBeDefined();
 		expect(cloudflare?.kind).toBe("cloudflare");
 		expect(cloudflare?.mode).toBe("live");
 		expect(cloudflare?.fields).toEqual([]);
+		expect("start" in cloudflare!).toBe(true);
+		expect("resolve" in cloudflare!).toBe(false);
 
 		const ngrok = getChannel("ngrok");
 		expect(ngrok).toBeDefined();
-		expect(ngrok?.kind).toBe("ngrok");
 		expect(ngrok?.mode).toBe("live");
-		expect("start" in (ngrok as ChannelProvider)).toBe(true);
-		expect("resolve" in (ngrok as ChannelProvider)).toBe(false);
+		expect("start" in ngrok!).toBe(true);
+		expect("resolve" in ngrok!).toBe(false);
+
+		const nginx = getChannel("nginx");
+		expect(nginx).toBeDefined();
+		expect(nginx?.mode).toBe("static");
+		expect(nginx?.fields).toHaveLength(2);
+		expect("resolve" in nginx!).toBe(true);
+		expect("start" in nginx!).toBe(false);
+
+		const staticUrl = getChannel("static-url");
+		expect(staticUrl).toBeDefined();
+		expect(staticUrl?.mode).toBe("static");
+		expect(staticUrl?.fields).toHaveLength(1);
+		expect("resolve" in staticUrl!).toBe(true);
+		expect("start" in staticUrl!).toBe(false);
 	});
 
 	it("returns undefined for an unregistered kind", () => {
-		// cloudflare + ngrok are now pre-registered by index.ts (17h/17i), so use a
-		// kind no provider has landed yet (17j lands nginx/static-url) to exercise the
-		// absent path.
+		// All four ChannelKinds are now pre-registered (17h/i/j); unregister one to
+		// exercise the absent path within the union (no real kind is left unregistered).
+		unregisterChannel("nginx");
 		expect(getChannel("nginx")).toBeUndefined();
 	});
 });
