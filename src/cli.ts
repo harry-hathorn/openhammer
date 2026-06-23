@@ -5,20 +5,22 @@
  * unknown options become diagnostics), prints the README banner on an interactive
  * launch, writes diagnostics to stderr, then {@link dispatch}es on `command`.
  *
- * The command dispatch table (17o):
+ * The command dispatch table (17o + 17p):
  * - `start` / no command → boot (delegate to the spec-14 {@link main}).
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
+ * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  *
- * `doctor` and `monitor` are documented commands whose implementations ship in
- * their own iterations (17p diagnostics registry, 17t monitor socket). Wiring
- * them here would require stubbing those modules — forbidden by the no-stub
- * guardrail — so an as-yet-unwired command falls through to the usage message;
- * 17p/17t add their `case` (the dispatcher is the command registry, each command's
- * case is its entry). `npm start` (`dist/main.js`, spec 14) is unchanged.
+ * `monitor` is a documented command whose implementation ships in its own
+ * iteration (17t monitor socket). Wiring it here would require stubbing that
+ * not-yet-existing module — forbidden by the no-stub guardrail — so it falls
+ * through to the usage message; 17t adds its `case` (the dispatcher is the
+ * command registry, each command's case is its entry). `npm start`
+ * (`dist/main.js`, spec 14) is unchanged.
  */
 import { pathToFileURL } from "node:url";
 import { type ParsedArgs, parseArgs } from "./cli/args.ts";
+import { doctorCommand } from "./cli/doctor.ts";
 import { CONFIG_SECTIONS } from "./config/sections.ts";
 import { loadSettings, saveSettings, settingsPath } from "./config/settings.ts";
 import { type BannerStream, printBanner } from "./tui/banner.ts";
@@ -90,6 +92,8 @@ export interface DispatchDeps {
 	channel?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `config` subcommand handler (defaults to {@link configCommand}). */
 	config?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
+	/** `doctor` handler (defaults to {@link doctorCommand}). */
+	doctor?: (io: CommandIo) => Promise<number>;
 }
 
 /**
@@ -116,6 +120,7 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 	const boot = deps.boot ?? defaultBoot;
 	const channel = deps.channel ?? channelCommand;
 	const config = deps.config ?? configCommand;
+	const doctor = deps.doctor ?? doctorCommand;
 
 	if (parsed.help) {
 		io.stdout.write(`${USAGE}\n`);
@@ -131,6 +136,8 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 			return channel(parsed.rest[0], parsed.rest.slice(1), io);
 		case "config":
 			return config(parsed.rest[0], parsed.rest.slice(1), io);
+		case "doctor":
+			return doctor(io);
 		default:
 			io.stderr.write(`Unknown command: ${parsed.command}\n\n${USAGE}\n`);
 			return 2;
