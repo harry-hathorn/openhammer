@@ -40,5 +40,11 @@
 		/* Completeness */
 		"skipLibCheck": true
 	},
-	"include": ["src/**/*"]
+	"include": ["src/**/*"],
+	// Keep `*.test.ts` out of the emitted `dist/` — `npm run build` (`tsc`) must
+	// produce only the runtime tree (`dist/main.js` + its deps), never compiled
+	// test modules (which also `import` from `vitest`, absent under
+	// `npm ci --omit=dev` in the prod image). `tsconfig.test.json` overrides this
+	// exclude so test files stay in the typecheck scope.
+	"exclude": ["src/**/*.test.ts"]
 }
