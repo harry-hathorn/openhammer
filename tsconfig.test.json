@@ -8,5 +8,8 @@
 		// is in scope. `outDir` is inert under `noEmit`.
 		"rootDir": "."
 	},
-	"include": ["src/**/*", "test/**/*"]
+	// Override the build config's `*.test.ts` exclude so test files ARE
+	// typechecked here (this is the typecheck-only config; no emit).
+	"include": ["src/**/*", "test/**/*"],
+	"exclude": []
 }

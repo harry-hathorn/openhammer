@@ -11,7 +11,7 @@
 	"scripts": {
 		"build": "tsc",
 		"start": "node dist/main.js",
-		"dev": "tsx watch src/main.ts",
+		"dev": "NODE_ENV=development tsx watch src/main.ts",
 		"test": "vitest run --passWithNoTests",
 		"typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
 		"lint": "biome check src test",
