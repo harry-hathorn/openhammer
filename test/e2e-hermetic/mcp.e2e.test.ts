@@ -4,7 +4,8 @@
  * `POST /mcp`) — over loopback HTTP on an ephemeral port with a real SDK
  * `Client`. Where the canary (`harness.canary.test.ts`) proves the harness
  * against a standalone fixture, this suite proves the real server itself: all 7
- * tools round-trip over `tools/call`, the bearer gate returns 401, and the
+ * capability tools round-trip over `tools/call` (plus the `guide` orientation tool
+ * in `tools/list`), the bearer gate returns 401, and the
  * universal `MAX_RESPONSE_BYTES` backstop fires as a structured payload.
  *
  * Each tool is driven over the wire as the sole subject under test — fixture
@@ -26,7 +27,7 @@ import type { Config } from "../../src/config.ts";
 import { buildFastify } from "../../src/server.ts";
 
 const TOKEN = "real-buildfastify-bearer-token";
-const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"];
 
 /** Build + listen the real server on an ephemeral port; close the app + clean the temp root after `fn`. */
 async function withServer<T>(
@@ -109,7 +110,7 @@ async function callToolOnce(
 }
 
 describe("Tier-1 real: SDK client ↔ buildFastify", () => {
-	it("lists all 7 tools over the real server", async () => {
+	it("lists all 8 tools over the real server", async () => {
 		await withServer({}, async ({ baseUrl }) => {
 			const client = await connectClient(baseUrl);
 			try {
