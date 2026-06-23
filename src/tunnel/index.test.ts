@@ -29,24 +29,34 @@ const fakeStatic: ChannelProvider = {
 // Restore registry state between tests — these fakes use real ChannelKinds.
 afterEach(() => {
 	unregisterChannel("cloudflare");
+	unregisterChannel("ngrok");
 	unregisterChannel("static-url");
 });
 
 describe("getChannel", () => {
-	it("pre-registers the cloudflare provider (17h wiring)", () => {
-		// Must be the first test: this reads the module-load registration, before any
-		// afterEach unregisters it. index.ts calls registerChannel(cloudflareProvider).
-		const provider = getChannel("cloudflare");
-		expect(provider).toBeDefined();
-		expect(provider?.kind).toBe("cloudflare");
-		expect(provider?.mode).toBe("live");
-		expect(provider?.fields).toEqual([]);
+	it("pre-registers the cloudflare and ngrok providers (17h/17i wiring)", () => {
+		// Must be the first test: this reads the module-load registrations, before any
+		// afterEach unregisters them. index.ts calls registerChannel(cloudflareProvider)
+		// and registerChannel(ngrokProvider).
+		const cloudflare = getChannel("cloudflare");
+		expect(cloudflare).toBeDefined();
+		expect(cloudflare?.kind).toBe("cloudflare");
+		expect(cloudflare?.mode).toBe("live");
+		expect(cloudflare?.fields).toEqual([]);
+
+		const ngrok = getChannel("ngrok");
+		expect(ngrok).toBeDefined();
+		expect(ngrok?.kind).toBe("ngrok");
+		expect(ngrok?.mode).toBe("live");
+		expect("start" in (ngrok as ChannelProvider)).toBe(true);
+		expect("resolve" in (ngrok as ChannelProvider)).toBe(false);
 	});
 
 	it("returns undefined for an unregistered kind", () => {
-		// cloudflare is now pre-registered by index.ts (17h), so use a kind no
-		// provider has landed yet to exercise the absent path.
-		expect(getChannel("ngrok")).toBeUndefined();
+		// cloudflare + ngrok are now pre-registered by index.ts (17h/17i), so use a
+		// kind no provider has landed yet (17j lands nginx/static-url) to exercise the
+		// absent path.
+		expect(getChannel("nginx")).toBeUndefined();
 	});
 });
 
