@@ -22,7 +22,8 @@
 		"test:compose": "docker compose up --build --exit-code-from test-runner --abort-on-container-exit",
 		"test:compose:real": "docker compose --profile real up --build --exit-code-from real-test-runner --abort-on-container-exit real-test-runner",
 		"test:in-container": "docker compose run --rm dev npm test",
-		"test:tunnel": "bash scripts/test-tunnel.sh"
+		"test:tunnel": "bash scripts/test-tunnel.sh",
+		"test:tunnel:ngrok": "bash scripts/test-tunnel-ngrok.sh"
 	},
 	"dependencies": {
 		"@fastify/cors": "^8.5.0",
