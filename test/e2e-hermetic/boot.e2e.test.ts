@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import type { Credential } from "../../src/auth/token.ts";
+import { type Settings, saveSettings, settingsPath } from "../../src/config/settings.ts";
 import { isToolAvailable } from "../../src/tools/bin.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -277,4 +278,34 @@ describe("Tier-2 boot: real entrypoint via tsx", () => {
 			}
 		},
 	);
+
+	// The registry path (17q): a persisted static channel as `defaultChannel` is
+	// resolved at boot and its declared URL is printed in the banner. Deterministic
+	// — a static channel's `resolve` is pure (no spawn, no network) — so this is the
+	// hermetic proof that `main.ts` funnels `--channel`/`defaultChannel` through the
+	// channel registry instead of calling `startTunnel` directly. A live channel's
+	// real round-trip is the gated T-tunnel-e2e / T-ngrok-channel-e2e.
+	it("resolves a persisted static channel via the registry and prints its URL", { timeout: 30_000 }, async () => {
+		const { home, rootDir } = tempDirs();
+		const publicUrl = "https://openhammer-static.example.test";
+		const settings: Settings = {
+			version: 1,
+			channels: [{ id: "deployed", kind: "static-url", mode: "static", options: { publicUrl } }],
+			defaultChannel: "deployed",
+			mcp: { allowedClients: [] },
+		};
+		saveSettings(settingsPath(home), settings);
+		const { child, baseUrl, stdout } = await boot({ home, rootDir });
+		try {
+			const res = await fetch(`${baseUrl}/health`);
+			expect(res.status).toBe(200);
+			expect(stdout()).toContain(`Tunnel URL:         ${publicUrl}/mcp`);
+			child.kill("SIGTERM");
+			expect(await awaitExit(child)).toBe(0);
+		} finally {
+			await ensureDead(child);
+			rmSync(home, { recursive: true, force: true });
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
 });
