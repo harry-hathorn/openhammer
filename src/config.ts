@@ -73,11 +73,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 }
 
 /**
- * Parse an `MCP_ALLOWED_CLIENTS` env value into a client-name list: split on
- * commas/newlines, trim each entry, and drop empties. A bare `*` (or `["*"]`) means
- * any client — the default, enforced in the auth middleware (17r).
+ * Parse a client-name list from a comma/newline-separated string: split on
+ * commas/newlines, trim each entry, and drop empties. The single source of the
+ * `allowedClients` list format — shared by `MCP_ALLOWED_CLIENTS` (env, here in
+ * {@link resolveConfig}) and the `mcp` section's field (the section wizard, 17l).
+ * A bare `*` (or `["*"]`) means any client — the default, enforced in the auth
+ * middleware (17r).
  */
-function parseClientList(value: string): string[] {
+export function parseClientList(value: string): string[] {
 	return value
 		.split(/[,\n]/)
 		.map((entry) => entry.trim())
