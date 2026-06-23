@@ -33,8 +33,20 @@ afterEach(() => {
 });
 
 describe("getChannel", () => {
+	it("pre-registers the cloudflare provider (17h wiring)", () => {
+		// Must be the first test: this reads the module-load registration, before any
+		// afterEach unregisters it. index.ts calls registerChannel(cloudflareProvider).
+		const provider = getChannel("cloudflare");
+		expect(provider).toBeDefined();
+		expect(provider?.kind).toBe("cloudflare");
+		expect(provider?.mode).toBe("live");
+		expect(provider?.fields).toEqual([]);
+	});
+
 	it("returns undefined for an unregistered kind", () => {
-		expect(getChannel("cloudflare")).toBeUndefined();
+		// cloudflare is now pre-registered by index.ts (17h), so use a kind no
+		// provider has landed yet to exercise the absent path.
+		expect(getChannel("ngrok")).toBeUndefined();
 	});
 });
 

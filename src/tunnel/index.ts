@@ -20,6 +20,7 @@
  * unregistered/unknown kind is the graceful path, not a defect.
  */
 import type { ChannelKind } from "../config/settings.ts";
+import { cloudflareProvider } from "./providers/cloudflare.ts";
 import type { ChannelProvider } from "./types.ts";
 
 export type { ChannelHandle, ChannelProvider } from "./types.ts";
@@ -29,6 +30,12 @@ export type { ChannelHandle, ChannelProvider } from "./types.ts";
  * populate it. Mutate via {@link registerChannel} / {@link unregisterChannel}.
  */
 export const CHANNELS: Partial<Record<ChannelKind, ChannelProvider>> = {};
+
+// Each provider self-registers here — the "one registry line" a new channel adds
+// (17h cloudflare; 17i ngrok and 17j static land theirs). Declared after CHANNELS
+// so the call runs in source order (no TDZ); the provider modules only export a
+// const, never call registerChannel themselves (the ESM-cycle trap).
+registerChannel(cloudflareProvider);
 
 /**
  * Register a provider under its `kind` (a later registration overwrites an
