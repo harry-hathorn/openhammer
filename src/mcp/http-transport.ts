@@ -22,13 +22,16 @@ import type { FastifyInstance } from "fastify";
 import { createAuthMiddleware } from "../auth/middleware.ts";
 import type { Config } from "../config.ts";
 import { createMcpServer } from "./server.ts";
+import { attachRequestRecorder, type RequestRecorder } from "./telemetry.ts";
 
-/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + optional client allowlist (17r). */
+/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + optional client allowlist (17r) + optional recorder (17s). */
 export interface McpHttpRoutesOptions {
 	token: string;
 	config: Config;
 	/** The `allowedClients` allowlist — `[]`/`["*"]` (default) = any client; else a User-Agent filter (17r). */
 	allowedClients?: string[];
+	/** When set, each `POST /mcp` is recorded into the ring buffer for `openhammer monitor` (spec 17s). */
+	recorder?: RequestRecorder;
 }
 
 /**
@@ -38,7 +41,13 @@ export interface McpHttpRoutesOptions {
  * pass the options as the 2nd arg. Either keeps the routes on the parent scope.
  */
 export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoutesOptions): Promise<void> {
-	const { token, config, allowedClients = [] } = opts;
+	const { token, config, allowedClients = [], recorder } = opts;
+
+	// Live activity capture (17s): the `onRequest` hook records each `POST /mcp`.
+	// No-op per request when no recorder is wired (the default — existing tests).
+	if (recorder !== undefined) {
+		attachRequestRecorder(fastify, recorder);
+	}
 
 	// Auth on POST only — discovery (`/.well-known/*`) and `/health` stay open.
 	fastify.post("/mcp", {
