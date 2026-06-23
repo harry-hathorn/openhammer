@@ -1,6 +1,5 @@
 /**
- * Fastify app factory (spec 12c). Copy-adapted from
- * `the-reference/.../api/server.ts`: `@fastify/cors` (open, for browser MCP
+ * Fastify app factory (spec 12c). `@fastify/cors` (open, for browser MCP
  * clients), `GET /health`, the protected-resource discovery pointer, and the
  * `/mcp` Streamable-HTTP routes — plus global error + 404 handlers.
  *

@@ -75,7 +75,7 @@ export function createAuthMiddleware(token: string, config: Config): preHandlerH
 	const expected = Buffer.from(token);
 	// `async` is load-bearing: a synchronous arity-2 hook that returns void makes
 	// Fastify wait for a never-called `done()` and the request hangs. Returning a
-	// Promise (async) is how Fastify advances the lifecycle (matches the-reference).
+	// Promise (async) is how Fastify advances the lifecycle.
 	return async (request, reply) => {
 		const presented = parseBearer(request.headers.authorization);
 		const ok = presented !== undefined && constantTimeEquals(presented, expected);
