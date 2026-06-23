@@ -31,7 +31,7 @@ const MCP_URL = process.env.MCP_URL ?? "http://fixture-server:3000/mcp";
 const MCP_TOKEN = process.env.MCP_TOKEN ?? "fixture-compose-bearer-token";
 
 /** The real server's `createAllTools` order — exactly what `tools/list` returns. */
-const REAL_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const REAL_TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"];
 
 /** compose interleaves per-service stdout; a prefix keeps the run readable. */
 function log(message: string): void {
@@ -91,10 +91,10 @@ async function runFixtureEcho(client: Client, tools: ReadonlyArray<{ name: strin
 	log("tools/call ok: echo round-trip matched");
 }
 
-/** Real-server path (7 tools): drive each tool end-to-end over the wire. */
+/** Real-server path (8 tools): drive each capability tool end-to-end over the wire. */
 async function runRealServer(client: Client, tools: ReadonlyArray<{ name: string }>): Promise<void> {
 	const names = tools.map((t) => t.name);
-	assert.deepEqual(names, REAL_TOOL_NAMES, `expected the 7 real tools, got ${names.join(", ")}`);
+	assert.deepEqual(names, REAL_TOOL_NAMES, `expected the 8 real tools, got ${names.join(", ")}`);
 	log(`tools/list ok: ${names.join(", ")}`);
 
 	// bash — pure stdout echo.
@@ -152,7 +152,7 @@ async function runRealServer(client: Client, tools: ReadonlyArray<{ name: string
 	);
 	expectOk(await client.callTool({ name: "read", arguments: { path: "e.txt" } }), /gamma/, "edit(readback)");
 
-	log("tools/call ok: all 7 tools round-tripped");
+	log("tools/call ok: all 7 capability tools round-tripped");
 }
 
 async function runOnce(): Promise<void> {

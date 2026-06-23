@@ -7,8 +7,9 @@
  * 405s are asserted via `inject` against the same app.
  *
  * This is the focused integration view for 12b (tools/list + gate + 405s); the
- * full Tier-1 suite that drives all 7 tools + the backstop over `POST /mcp`
- * lands separately in `test/e2e-hermetic/mcp.e2e.test.ts` (task T-mcp-e2e).
+ * full Tier-1 suite that drives all 7 capability tools + the backstop over
+ * `POST /mcp` lands separately in `test/e2e-hermetic/mcp.e2e.test.ts` (task
+ * T-mcp-e2e).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -23,7 +24,7 @@ import type { Config } from "../config.ts";
 import { mcpHttpRoutes } from "./http-transport.ts";
 
 const TOKEN = "a-real-opaque-base64url-token-value";
-const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"];
 
 /** Minimal `Config` — only `rootDir`/`maxResponseBytes` reach the transport. */
 function configWith(rootDir: string): Config {
@@ -88,7 +89,7 @@ describe("mcpHttpRoutes", () => {
 		expect(res.statusCode).toBe(405);
 	});
 
-	it("a real SDK client runs tools/list over POST /mcp and sees all 7 tools", async () => {
+	it("a real SDK client runs tools/list over POST /mcp and sees all 8 tools", async () => {
 		const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
 		// The bearer rides on every request via `requestInit` headers — no
 		// `authProvider`, so the SDK never tries the OAuth discovery flow.

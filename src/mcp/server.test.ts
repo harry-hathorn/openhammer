@@ -7,8 +7,9 @@
  * This is the Tier-0 unit view of the server (the full Tier-1 in-process E2E
  * over `POST /mcp` + bearer auth lands in `test/e2e-hermetic/mcp.e2e.test.ts`,
  * task T-mcp-e2e). Here we assert the four behaviours the spec pins for 12a:
- * ListTools = the 7 tools in stable order; an unknown tool → `isError` (no 500);
- * a tool returning `err` → `isError` without throwing; and the backstop replacing
+ * ListTools = the 8 tools (`guide` + the 7 capability tools) in stable order; an
+ * unknown tool → `isError` (no 500); a tool returning `err` → `isError` without
+ * throwing; and the backstop replacing
  * oversized content with a single `response_too_large` block.
  */
 
@@ -21,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createMcpServer } from "./server.ts";
 
-const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"];
 
 /** Connect a real SDK `Client` to `server` over a linked in-memory transport. */
 async function connectClient(server: ReturnType<typeof createMcpServer>): Promise<Client> {
@@ -85,7 +86,7 @@ describe("createMcpServer", () => {
 		rmSync(rootDir, { recursive: true, force: true });
 	});
 
-	it("ListTools returns all 7 tools in the stable registry order", async () => {
+	it("ListTools returns all 8 tools in the stable registry order", async () => {
 		await withServer(rootDir, 512_000, async (client) => {
 			const { tools } = await client.listTools();
 			expect(tools.map((t) => t.name)).toEqual(TOOL_NAMES);

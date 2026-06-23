@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAllTools } from "./index.ts";
 
-const EXPECTED_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+const EXPECTED_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 
 describe("createAllTools", () => {
-	it("returns exactly 7 entries named read,bash,edit,write,grep,find,ls (in order)", () => {
+	it("returns exactly 8 entries named guide,read,bash,edit,write,grep,find,ls (in order)", () => {
 		// `/srv` is the spec's nominal root — the names/order are rootDir-independent;
 		// rootDir only flows into the handler closure, not the tool descriptors.
 		const entries = createAllTools("/srv");
-		expect(entries).toHaveLength(7);
+		expect(entries).toHaveLength(8);
 		expect(entries.map((e) => e.tool.name)).toEqual([...EXPECTED_NAMES]);
 	});
 
@@ -25,7 +25,7 @@ describe("createAllTools", () => {
 			expect(entry.tool.inputSchema.type).toBe("object");
 			// No two tools share a name.
 		}
-		expect(new Set(entries.map((e) => e.tool.name)).size).toBe(7);
+		expect(new Set(entries.map((e) => e.tool.name)).size).toBe(8);
 	});
 
 	it("handler forwards args to execute and returns a Result<ToolOk> on the ok branch", async () => {
