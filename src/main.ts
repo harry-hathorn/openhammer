@@ -9,14 +9,21 @@
  * surface as a one-line actionable message on stderr plus a non-zero exit; a
  * clean `SIGINT`/`SIGTERM` exits 0 after closing Fastify and killing the tunnel
  * child (no orphan processes, no stack trace).
+ *
+ * `main` is exported so the CLI dispatcher (`src/cli.ts`, 17o) can delegate
+ * `openhammer start` (and the default command) to this same boot path — one
+ * source of truth for binding + lifecycle. The module-level auto-run below fires
+ * only when this file is the direct entrypoint (`npm start` / `node dist/main.js`),
+ * so importing `main` from the CLI (or a test) does **not** boot a server.
  */
+import { pathToFileURL } from "node:url";
 import { ensureToken } from "./auth/token.ts";
 import { loadConfig } from "./config.ts";
 import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
 import { startTunnel } from "./tunnel/cloudflare.ts";
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
 	const config = loadConfig();
 	const { token } = await ensureToken(config);
 
@@ -53,8 +60,15 @@ async function main(): Promise<void> {
 	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
-main().catch((error: unknown) => {
-	const message = error instanceof Error ? error.message : String(error);
-	console.error(`OpenHammer failed to start: ${message}`);
-	process.exit(1);
-});
+// Auto-run only when invoked as the entrypoint (`npm start` / `node dist/main.js`),
+// not when imported by the CLI dispatcher (17o) or a test — otherwise importing
+// `main` would boot a server. Matches the `src/cli.ts` guard: under `tsx src/main.ts`
+// (the boot E2E) `process.argv[1]` resolves to this file, so the guard fires.
+const invokedDirectly = typeof process.argv[1] === "string" && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (invokedDirectly) {
+	main().catch((error: unknown) => {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`OpenHammer failed to start: ${message}`);
+		process.exit(1);
+	});
+}
