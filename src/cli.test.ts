@@ -150,6 +150,18 @@ describe("dispatch — arg → command routing", () => {
 		expect(code).toBe(0);
 	});
 
+	it("routes `monitor` to the monitor handler", async () => {
+		let called = false;
+		const code = await dispatch(parsed("monitor"), {
+			monitor: async () => {
+				called = true;
+				return 0;
+			},
+		});
+		expect(called).toBe(true);
+		expect(code).toBe(0);
+	});
+
 	it("--help prints usage to stdout and exits 0 (help wins over the command)", async () => {
 		const out = recordingStream();
 		const err = recordingStream();
