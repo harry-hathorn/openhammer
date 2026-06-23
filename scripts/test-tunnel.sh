@@ -51,7 +51,7 @@ TUNNEL_URL_RE='https://[a-z0-9-]+\.trycloudflare\.com'
 # Must match the `server` service's `MCP_AUTH_TOKEN` in docker-compose.yml.
 MCP_TOKEN="real-compose-bearer-token"
 READY_WAIT_S=90 # generous: server boot + cloudflared edge registration.
-ROUTE_WAIT_S=30 # edge warm-up + DNS for the freshly-minted trycloudflare subdomain.
+ROUTE_WAIT_S=90 # edge warm-up + DNS for the fresh trycloudflare subdomain. 30s proved marginal (the failing run's healthy tunnel still hadn't routed at ~31s); a hard-failed edge is caught separately + fast, so this budget only guards the warm-up tail.
 POLL_INTERVAL_S=2
 
 # --- teardown ----------------------------------------------------------------
@@ -72,6 +72,44 @@ server_health() {
 tunnel_url() {
 	docker compose "${PROFILES[@]}" logs cloudflared 2>/dev/null |
 		grep -oE "$TUNNEL_URL_RE" | head -n1 || true
+}
+
+# cloudflared (≥ 2026.x) runs a connectivity PRE-CHECK against its tunnel-edge
+# regions on startup and logs `precheck complete hard_fail=<bool>`. A hard fail
+# means the host's egress CANNOT reach Cloudflare's edge (a region's UDP+TCP is
+# blocked), so the public URL will NEVER route — probing is pointless. Used in an
+# `if` (not `$()`), so returning grep's non-zero on "no hard fail" is fine.
+edge_hard_failed() {
+	docker compose "${PROFILES[@]}" logs cloudflared 2>/dev/null |
+		grep -q 'precheck complete hard_fail=true'
+}
+
+# Probes `<url>/health` through the public trycloudflare URL. ALWAYS exits 0 —
+# safe under `set -e` inside `$(...)` (verified: `x=$(false)` aborts under
+# `set -euo pipefail`, so success/failure must be encoded in stdout, not the rc).
+# Prints "OK" on HTTP 200, else a diagnostic tag: DNS-FAIL / HTTP-<code> / TIMEOUT
+# / FETCH-ERR(<code>). An AbortController bounds each attempt so a stalled TLS/TCP
+# handshake can't consume the retry budget.
+probe_public_url() {
+	PROBE_URL="${1}" node -e '
+		const u = process.env.PROBE_URL;
+		const ctrl = new AbortController();
+		const to = setTimeout(() => ctrl.abort(), 5000);
+		fetch(u, { signal: ctrl.signal })
+			.then(async (r) => {
+				clearTimeout(to);
+				process.stdout.write(r.status === 200 ? "OK" : "HTTP-" + r.status);
+			})
+			.catch((e) => {
+				clearTimeout(to);
+				const c = e && e.cause;
+				const code = (c && c.code) || (c && c.message) || String(e);
+				const tag = /ENOTFOUND|EAI/.test(code) ? "DNS-FAIL"
+					: /abort|AbortError/i.test(String(e)) ? "TIMEOUT"
+					: "FETCH-ERR(" + code.slice(0, 40) + ")";
+				process.stdout.write(tag);
+			});
+	'
 }
 
 # --- bring up server + cloudflared ------------------------------------------
@@ -105,25 +143,38 @@ if [[ -z "$url" ]]; then
 fi
 
 # --- probe the public URL until it actually routes --------------------------
-# cloudflared prints the trycloudflare URL several seconds BEFORE Cloudflare's
-# edge is ready to route traffic to it, and the brand-new subdomain may not
-# resolve on the first lookup. Finding the URL in the logs is not enough — hit
-# `/health` through the PUBLIC url until it answers 200 (proves edge → tunnel →
-# server), else the runner's first request dies with a bare `fetch failed`
-# (TCP/DNS), not an HTTP error. Node's global fetch is used (node is guaranteed
-# present — tsx runs the runner next); PROBE_URL env avoids quoting the URL.
+# Finding the URL in cloudflared's stderr is NOT enough, for two reasons:
+#   (a) cloudflared prints it BEFORE the edge routes traffic, and the brand-new
+#       subdomain may not resolve on the host for tens of seconds (DNS
+#       propagation / negative caching on the host's resolver);
+#   (b) if cloudflared's connectivity PRE-CHECK hard-fails, the host can't reach
+#       Cloudflare's tunnel edge and the URL will NEVER route — catch that here
+#       and fail fast instead of burning the full ROUTE_WAIT_S budget.
+# `probe_public_url` (helper above) classifies each failure so a failed run says
+# exactly what was wrong, instead of a blind "(edge warm-up / DNS)" guess.
+if edge_hard_failed; then
+	echo "FAIL: cloudflared's edge connectivity pre-check hard-failed — this host cannot reach Cloudflare's tunnel edge (a region's UDP+TCP is blocked). The public URL will never route; this is a network-egress problem, not an OpenHammer bug." >&2
+	exit 1
+fi
+
 echo "[test-tunnel] probing public URL until it routes (≤ ${ROUTE_WAIT_S}s)…"
 routed=0
+last_diag=""
 deadline=$((SECONDS + ROUTE_WAIT_S))
 while ((SECONDS < deadline)); do
-	if PROBE_URL="${url}/health" node -e "fetch(process.env.PROBE_URL).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+	last_diag="$(probe_public_url "${url}/health" 2>/dev/null)"
+	if [[ "$last_diag" == "OK" ]]; then
 		routed=1
 		break
 	fi
 	sleep "$POLL_INTERVAL_S"
 done
 if ((routed != 1)); then
-	echo "FAIL: public URL ${url} never routed within ${ROUTE_WAIT_S}s (edge warm-up / DNS)." >&2
+	if edge_hard_failed; then
+		echo "FAIL: cloudflared's edge connectivity pre-check hard-failed during probing — this host cannot reach Cloudflare's tunnel edge. The public URL will never route; this is a network-egress problem, not an OpenHammer bug." >&2
+	else
+		echo "FAIL: public URL ${url} never returned /health 200 within ${ROUTE_WAIT_S}s (last probe: ${last_diag}). DNS-FAIL ⇒ the host resolver isn't resolving the fresh subdomain; HTTP-5xx ⇒ edge is up but the origin is unreachable through the tunnel; TIMEOUT ⇒ the edge stalled mid-handshake." >&2
+	fi
 	docker compose "${PROFILES[@]}" logs cloudflared >&2 || true
 	exit 1
 fi
