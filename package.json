@@ -27,7 +27,6 @@
 	"dependencies": {
 		"@fastify/cors": "^8.5.0",
 		"@modelcontextprotocol/sdk": "^1.29.0",
-		"@ngrok/ngrok": "^1.7.0",
 		"fastify": "^4.29.1"
 	},
 	"devDependencies": {

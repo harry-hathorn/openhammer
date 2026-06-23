@@ -142,10 +142,11 @@ export function createBinaryCheck(
 
 /**
  * The per-channel check. A **live** channel's provider must be `isAvailable`
- * (its binary/secret present — `cloudflared` for cloudflare, the authtoken for
- * ngrok); a **static** channel's declared endpoint must be `probe`-reachable.
- * The full options bag merges the entry's non-secret `options` with its secrets
- * (`getCredentials`) so a secret-gated `isAvailable` (ngrok) sees its value.
+ * (its binary present on PATH — `cloudflared` for cloudflare, `ngrok` for ngrok;
+ * a future live provider may instead gate on a secret); a **static** channel's
+ * declared endpoint must be `probe`-reachable. The full options bag merges the
+ * entry's non-secret `options` with its secrets (`getCredentials`) so a
+ * secret-gated `isAvailable` (or a `probe`) sees its values.
  * `not available` / unreachable → `warn` (the channel won't function, but the
  * server still boots localhost-only); an unregistered kind → `fail` (config error).
  */
