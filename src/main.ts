@@ -42,7 +42,7 @@ export async function main(): Promise<void> {
 	const config = resolveConfig({ channel: argv.channel }, process.env, settings);
 	const { token } = await ensureToken(config);
 
-	const fastify = await buildFastify(config, token);
+	const fastify = await buildFastify(config, token, config.allowedClients);
 	await fastify.listen({ port: config.port, host: config.host });
 
 	// Resolve the boot channel via the registry (17q). `null` + a `notice` is the

@@ -21,7 +21,11 @@ import { registerWellKnown } from "./mcp/well-known.ts";
  * `/mcp` transport, and global error/404 handlers. Does not listen — the caller
  * owns binding + lifecycle (see module header).
  */
-export async function buildFastify(config: Config, token: string): Promise<FastifyInstance> {
+export async function buildFastify(
+	config: Config,
+	token: string,
+	allowedClients: string[] = [],
+): Promise<FastifyInstance> {
 	// pino-pretty only in development (`NODE_ENV=development`) — production gets
 	// raw JSON for structured log shipping; tests run with `NODE_ENV=test`, so
 	// they take the plain branch and never spawn a pretty-print worker thread.
@@ -75,7 +79,7 @@ export async function buildFastify(config: Config, token: string): Promise<Fasti
 	// wired inside `mcpHttpRoutes`. Called directly (it is an async arity-2
 	// function shaped for this) so the routes land on the parent scope alongside
 	// `/health` + well-known, with no plugin wrapper or `fastify-plugin` dep.
-	await mcpHttpRoutes(fastify, { token, config });
+	await mcpHttpRoutes(fastify, { token, config, allowedClients });
 
 	// Global error handler — preserves Fastify's `statusCode` (e.g. 400 on a
 	// malformed JSON body) and otherwise 500s. The `/mcp` POST handler calls

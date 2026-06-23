@@ -23,10 +23,12 @@ import { createAuthMiddleware } from "../auth/middleware.ts";
 import type { Config } from "../config.ts";
 import { createMcpServer } from "./server.ts";
 
-/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config. */
+/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + optional client allowlist (17r). */
 export interface McpHttpRoutesOptions {
 	token: string;
 	config: Config;
+	/** The `allowedClients` allowlist — `[]`/`["*"]` (default) = any client; else a User-Agent filter (17r). */
+	allowedClients?: string[];
 }
 
 /**
@@ -36,11 +38,11 @@ export interface McpHttpRoutesOptions {
  * pass the options as the 2nd arg. Either keeps the routes on the parent scope.
  */
 export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoutesOptions): Promise<void> {
-	const { token, config } = opts;
+	const { token, config, allowedClients = [] } = opts;
 
 	// Auth on POST only — discovery (`/.well-known/*`) and `/health` stay open.
 	fastify.post("/mcp", {
-		preHandler: createAuthMiddleware(token, config),
+		preHandler: createAuthMiddleware(token, config, allowedClients),
 		handler: async (req, reply) => {
 			// Per-request server + transport — stateless, isolates clients.
 			const server = createMcpServer(config.rootDir, config.maxResponseBytes);
