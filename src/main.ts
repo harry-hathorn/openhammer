@@ -29,6 +29,8 @@ import { ensureToken } from "./auth/token.ts";
 import { parseArgs } from "./cli/args.ts";
 import { loadSettings } from "./config/settings.ts";
 import { resolveConfig } from "./config.ts";
+import { RequestRecorder } from "./mcp/telemetry.ts";
+import { startStatusSocket } from "./observability/status-socket.ts";
 import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
 import { resolveChannelHandle } from "./tunnel/boot.ts";
@@ -42,8 +44,21 @@ export async function main(): Promise<void> {
 	const config = resolveConfig({ channel: argv.channel }, process.env, settings);
 	const { token } = await ensureToken(config);
 
-	const fastify = await buildFastify(config, token, config.allowedClients);
+	// Live activity capture (17s): one recorder feeds the transport's `onRequest`
+	// hook (records each `POST /mcp`) and the status socket (streams it to
+	// `openhammer monitor`). Always created so the hook is wired — the socket is
+	// the best-effort part (null when it can't bind).
+	const recorder = new RequestRecorder();
+	const fastify = await buildFastify(config, token, config.allowedClients, recorder);
 	await fastify.listen({ port: config.port, host: config.host });
+
+	// The local inspector channel (17s): `~/.openhammer/openhammer.sock` (0600).
+	// Null-safe — a bind failure logs + continues serving; the bearer gate (not
+	// the socket) is the real gate.
+	const statusSocket = await startStatusSocket(recorder, { warn: (message) => fastify.log.warn(message) });
+	if (statusSocket === null) {
+		fastify.log.warn("status socket unavailable — `openhammer monitor` will not work");
+	}
 
 	// Resolve the boot channel via the registry (17q). `null` + a `notice` is the
 	// null-safe localhost-only fallback (no channel, or the channel failed to
@@ -74,6 +89,12 @@ export async function main(): Promise<void> {
 		shuttingDown = true;
 		fastify.log.info({ signal }, "shutting down");
 		await fastify.close();
+		// Drop the status socket (drops monitor clients + removes the file) and the
+		// recorder's subscribers — best-effort (the `12b` `.catch(()=>{})` idiom).
+		if (statusSocket !== null) {
+			void statusSocket.close().catch(() => {});
+		}
+		recorder.close();
 		// Best-effort teardown (the `12b` per-promise `.catch(()=>{})` idiom): a
 		// live channel's `stop` is idempotent; never block the exit on it.
 		const stop = handle?.stop;
