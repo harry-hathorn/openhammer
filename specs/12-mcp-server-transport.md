@@ -1,13 +1,12 @@
 # 12 — MCP Server, HTTP Transport & Fastify Build
 
 ## Purpose
-The integration core: an MCP `Server` exposing the 7 tools (with the `MAX_RESPONSE_BYTES` backstop), a stateless Streamable-HTTP transport mounted at `POST /mcp` behind bearer auth, and the Fastify app (CORS, `/health`, well-known) that boots it. This is the the-reference wiring copied over.
+The integration core: an MCP `Server` exposing the 7 tools (with the `MAX_RESPONSE_BYTES` backstop), a stateless Streamable-HTTP transport mounted at `POST /mcp` behind bearer auth, and the Fastify app (CORS, `/health`, well-known) that boots it.
 
-## Source references (copy)
-- `/home/haz/source/redacted/the-reference/src/mcp-server/server.ts` — `createMcpServer`, `ListTools`/`CallTool` handlers, `MAX_RESPONSE_BYTES` backstop.
-- `/home/haz/source/redacted/the-reference/src/mcp-server/http-transport.ts` — `mcpHttpRoutes`, per-request `StreamableHTTPServerTransport`, header-flush + `reply.hijack()`, GET/DELETE → 405.
-- `/home/haz/source/redacted/the-reference/src/api/server.ts` — Fastify build, `@fastify/cors`, `/health`, error handlers, `listen`.
-- Files: `src/mcp/server.ts`, `src/mcp/http-transport.ts`, `src/server.ts`.
+## Files
+- `src/mcp/server.ts` — `createMcpServer`, `ListTools`/`CallTool` handlers, `MAX_RESPONSE_BYTES` backstop.
+- `src/mcp/http-transport.ts` — `mcpHttpRoutes`, per-request `StreamableHTTPServerTransport`, header-flush + `reply.hijack()`, GET/DELETE → 405.
+- `src/server.ts` — Fastify build, `@fastify/cors`, `/health`, error handlers, `listen`.
 
 ## Depends on
 - `src/tools/index.ts` → `createAllTools` (spec 10)
@@ -36,7 +35,7 @@ The integration core: an MCP `Server` exposing the 7 tools (with the `MAX_RESPON
 
 ## `src/mcp/http-transport.ts` — `mcpHttpRoutes(fastify, { token, config }): Promise<void>`
 - Attach the auth `preHandler` **to the POST /mcp route only** (so `/health` + well-known stay open): `fastify.post("/mcp", { preHandler: createAuthMiddleware(token, config), handler: ... })`.
-- **POST /mcp handler (copy the-reference exactly):**
+- **POST /mcp handler:**
   - per-request `server = createMcpServer(config.rootDir, config.maxResponseBytes)`.
   - `transport = new StreamableHTTPServerTransport({ enableJsonResponse: true })` — **stateless: do NOT pass `sessionIdGenerator`**.
   - `reply.raw.once("close", () => { try { void transport.close(); void server.close(); } catch {} })`.
@@ -54,7 +53,7 @@ The integration core: an MCP `Server` exposing the 7 tools (with the `MAX_RESPON
 - `GET /health` → `{ status: "ok" }` (no auth).
 - `registerWellKnown(fastify, baseUrl)` where `baseUrl = `http://${config.host}:${config.port}``.
 - `await fastify.register(mcpHttpRoutesPlugin, { token, config })` (wrap `mcpHttpRoutes` in a Fastify plugin if not already).
-- Global error + 404 handlers (copy the-reference).
+- Global error + 404 handlers.
 - **Return `fastify` WITHOUT calling `listen`.** The caller (`main.ts`, spec 14) owns binding + lifecycle.
   This split is required for testing (spec 15): the Tier-1 in-process E2E binds ephemeral **port 0** itself,
   and the Tier-2 boot E2E controls shutdown. (Behavior for `main.ts` is unchanged — it just calls `listen`.)
@@ -70,8 +69,8 @@ The integration core: an MCP `Server` exposing the 7 tools (with the `MAX_RESPON
 - `GET /mcp`, `DELETE /mcp` → 405. CORS expose-headers include `Mcp-Session-Id`.
 
 ## Decisions & deviations
-- **Stateless** (no `sessionIdGenerator`), matching the-reference. Per-request `Server` + `Transport`.
-- **Two adaptations from the-reference:** (1) tools return `Result<ToolOk>` (not raw data to `JSON.stringify`); the `CallTool` handler narrows. (2) a fallback `try/catch` around the handler catches genuine bugs as `isError` — expected failures come back as `err`, never thrown.
+- **Stateless** (no `sessionIdGenerator`). Per-request `Server` + `Transport`.
+- **Two design notes:** (1) tools return `Result<ToolOk>` (not raw data to `JSON.stringify`); the `CallTool` handler narrows. (2) a fallback `try/catch` around the handler catches genuine bugs as `isError` — expected failures come back as `err`, never thrown.
 - Backstop replaces the whole content (text or image) with a single `response_too_large` text block — a structured error, never a silently truncated body.
 
 ## Suggested plan items (atomic checkboxes)

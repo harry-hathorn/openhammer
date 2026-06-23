@@ -16,11 +16,10 @@
  * ("narrow / page the results"), never a silently truncated body. (Per-tool
  * truncation already bounds line/byte counts; this is the whole-response ceiling.)
  *
- * Copy-adapted from `the-reference/.../mcp-server/server.ts`: the the-reference
- * `JSON.stringify(result)` payload path is replaced by the Result model (tools
- * already return `ToolOk` content blocks), and the per-tool permission filtering
- * is gone — bearer auth lives in the transport `preHandler` (spec 11/12b), so the
- * server sees only authorized requests. The version comes straight from
+ * Tools return `ToolOk` content blocks directly (the Result model — no raw
+ * `JSON.stringify(result)` payload path), and there is no per-tool permission
+ * filtering — bearer auth lives in the transport `preHandler` (spec 11/12b), so
+ * the server sees only authorized requests. The version comes straight from
  * `package.json` (single source).
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";

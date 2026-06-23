@@ -4,7 +4,7 @@
 Define the contract between tools and the MCP server (`McpToolEntry`), and the registry that builds all 7 tool entries bound to `MCP_ROOT_DIR`. This is the glue spec 12 consumes.
 
 ## Source references
-- Entry-shape pattern: `/home/haz/source/redacted/the-reference/src/mcp-server/types.ts` (`McpToolDefinition { tool, handler }`) — adapted (we drop `permission`; `handler` returns a `Result`).
+- Entry-shape pattern: `{ tool, handler }` entries — adapted (no per-tool `permission`; `handler` returns a `Result`).
 - Tool factory shape: `/home/haz/source/pi/packages/coding-agent/src/core/tools/index.ts` (`createAllTools`).
 - Files: `src/mcp/types.ts`, `src/tools/index.ts`.
 

@@ -8,7 +8,7 @@ analogue of the Tier-1 canary — same SDK-client logic, just across the Docker 
 
 ## Source references (copy/adapt)
 - Topology + `--exit-code-from` pattern: the user's docker-compose reference (adapted from SSE to **Streamable HTTP**).
-- Server wiring copied from `the-reference/src/mcp-server/{server,http-transport}.ts` (spec 12) and mirrored by `test/fixtures/minimal-mcp-server.ts`.
+- Server wiring per spec 12 (`src/mcp/{server,http-transport}.ts`), mirrored by `test/fixtures/minimal-mcp-server.ts`.
 - Files: `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `test/compose/run-e2e.ts`, `test/fixtures/minimal-mcp-server.ts`, `scripts/test-tunnel.sh`.
 
 ## Depends on

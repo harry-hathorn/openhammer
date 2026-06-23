@@ -1,7 +1,7 @@
 # OpenHammer — Coding Standards
 
 > Applies to **every** task. Referenced from `AGENTS.md` (the high-signal distillation); this doc holds
-> the detail/rationale. The reference codebases (pi for tools, the-reference for MCP wiring) set the de facto
+> the detail/rationale. The reference codebase (pi for tools) sets the de facto
 > style; this codifies the deliberate choices and deviations — including where we deliberately diverge from
 > the Google TS guide and the nodejs-cli best-practices for the sake of **verbatim pi porting**.
 

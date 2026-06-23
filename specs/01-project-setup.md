@@ -5,7 +5,7 @@ Scaffold the greenfield OpenHammer project: package manifest, TypeScript config,
 
 ## Source references
 - Architecture & locked decisions: `~/.claude/plans/i-need-you-to-serialized-biscuit.md`
-- Package/manifest style: `/home/haz/source/redacted/the-reference/package.json` (ESM, scripts).
+- Package/manifest style: ESM (`"type": "module"`), npm scripts.
 
 ## Requirements
 
@@ -84,7 +84,7 @@ src/
 - `.env.example` lists all five vars with defaults.
 
 ## Decisions & deviations
-- **Biome over ESLint/Prettier** — one tool for lint+format, matches pi's toolchain, faster. (the-reference uses ESLint+Prettier; we diverge for simplicity.)
+- **Biome over ESLint/Prettier** — one tool for lint+format, matches pi's toolchain, faster.
 - **No `dotenv`** — Node 20 `--env-file` / shell env suffice; keeps deps minimal.
 - **No `jose`, no `sharp`** — see auth (spec 11) and read (spec 03).
 
