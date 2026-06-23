@@ -1,14 +1,12 @@
 /**
  * Stateless Streamable-HTTP transport mounted at `/mcp` behind bearer auth
- * (spec 12b). Copy-adapted from `the-reference/.../mcp-server/http-transport.ts`:
- * the the-reference global `mcpAuthMiddleware` preHandler + Firebase delegation are
- * gone — here the auth `preHandler` is attached to the **POST `/mcp` route only**,
- * so `/health` and `/.well-known/*` stay open (discovery precedes auth). The
- * per-request `createMcpServer(bigquery, user)` becomes
- * `createMcpServer(config.rootDir, config.maxResponseBytes)` — no decorators.
+ * (spec 12b). The auth `preHandler` is attached to the **POST `/mcp` route
+ * only**, so `/health` and `/.well-known/*` stay open (discovery precedes auth).
+ * Each request builds a fresh `createMcpServer(config.rootDir,
+ * config.maxResponseBytes)`.
  *
  * **Per-request `Server` + `Transport`, no `sessionIdGenerator`** (stateless,
- * matching the-reference + the SDK's "stateless mode"): every POST builds a fresh
+ * the SDK's "stateless mode"): every POST builds a fresh
  * pair, so clients never share state and the process holds no session table.
  *
  * The header-flush loop is load-bearing: the SDK writes directly to `reply.raw`,
@@ -58,7 +56,7 @@ export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoute
 			});
 
 			// SDK optional-callback type friction — cast through `Transport` (the one
-			// documented `as` exception, same as the-reference + AGENTS.md).
+			// documented `as` exception, per AGENTS.md).
 			await server.connect(transport as unknown as Transport);
 
 			// Flush Fastify's accumulated headers (CORS, etc.) onto the raw response

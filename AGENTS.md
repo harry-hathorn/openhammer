@@ -71,7 +71,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 
 - Port tool `execute` **verbatim** from `pi/.../core/tools/<x>.ts`; strip `@earendil-works/pi-*`, `pi-tui`, `ToolDefinition`/render, every `*Operations` seam, `ensureTool`→`isToolAvailable`. Convert pi's throws → `err(...)` (mechanical; control flow unchanged).
 - Use `src/tools/io.ts` Result-wrappers over throwing `node:fs` so tool bodies have **zero try/catch**.
-- Copy MCP/Fastify wiring from `the-reference` (`/home/haz/source/redacted/the-reference/src/{mcp-server,api}/`).
+- Wire MCP/Fastify per spec 12 (`src/mcp/server.ts`, `src/mcp/http-transport.ts`, `src/server.ts`) — stateless Streamable HTTP, per-request `Server` + `Transport`, bearer auth on POST `/mcp` only.
 
 ## Security & spawn hygiene
 
