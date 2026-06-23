@@ -40,10 +40,11 @@ optional `cloudflared` quick-tunnel.
 
 ---
 
-## The 7 tools
+## Tools
 
 | Tool | What it does |
 |---|---|
+| `guide` | Read-first orientation: the working-root contract + the tools (no params). |
 | `read` | Read a file (text or image), truncated to 2000 lines / 50KB (head). |
 | `bash` | Run a shell command; merged stdout+stderr, tail-truncated, full output spilled to a temp file. |
 | `edit` | Exact-text replacement (BOM/CRLF-preserving, fuzzy whitespace/quotes). |
@@ -82,7 +83,7 @@ To expose it publicly (ephemeral, no account): `npm start -- --tunnel` (needs th
 falls back to localhost-only if absent).
 
 Verify with the MCP Inspector: `npx @modelcontextprotocol/inspector` → POST `…/mcp` with the bearer →
-`initialize` → `tools/list` (expect 7 tools) → call each.
+`initialize` → `tools/list` (expect 8 tools: `guide` + the 7 capability tools) → call each.
 
 ## Configuration (env)
 

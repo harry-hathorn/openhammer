@@ -30,7 +30,8 @@ import { err, type Result } from "../tools/result.ts";
 import type { ToolOk } from "./types.ts";
 
 /**
- * Build a stateless MCP `Server` over the 7 tools, each bound to `rootDir`.
+ * Build a stateless MCP `Server` over the 8 tools (`guide` + the 7 capability
+ * tools), each bound to `rootDir`.
  *
  * `maxResponseBytes` is the whole-response cap (the `MAX_RESPONSE_BYTES`
  * backstop); it is threaded in from `config.maxResponseBytes` (spec 12b/12c)

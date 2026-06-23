@@ -9,7 +9,7 @@
  * point (the `CallTool` handler) turns an `err` into an `isError` response.
  *
  * `ToolContent` mirrors the SDK's content-block shapes but is OpenHammer-owned
- * (text + image is the whole surface across the 7 tools).
+ * (text + image is the whole surface across the 7 capability tools + `guide`).
  */
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Result } from "../tools/result.ts";
@@ -27,7 +27,7 @@ export interface ToolOk {
 
 /** What each tool module exports (logic + schema, no MCP coupling). */
 export interface ToolModule {
-	name: "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
+	name: "guide" | "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
 	description: string;
 	// The SDK's canonical JSON-Schema-object type (requires `type:"object"`; the
 	// `[x: string]: unknown` index absorbs arbitrary extra schema keys). Reusing it
