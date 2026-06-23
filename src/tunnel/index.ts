@@ -21,6 +21,7 @@
  */
 import type { ChannelKind } from "../config/settings.ts";
 import { cloudflareProvider } from "./providers/cloudflare.ts";
+import { ngrokProvider } from "./providers/ngrok.ts";
 import type { ChannelProvider } from "./types.ts";
 
 export type { ChannelHandle, ChannelProvider } from "./types.ts";
@@ -36,6 +37,7 @@ export const CHANNELS: Partial<Record<ChannelKind, ChannelProvider>> = {};
 // so the call runs in source order (no TDZ); the provider modules only export a
 // const, never call registerChannel themselves (the ESM-cycle trap).
 registerChannel(cloudflareProvider);
+registerChannel(ngrokProvider);
 
 /**
  * Register a provider under its `kind` (a later registration overwrites an
