@@ -51,6 +51,7 @@ TUNNEL_URL_RE='https://[a-z0-9-]+\.trycloudflare\.com'
 # Must match the `server` service's `MCP_AUTH_TOKEN` in docker-compose.yml.
 MCP_TOKEN="real-compose-bearer-token"
 READY_WAIT_S=90 # generous: server boot + cloudflared edge registration.
+ROUTE_WAIT_S=30 # edge warm-up + DNS for the freshly-minted trycloudflare subdomain.
 POLL_INTERVAL_S=2
 
 # --- teardown ----------------------------------------------------------------
@@ -103,13 +104,45 @@ if [[ -z "$url" ]]; then
 	exit 1
 fi
 
+# --- probe the public URL until it actually routes --------------------------
+# cloudflared prints the trycloudflare URL several seconds BEFORE Cloudflare's
+# edge is ready to route traffic to it, and the brand-new subdomain may not
+# resolve on the first lookup. Finding the URL in the logs is not enough — hit
+# `/health` through the PUBLIC url until it answers 200 (proves edge → tunnel →
+# server), else the runner's first request dies with a bare `fetch failed`
+# (TCP/DNS), not an HTTP error. Node's global fetch is used (node is guaranteed
+# present — tsx runs the runner next); PROBE_URL env avoids quoting the URL.
+echo "[test-tunnel] probing public URL until it routes (≤ ${ROUTE_WAIT_S}s)…"
+routed=0
+deadline=$((SECONDS + ROUTE_WAIT_S))
+while ((SECONDS < deadline)); do
+	if PROBE_URL="${url}/health" node -e "fetch(process.env.PROBE_URL).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+		routed=1
+		break
+	fi
+	sleep "$POLL_INTERVAL_S"
+done
+if ((routed != 1)); then
+	echo "FAIL: public URL ${url} never routed within ${ROUTE_WAIT_S}s (edge warm-up / DNS)." >&2
+	docker compose "${PROFILES[@]}" logs cloudflared >&2 || true
+	exit 1
+fi
+
 # --- drive the runner through the PUBLIC url --------------------------------
 mcp_url="${url}/mcp"
 echo "[test-tunnel] retargeting runner at ${mcp_url}"
-if MCP_URL="$mcp_url" MCP_TOKEN="$MCP_TOKEN" ./node_modules/.bin/tsx test/compose/run-e2e.ts; then
+# Trust the explicit "ALL CHECKS PASSED" marker over tsx's exit code: tsx (node
+# loader) has been observed to exit 0 even when the script calls process.exit(1),
+# so the raw rc is an unreliable pass/fail signal. Capture + tee the output.
+runner_log="$(mktemp)"
+set +e
+MCP_URL="$mcp_url" MCP_TOKEN="$MCP_TOKEN" ./node_modules/.bin/tsx test/compose/run-e2e.ts 2>&1 | tee "$runner_log"
+set -e
+if grep -q "ALL CHECKS PASSED" "$runner_log"; then
 	echo "[test-tunnel] PASSED: tools/call round-tripped through ${url}"
+	rm -f "$runner_log"
 	exit 0
 fi
-rc=$?
-echo "[test-tunnel] FAILED: runner exited ${rc} against ${mcp_url}" >&2
-exit "$rc"
+echo "[test-tunnel] FAILED: runner did not report success against ${mcp_url}" >&2
+rm -f "$runner_log"
+exit 1
