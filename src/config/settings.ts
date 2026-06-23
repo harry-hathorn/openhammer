@@ -138,9 +138,11 @@ function isChannelEntry(v: unknown): v is ChannelEntry {
  * Validate a parsed value as a full {@link Settings} doc and return it in a
  * canonical form; `null` when it is structurally off (wrong shape, unknown kind,
  * …). Whole-doc granularity — a single malformed entry means the doc is corrupt,
- * which `doctor` surfaces; the wizard always writes canonical docs.
+ * which `doctor` (17p) surfaces; the wizard always writes canonical docs. The
+ * single-source validator `doctor`'s config check reuses (rather than re-deriving
+ * the shape contract): a non-`null` result is a valid doc, `null` is corrupt.
  */
-function normalizeSettings(v: unknown): Settings | null {
+export function normalizeSettings(v: unknown): Settings | null {
 	if (typeof v !== "object" || v === null) return null;
 	const o = v;
 	if (!("version" in o) || typeof o.version !== "number") return null;

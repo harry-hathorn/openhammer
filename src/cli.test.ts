@@ -138,6 +138,18 @@ describe("dispatch — arg → command routing", () => {
 		expect(cfg.calls).toEqual([{ sub: "set", rest: ["mcp"] }]);
 	});
 
+	it("routes `doctor` to the doctor handler", async () => {
+		let called = false;
+		const code = await dispatch(parsed("doctor"), {
+			doctor: async () => {
+				called = true;
+				return 0;
+			},
+		});
+		expect(called).toBe(true);
+		expect(code).toBe(0);
+	});
+
 	it("--help prints usage to stdout and exits 0 (help wins over the command)", async () => {
 		const out = recordingStream();
 		const err = recordingStream();
@@ -279,6 +291,22 @@ describe("dispatch — real handlers against an isolated HOME", () => {
 			const out = recordingStream();
 			await dispatch(parsed("config", ["get"]), { stdout: out.stream });
 			expect(out.text()).toContain("(any)");
+		});
+	});
+
+	it("`doctor` runs the built-in checks against an isolated HOME and exits 0 (all pass)", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("doctor"), { stdout: out.stream });
+			expect(code).toBe(0);
+			const text = out.text();
+			expect(text).toContain("Ran 4 check(s)");
+			expect(text).toContain("[pass]");
+			// The four built-in check ids are reported regardless of status.
+			expect(text).toContain("config:");
+			expect(text).toContain("credentials:");
+			expect(text).toContain("rg:");
+			expect(text).toContain("fd:");
 		});
 	});
 
