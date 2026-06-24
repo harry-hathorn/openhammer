@@ -34,6 +34,16 @@ import { defaultIo } from "../prompts.ts";
 import type { ConfigField } from "../schema.ts";
 import { runWizard, type WizardIo } from "../wizard.ts";
 
+/**
+ * The section-picker select's message — the non-interactive address for the
+ * picker (spec 20g): the flag path builds its `flagIo` answers keyed by this, so
+ * the flag-driven {@link setSection} resolves the chosen section through the same
+ * `io.select` the interactive wizard uses. Exported (not a private literal) so
+ * the cli + the wizard share one source — a rename here can't silently break the
+ * flag path.
+ */
+export const SECTION_SELECT_PROMPT = "Settings section";
+
 /** Read the global registry's sections at call time (tests mutate CONFIG_SECTIONS — never snapshot at load). */
 function registrySections(): ConfigSection[] {
 	return Object.values(CONFIG_SECTIONS).filter((s): s is ConfigSection => s !== undefined);
@@ -96,7 +106,7 @@ export async function setSection(settings: Settings, deps: SetSectionDeps = {}):
 
 	// 1. Pick a section to edit.
 	const chosen = await io.select({
-		message: "Settings section",
+		message: SECTION_SELECT_PROMPT,
 		options: sections.map((s) => ({ value: s.id, label: s.label })),
 	});
 	if (chosen === null) return null; // cancel

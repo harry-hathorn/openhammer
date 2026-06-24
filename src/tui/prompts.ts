@@ -94,6 +94,51 @@ export const defaultIo: PromptIo = {
 };
 
 /**
+ * A flag-derived {@link PromptIo} — the non-interactive seam (spec 20g). `answers`
+ * is keyed by the prompt **message** (the picker select's fixed message + each
+ * field's `label`, both of which the wizard passes verbatim as `message`). A prompt
+ * whose message is present resolves to the flag value; one that is absent falls back
+ * so the wizard keeps driving instead of cancelling:
+ * - `select` — the provider/section picker. Absent → `null` (cancel); the flag
+ *   handler always supplies the picker, so this is defensive.
+ * - `text` — a field. Absent → the seeded `defaultValue` (the current value, via
+ *   `seedDefaults`) or `""`, so an unspecified field is **left unchanged** rather
+ *   than aborting the wizard (a required field is pre-checked by the handler).
+ * - `password` — a secret field. Absent → `null` (cancel); a required secret
+ *   without its flag is caught by the handler's required-field check first.
+ * - `confirm` — absent → the seeded `initialValue`; present → `"true"`/`"false"`.
+ *
+ * The picker-message keys come from the wizards' exported
+ * `CHANNEL_SELECT_PROMPT` / `SECTION_SELECT_PROMPT` (single source — no drift), and
+ * the field-label keys are read from the same provider/section `fields` the wizard
+ * renders, so message and key agree by construction.
+ */
+export function flagIo(answers: Record<string, string>): PromptIo {
+	const lookup = (message: string): string | undefined =>
+		Object.hasOwn(answers, message) ? answers[message] : undefined;
+	return {
+		async select(o) {
+			return lookup(o.message) ?? null;
+		},
+		async text(o) {
+			const v = lookup(o.message);
+			if (v !== undefined) return v;
+			return o.defaultValue ?? "";
+		},
+		async password(o) {
+			return lookup(o.message) ?? null;
+		},
+		async confirm(o) {
+			const v = lookup(o.message);
+			if (v === undefined) return o.initialValue ?? null;
+			return v === "true";
+		},
+		intro() {},
+		outro() {},
+	};
+}
+
+/**
  * Pick one of `options`. Resolves to the chosen `value`, or `null` on cancel.
  */
 export async function askSelect(options: AskSelectOptions, io: PromptIo = defaultIo): Promise<string | null> {

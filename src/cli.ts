@@ -20,14 +20,16 @@ import { pathToFileURL } from "node:url";
 import { type ParsedArgs, parseArgs } from "./cli/args.ts";
 import { authCommand } from "./cli/auth.ts";
 import { doctorCommand } from "./cli/doctor.ts";
+import { parseSubFlags, type SubFlags } from "./cli/flags.ts";
 import { monitorCommand } from "./cli/monitor.ts";
 import { CONFIG_SECTIONS } from "./config/sections.ts";
-import { loadSettings, saveSettings, settingsPath } from "./config/settings.ts";
+import { loadSettings, type Settings, saveSettings, settingsPath } from "./config/settings.ts";
 import { loadConfig } from "./config.ts";
 import { type BannerStream, printBanner } from "./tui/banner.ts";
 import type { ServerStatusState } from "./tui/dashboard/panels.ts";
-import { addChannel } from "./tui/wizards/channel.ts";
-import { setSection } from "./tui/wizards/section.ts";
+import { flagIo } from "./tui/prompts.ts";
+import { addChannel, CHANNEL_SELECT_PROMPT, type ProbeRunner, registryProviders } from "./tui/wizards/channel.ts";
+import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
 import { listChannels, removeChannel, setDefaultChannel } from "./tunnel/manage.ts";
 
 /** Injection seam for {@link runCli}'s side effects, so the banner/diagnostic behavior is unit-testable without a TTY. */
@@ -230,7 +232,7 @@ async function channelCommand(sub: string | undefined, rest: string[], io: Comma
 		case "list":
 			return listChannelsCmd(io);
 		case "add":
-			return await addChannelCmd(io);
+			return await addChannelCmd(rest, io);
 		case "remove":
 			return removeChannelCmd(rest[0], io);
 		case "use":
@@ -258,8 +260,20 @@ function listChannelsCmd(io: CommandIo): number {
 	return 0;
 }
 
-/** `channel add` — the interactive add wizard; persist the updated doc on success. */
-async function addChannelCmd(io: CommandIo): Promise<number> {
+/**
+ * `channel add` — interactive when flag-less, non-interactive (spec 20g) when any
+ * flag is present (`--provider`, `--default`, or a `--<field>` value). The two
+ * paths share {@link addChannel} + {@link persistAddedChannel}; only the `io`
+ * (real clack vs flag-derived) and the `--default` override differ.
+ */
+async function addChannelCmd(rest: string[], io: CommandIo): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const hasFlags = Object.keys(flags.values).length > 0 || flags.bools.size > 0;
+	return hasFlags ? addChannelFlags(flags, io) : addChannelInteractive(io);
+}
+
+/** `channel add` (interactive) — the add wizard over the registry; persist on success. */
+async function addChannelInteractive(io: CommandIo): Promise<number> {
 	const settings = loadSettings();
 	const result = await addChannel(settings, { stream: silentStream });
 	if (result === null) return 0; // cancelled / required-empty — no write, silent
@@ -267,12 +281,93 @@ async function addChannelCmd(io: CommandIo): Promise<number> {
 		io.stderr.write(`${result.error.message}\n`);
 		return 1;
 	}
-	const added = result.value.channels.at(-1);
-	saveSettings(settingsPath(), result.value);
-	const def = added !== undefined && added.id === result.value.defaultChannel ? " (default)" : "";
-	io.stdout.write(`Added ${added?.kind} channel ${added?.id}${def}.\n`);
+	persistAddedChannel(result.value, io, false);
 	return 0;
 }
+
+/**
+ * `channel add --provider <kind> [--<field> <value>]... [--default]` (spec 20g) —
+ * the non-interactive path. Reuses {@link addChannel} over a flag-derived
+ * {@link flagIo} (the picker + each field's flag value, keyed by the wizard's
+ * prompt messages — the picker constant + the field labels, so message and key
+ * agree by construction). Required fields without a flag are caught up front (a
+ * clear usage error, not a silent cancel); `--default` forces the new channel to be
+ * the default even when it isn't the first. The probe runs without an `ora` spinner
+ * (the headless path never loads the TUI-only devDependency) but still gates a
+ * static-channel add.
+ */
+async function addChannelFlags(flags: SubFlags, io: CommandIo): Promise<number> {
+	const providerName = flags.values.provider;
+	if (providerName === undefined) {
+		io.stderr.write("Usage: openhammer channel add --provider <kind> [--<field> <value>]... [--default]\n");
+		return 2;
+	}
+	const providers = registryProviders();
+	const provider = providers.find((p) => p.kind === providerName);
+	if (!provider) {
+		const available = providers.map((p) => p.kind).join(", ");
+		io.stderr.write(`Unknown channel provider: ${providerName}. Available: ${available}.\n`);
+		return 2;
+	}
+	// Required fields with no default must arrive as flags; catch them up front for a
+	// clear message (the wizard would otherwise cancel silently on a required-empty).
+	// (`kind !== "confirm"` narrows to the text/secret/select variants that carry
+	// `required` — a confirm always resolves to true/false, never required-empty.)
+	const missing = provider.fields
+		.filter((f) => f.kind !== "confirm" && f.required && f.default === undefined && flags.values[f.key] === undefined)
+		.map((f) => f.key);
+	if (missing.length > 0) {
+		io.stderr.write(`Missing required field(s) for ${provider.kind}: ${missing.join(", ")}\n`);
+		return 2;
+	}
+
+	// The flag-derived io: the picker answer + each provided field, keyed by the
+	// wizard's prompt messages (the picker constant + the field labels).
+	const answers: Record<string, string> = { [CHANNEL_SELECT_PROMPT]: provider.kind };
+	for (const field of provider.fields) {
+		const v = flags.values[field.key];
+		if (v !== undefined) answers[field.label] = v;
+	}
+
+	const settings = loadSettings();
+	const result = await addChannel(settings, {
+		io: flagIo(answers),
+		stream: silentStream,
+		probeRunner: silentProbeRunner,
+	});
+	if (result === null) {
+		// Defensive — the required-field check above means a null here is unexpected;
+		// surface it rather than exit 0 silent.
+		io.stderr.write("Channel not added (a required value was missing).\n");
+		return 1;
+	}
+	if (!result.ok) {
+		io.stderr.write(`${result.error.message}\n`);
+		return 1;
+	}
+	persistAddedChannel(result.value, io, flags.bools.has("default"));
+	return 0;
+}
+
+/** Persist the add result + print the confirmation, honoring `--default` (spec 20g). */
+function persistAddedChannel(settings: Settings, io: CommandIo, forceDefault: boolean): void {
+	let next = settings;
+	const added = next.channels.at(-1);
+	if (forceDefault && added !== undefined && next.defaultChannel !== added.id) {
+		next = { ...next, defaultChannel: added.id };
+	}
+	saveSettings(settingsPath(), next);
+	const def = added !== undefined && added.id === next.defaultChannel ? " (default)" : "";
+	io.stdout.write(`Added ${added?.kind} channel ${added?.id}${def}.\n`);
+}
+
+/**
+ * A spinner-free probe runner for the non-interactive path (spec 20g): runs the
+ * probe but prints nothing — `ora` is a TUI-only devDependency the headless/server
+ * deploy must not load. The probe still gates (a failed static-channel probe → no
+ * write), matching the interactive wizard minus the animation.
+ */
+const silentProbeRunner: ProbeRunner = (_label, fn) => fn();
 
 /** `channel remove <id>` — cascade-delete secrets + drop the entry; persist on success. */
 function removeChannelCmd(id: string | undefined, io: CommandIo): number {
@@ -315,7 +410,7 @@ async function configCommand(sub: string | undefined, rest: string[], io: Comman
 		case "get":
 			return getConfigCmd(io);
 		case "set":
-			return await setConfigCmd(rest[0], io);
+			return await setConfigCmd(rest, io);
 		default:
 			io.stderr.write(`${CONFIG_USAGE}\n`);
 			return 2;
@@ -333,14 +428,21 @@ function getConfigCmd(io: CommandIo): number {
 }
 
 /**
- * `config set [section]` — the interactive section wizard (default section `mcp`).
- * A named section must exist in the registry (only `mcp` ships today); the wizard
- * then picks among the registered sections and edits it. Persist on success.
+ * `config set [section]` / `config set <section>.<key> <value>` (spec 20g). A
+ * `<section>.<key>` target (contains a dot) is the non-interactive path (a value
+ * sets one field); otherwise the interactive section wizard runs (a bare section
+ * name, or none, picks the section to edit).
  */
-async function setConfigCmd(section: string | undefined, io: CommandIo): Promise<number> {
-	if (section !== undefined && !(section in CONFIG_SECTIONS)) {
+async function setConfigCmd(rest: string[], io: CommandIo): Promise<number> {
+	const { positionals } = parseSubFlags(rest);
+	const target = positionals[0] ?? "";
+	if (target.includes(".")) {
+		return setConfigFieldCmd(target, positionals[1], io);
+	}
+	// Interactive wizard (a bare section name or none).
+	if (target !== "" && !(target in CONFIG_SECTIONS)) {
 		const available = Object.keys(CONFIG_SECTIONS).join(", ");
-		io.stderr.write(`Unknown section: ${section}. Available: ${available}.\n`);
+		io.stderr.write(`Unknown section: ${target}. Available: ${available}.\n`);
 		return 2;
 	}
 	const settings = loadSettings();
@@ -355,6 +457,52 @@ async function setConfigCmd(section: string | undefined, io: CommandIo): Promise
 	return 0;
 }
 
+/**
+ * `config set <section>.<key> <value>` (spec 20g) — the non-interactive path. Reuses
+ * {@link setSection} over a flag-derived {@link flagIo}: the section picker + the
+ * target field (keyed by the wizard's prompt messages). `seedDefaults` covers every
+ * other field with its current value, so only the target field changes — identical
+ * to editing just that field in the wizard.
+ */
+async function setConfigFieldCmd(target: string, value: string | undefined, io: CommandIo): Promise<number> {
+	if (value === undefined) {
+		io.stderr.write("Usage: openhammer config set <section>.<key> <value>\n");
+		return 2;
+	}
+	const dot = target.indexOf(".");
+	// `target.includes(".")` is the gate, so `dot >= 0`; the section is everything
+	// before the first dot, the key everything after it.
+	const sectionId = target.slice(0, dot);
+	const key = target.slice(dot + 1);
+	const section = CONFIG_SECTIONS[sectionId];
+	if (!section) {
+		const available = Object.keys(CONFIG_SECTIONS).join(", ");
+		io.stderr.write(`Unknown section: ${sectionId}. Available: ${available}.\n`);
+		return 2;
+	}
+	const field = section.fields.find((f) => f.key === key);
+	if (!field) {
+		const keys = section.fields.map((f) => f.key).join(", ");
+		io.stderr.write(`Unknown key: ${key} in section ${sectionId}. Available: ${keys}.\n`);
+		return 2;
+	}
+	const answers: Record<string, string> = { [SECTION_SELECT_PROMPT]: section.id, [field.label]: value };
+	const settings = loadSettings();
+	const result = await setSection(settings, { io: flagIo(answers), stream: silentStream });
+	if (result === null) {
+		// Defensive — the field is validated above; a null here is unexpected.
+		io.stderr.write("Settings not updated.\n");
+		return 1;
+	}
+	if (!result.ok) {
+		io.stderr.write(`${result.error.message}\n`);
+		return 1;
+	}
+	saveSettings(settingsPath(), result.value);
+	io.stdout.write(`Set ${target}.\n`);
+	return 0;
+}
+
 // ---- usage text -------------------------------------------------------------
 
 const USAGE = `Usage: openhammer [command] [options]
@@ -365,14 +513,23 @@ Commands:
   start                  Start the OpenHammer server headless
   channel <subcommand>   Manage channels (how OpenHammer is reached)
     add                    Add a channel (interactive wizard)
+    add --provider <kind> [--<field> <value>]... [--default]
+                           Add a channel non-interactively (no TTY; e.g.
+                           --provider ngrok --authtoken "$T")
     list                   List configured channels
     remove <id>            Remove a channel by id
     use <id>               Set the default channel by id
   config <subcommand>    Manage settings
     get                    Show current settings
-    set [section]          Edit a settings section (default: mcp)
+    set [section]          Edit a settings section (interactive wizard)
+    set <section>.<key> <value>
+                           Set one setting non-interactively (e.g.
+                           mcp.allowedClients claude-code)
   auth <subcommand>      Manage OAuth clients (client-credentials AS)
     add-client             Issue a client (interactive) — secret shown once
+    add-client --label <name> [--print-secret]
+                           Issue a client non-interactively (--print-secret
+                           prints the plaintext secret to stdout for capture)
     list                   List registered clients
     remove <client_id>     Remove a client by id
   doctor                 Run diagnostics checks

@@ -3,11 +3,18 @@
  * pure, total parser that **never throws**: unknown options and missing values
  * are collected into `diagnostics` for the dispatcher to surface, not raised.
  *
- * The parser knows OpenHammer's flags (`--tunnel`, `--channel <id>`, `--help`)
- * and treats the first positional as the `command` word; every positional after
- * it is `rest` (subcommand + operands). It deliberately does **not** validate
+ * The parser knows OpenHammer's **top-level** flags (`--tunnel`, `--channel <id>`,
+ * `--help`) and treats the first positional as the `command` word; every positional
+ * after it is `rest` (subcommand + operands). It deliberately does **not** validate
  * the command set — the dispatcher (17o) owns that mapping, so adding a command
  * needs no parser edit. `deps: none` — this module imports nothing.
+ *
+ * **Subcommand flags (spec 20g).** An unknown `--flag` (or `--flag=value`) that
+ * appears **after** the command word is a subcommand flag (e.g. `channel add
+ * --provider ngrok`, `auth add-client --label x`), not a top-level typo: it is
+ * passed through into `rest` (in order, no diagnostic) so the subcommand handler
+ * parses it itself. An unknown long option **before** the command word is still a
+ * recoverable warning (a likely top-level typo).
  */
 
 /** A non-fatal parse finding; surfaced by the CLI, never thrown. Matches pi's shape verbatim. */
@@ -58,6 +65,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			const value = arg.slice(eq + 1);
 			if (name === "--channel") {
 				result.channel = value;
+			} else if (commandSeen) {
+				// After the command word, an unknown `--flag=value` is a subcommand
+				// flag — pass the whole token through to `rest` (spec 20g).
+				result.rest.push(arg);
 			} else {
 				result.diagnostics.push({ type: "warning", message: `Unknown option: ${name}` });
 			}
@@ -83,9 +94,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			continue;
 		}
 
-		// Unknown long option → warning (recoverable; likely a typo).
+		// Unknown long option. Before the command word it's a recoverable warning
+		// (a likely top-level typo); after the command word it's a subcommand flag,
+		// passed through to `rest` for the handler to parse (spec 20g).
 		if (arg.startsWith("--")) {
-			result.diagnostics.push({ type: "warning", message: `Unknown option: ${arg}` });
+			if (commandSeen) {
+				result.rest.push(arg);
+			} else {
+				result.diagnostics.push({ type: "warning", message: `Unknown option: ${arg}` });
+			}
 			continue;
 		}
 		// Unknown short option → error (OpenHammer uses no single-dash flags but `-h`).
