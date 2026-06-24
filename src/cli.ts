@@ -292,7 +292,7 @@ async function addChannelInteractive(io: CommandIo): Promise<number> {
  * prompt messages — the picker constant + the field labels, so message and key
  * agree by construction). Required fields without a flag are caught up front (a
  * clear usage error, not a silent cancel); `--default` forces the new channel to be
- * the default even when it isn't the first. The probe runs without an `ora` spinner
+ * the default even when it isn't the first. The probe runs without a spinner
  * (the headless path never loads the TUI-only devDependency) but still gates a
  * static-channel add.
  */
@@ -363,9 +363,9 @@ function persistAddedChannel(settings: Settings, io: CommandIo, forceDefault: bo
 
 /**
  * A spinner-free probe runner for the non-interactive path (spec 20g): runs the
- * probe but prints nothing — `ora` is a TUI-only devDependency the headless/server
- * deploy must not load. The probe still gates (a failed static-channel probe → no
- * write), matching the interactive wizard minus the animation.
+ * probe but prints nothing — the pi-tui `Loader` spinner is a TUI-only devDependency
+ * the headless/server deploy must not load. The probe still gates (a failed
+ * static-channel probe → no write), matching the interactive wizard minus the animation.
  */
 const silentProbeRunner: ProbeRunner = (_label, fn) => fn();
 

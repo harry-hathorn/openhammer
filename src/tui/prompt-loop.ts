@@ -31,7 +31,7 @@
  * cancels the pending render timer, so a confirm keystroke's scheduled redraw
  * never fires after teardown.
  */
-import { type Component, ProcessTerminal, type Terminal, TUI } from "@earendil-works/pi-tui";
+import { type Component, Loader, ProcessTerminal, type Terminal, TUI } from "@earendil-works/pi-tui";
 
 /**
  * Resolve the prompt: pass the chosen value, or `null` for cancel. Handed to a
@@ -120,6 +120,105 @@ export async function runPrompt<T>(mount: PromptMounter<T>, deps: RunPromptDeps 
 		started = true;
 		return await completion;
 	} finally {
+		if (started) {
+			tui.stop(); // restore the terminal — no raw-mode leak on any exit path
+		}
+	}
+}
+
+/**
+ * Format the spinner's final line from the awaited result (spec 21c). Called once
+ * `fn` resolves so the "validating…" line is replaced with a success/failure
+ * status before teardown — the `ora` `succeed()`/`fail()` parity. Generic so the
+ * spinner stays domain-free: the channel wizard passes a `Result`-shaped
+ * formatter (✓/✗), and this module imports no domain types.
+ */
+export type SpinnerFinalFormatter<T> = (result: T) => string;
+
+/** Injection seam for {@link runSpinner} (the `11a`/`13`/`17b`–`21b` precedent). */
+export interface SpinnerDeps {
+	/**
+	 * The pi-tui terminal to drive. Defaults to a real `ProcessTerminal`
+	 * (`process.stdin`/`stdout`); tests inject a fake so the hermetic trio never
+	 * touches a real TTY.
+	 */
+	terminal?: Terminal;
+}
+
+/**
+ * The minimum delay to let a coalesced render flush. pi-tui coalesces renders to
+ * ≥`MIN_RENDER_INTERVAL_MS` (16ms); the spinner's final status is painted by a
+ * differential render, and {@link TUI.stop} cancels a pending render timer, so
+ * the final line must land before teardown. ~7ms past the throttle is a safe,
+ * imperceptible margin (this runs once, on the completion tail of an
+ * interactive probe — never on a hot path).
+ */
+const SPINNER_FLUSH_MS = 25;
+
+/**
+ * Run a fallible async op under an animated pi-tui `Loader` spinner (spec 21c —
+ * the `ora` replacement for the channel wizard's probe runner). Boots a minimal
+ * `TUI`, mounts the `Loader` as the root, awaits `fn`, paints a final status
+ * line via {@link SpinnerFinalFormatter}, then restores the terminal — the same
+ * lifecycle/teardown discipline as {@link runPrompt}: a `started` flag gates
+ * `stop()`, and the `finally` runs on completion, a thrown `fn`, and a thrown
+ * `start`, so raw mode never leaks on any exit path.
+ *
+ * **Why a `Loader`, not `ora`:** consolidating on one render substrate (spec 21)
+ * — the `Loader` is a pi-tui component, so it composes with the prompt loop's
+ * terminal ownership and drops the `ora` devDependency (removed in 21d). The
+ * `Loader` self-animates: its internal ~80ms interval calls
+ * `tui.requestRender()`, so the spinner ticks while `fn` runs with no per-tick
+ * poke from here. `Loader`'s color/theme fns are identity — v1 ships no color
+ * layer (the 21b "selectListTheme is identity" posture).
+ *
+ * **The final status line is a differential in-place rewrite, not a force
+ * render.** On completion the indicator is hidden (`frames: []`) and the message
+ * swapped to the formatter's output; the coalesced render diffs the new line
+ * against the last spinner frame and rewrites it in place — no stale spinning
+ * glyph, no extra line. ({@link TUI.requestRender} `force=true` would reset the
+ * diff state and *append* the status line below the frozen frame, so the
+ * non-force path is the correct one.) The `await` lets that render flush before
+ * `stop()` cancels its timer — without it the last spinning frame would stay
+ * frozen on screen.
+ *
+ * @example
+ * // the channel wizard's probe runner (Result → ✓/✗)
+ * const r = await runSpinner("Validating nginx…", () => probe(answers),
+ *   (result) => (result.ok ? `✓ Validating nginx…` : `✗ ${result.error.message}`));
+ */
+export async function runSpinner<T>(
+	label: string,
+	fn: () => Promise<T>,
+	formatResult: SpinnerFinalFormatter<T>,
+	deps: SpinnerDeps = {},
+): Promise<T> {
+	const terminal: Terminal = deps.terminal ?? new ProcessTerminal();
+	const tui = new TUI(terminal, false); // no caret — a spinner takes no input
+	// Identity color fns (no color layer in v1); the label is the spinner message.
+	const loader = new Loader(
+		tui,
+		(s) => s,
+		(s) => s,
+		label,
+	);
+	tui.addChild(loader);
+
+	let started = false;
+	try {
+		tui.start();
+		started = true;
+		const result = await fn();
+		// Hide the spinning glyph and swap in the final status. setMessage →
+		// updateDisplay → setText + a (non-force) requestRender; the coalesced
+		// differential render rewrites the spinner line in place. Await the flush
+		// so it lands before stop() cancels the pending render timer.
+		loader.setIndicator({ frames: [] });
+		loader.setMessage(formatResult(result));
+		await new Promise((resolve) => setTimeout(resolve, SPINNER_FLUSH_MS));
+		return result;
+	} finally {
+		loader.stop(); // clear the animation interval (a no-op after setIndicator)
 		if (started) {
 			tui.stop(); // restore the terminal — no raw-mode leak on any exit path
 		}

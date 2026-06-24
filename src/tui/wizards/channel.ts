@@ -4,11 +4,12 @@
  * {@link addChannel} drives the whole flow over the registry + schema engines with
  * **zero per-channel code**: pick a provider from the registry → collect its
  * `fields` via the generic {@link runWizard} → validate with
- * `provider.probe?.(answers)` under an `ora` spinner → on success append a
- * {@link ChannelEntry} (secrets split out to the credentials store) and set
- * `defaultChannel` if it is the first. Adding a channel is one provider file + one
- * registry line — this wizard never changes (the scalability seam proven again by
- * 17l's section wizard reusing the same {@link runWizard}).
+ * `provider.probe?.(answers)` under a pi-tui `Loader` spinner ({@link runSpinner},
+ * spec 21c) → on success append a {@link ChannelEntry} (secrets split out to the
+ * credentials store) and set `defaultChannel` if it is the first. Adding a channel
+ * is one provider file + one registry line — this wizard never changes (the
+ * scalability seam proven again by 17l's section wizard reusing the same
+ * {@link runWizard}).
  *
  * **Composition — one banner, from {@link runWizard}.** The provider select leads
  * (a bare `io.select`), then {@link runWizard} frames the field-configuration
@@ -45,7 +46,7 @@
  *
  * **Hermetic by injection:** `io`, the registry, the id minter, the secret writer,
  * and the probe spinner all default to production but are passed by the unit
- * tests, so clack, `ora`, `crypto`, and `~/.openhammer` never touch the hermetic
+ * tests, so pi-tui, `crypto`, and `~/.openhammer` never touch the hermetic
  * trio — the `11a`/`13`/`17b`–`17j` injection-arg precedent.
  */
 import { randomUUID } from "node:crypto";
@@ -55,27 +56,32 @@ import { err, ok, type Result } from "../../tools/result.ts";
 import type { ChannelProvider } from "../../tunnel/index.ts";
 import { CHANNELS } from "../../tunnel/index.ts";
 import type { BannerStream } from "../banner.ts";
+import { runSpinner } from "../prompt-loop.ts";
 import { defaultIo } from "../prompts.ts";
 import { runWizard, type WizardIo } from "../wizard.ts";
 
 /**
- * Run a fallible probe under a spinner. The default lazy-`import()`s `ora`
- * (CLI-only — `ora` is a devDependency; the wizard never runs in the
- * `--omit=dev` prod image, and the lazy import keeps it out of the test graph).
- * Tests inject an identity runner (`(_label, fn) => fn()`) so no spinner / TTY
- * touches the hermetic trio.
+ * Run a fallible probe under a spinner. The default drives a pi-tui `Loader`
+ * via {@link runSpinner} (spec 21c — the `ora` replacement); CLI-only like the
+ * wizard itself, it never runs in the `--omit=dev` prod image. Tests inject an
+ * identity runner (`(_label, fn) => fn()`) so no spinner / TTY touches the
+ * hermetic trio.
  */
 export type ProbeRunner = <T>(label: string, fn: () => Promise<Result<T, Error>>) => Promise<Result<T, Error>>;
 
-/** The default probe runner — an `ora` spinner that succeeds/fails with the result. */
-const defaultProbeRunner: ProbeRunner = async (label, fn) => {
-	const { default: ora } = await import("ora");
-	const spinner = ora(label).start();
-	const r = await fn();
-	if (r.ok) spinner.succeed();
-	else spinner.fail(r.error.message);
-	return r;
-};
+/**
+ * Format a probe {@link Result} as the spinner's final status line — `✓` on
+ * success, `✗ <message>` on failure (the `ora` `succeed()`/`fail()` parity).
+ * Pure + exported so the formatting is unit-tested without a terminal
+ * (the {@link formatDoctor}/`extractTunnelUrl` "export the pure testable part"
+ * precedent); {@link defaultProbeRunner} threads it into {@link runSpinner}.
+ */
+export function formatProbeResult<T>(label: string, result: Result<T, Error>): string {
+	return result.ok ? `✓ ${label}` : `✗ ${result.error.message}`;
+}
+
+/** The default probe runner — a pi-tui `Loader` spinner (via {@link runSpinner}) that ends on the result. */
+const defaultProbeRunner: ProbeRunner = (label, fn) => runSpinner(label, fn, (r) => formatProbeResult(label, r));
 
 /**
  * The provider-picker select's message — the non-interactive address for the
@@ -104,7 +110,7 @@ export interface AddChannelDeps {
 	newId?: () => string;
 	/** Persist a channel's secrets (defaults to {@link setCredentials} → `~/.openhammer/credentials.json`). */
 	setSecrets?: (id: string, values: CredentialValues) => void;
-	/** Wrap the probe in a spinner (defaults to an `ora` spinner; tests pass an identity fn). */
+	/** Wrap the probe in a spinner (defaults to a pi-tui `Loader` via {@link runSpinner}; tests pass an identity fn). */
 	probeRunner?: ProbeRunner;
 }
 
