@@ -9,7 +9,7 @@
  * accepts the issued JWTs.
  *
  * **Interactive + non-interactive.** The label prompt runs through the injectable
- * {@link PromptIo} seam (real clack in production; a fake in tests), so the
+ * {@link PromptIo} seam (real pi-tui in production; a fake in tests), so the
  * hermetic trio never touches a TTY. The non-interactive flag mode (spec 20g) —
  * `auth add-client --label <name> [--print-secret]` — feeds the label straight to
  * {@link issueClient} (no prompt) and gates the secret reveal on `--print-secret`
@@ -54,7 +54,7 @@ export interface AuthIo {
 export interface AuthDeps {
 	/** Path to `credentials.json` (defaults to {@link credentialsPath}). */
 	credPath?: string;
-	/** The io driving the `add-client` label prompt (defaults to {@link defaultIo} = real clack). */
+	/** The io driving the `add-client` label prompt (defaults to {@link defaultIo} = real pi-tui). */
 	io?: PromptIo;
 	/** Banner destination for the `add-client` session framing (defaults to a silent stream —
 	 * `runCli` already printed the banner on an interactive launch, so re-printing would double it). */

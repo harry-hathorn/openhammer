@@ -98,7 +98,7 @@ function dashboardKeys(deps: DashboardDeps): KeyHint[] {
  * - `onQuit`: shutdown hook (19e stops the server child). Best-effort.
  * - `addChannelModal`/`setSectionModal`/`doctorModal`/`persist`: the key-menu modals
  *   (19d). `a` runs `addChannel`, `c` runs `setSection`, `d` runs `doctorCommand` —
- *   each suspends the render loop, runs as a clack modal, resumes, and (for the
+ *   each suspends the render loop, runs as a pi-tui modal (overlay), resumes, and (for the
  *   settings modals) persists + refreshes. They call the **existing** functions
  *   (defaults to the production wizards; injectable for tests — no reimplementation).
  * - `keys`: the footer key menu (defaults to the wired set, 19d).
@@ -136,7 +136,7 @@ export interface DashboardDeps {
 	keys?: ReadonlyArray<KeyHint>;
 	/** Add-channel modal (19d). Pressing `a` suspends the render loop, runs the
 	 * wizard, resumes, and on `ok` persists + refreshes the channels panel. Defaults
-	 * to the production {@link addChannel} (real clack). Returns the new `Settings`
+	 * to the production {@link addChannel} (real pi-tui prompts). Returns the new `Settings`
 	 * (`ok`), an `err` (probe failed — nothing written), or `null` (cancelled). */
 	addChannelModal?: (settings: Settings) => Promise<Result<Settings, Error> | null>;
 	/** Config-set modal (19d). Pressing `c` runs the section wizard. Defaults to the
@@ -177,7 +177,7 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 	 * `deps.settings`; the dashboard owns the live view while it runs (19d). */
 	let settings: Settings = deps.settings;
 	// Modal runners default to the production wizards (same `src/tui/` layer →
-	// importable; real clack via their `defaultIo`). `doctorModal` has no default —
+	// importable; real pi-tui via their `defaultIo`). `doctorModal` has no default —
 	// `doctorCommand` is in `src/cli/` (layering: `src/tui/` must not import it); the
 	// CLI layer (19e) wires it, and until then the `d` key is hidden + inert.
 	const addChannelModal = deps.addChannelModal ?? ((s: Settings) => addChannel(s));
@@ -231,7 +231,7 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 		 * is removed), but the guard also keeps an injected fake renderer honest. */
 		let modalActive = false;
 		/**
-		 * Suspend the render loop, run a cooked-mode modal (a clack wizard/command),
+		 * Suspend the render loop, run a cooked-mode modal (a pi-tui wizard/command),
 		 * then resume + force a full redraw. Catches a thrown modal so resume always
 		 * runs (the terminal is always restored) — a modal failure surfaces via stderr
 		 * (cooked mode during suspend) and never corrupts the dashboard. Returns the
