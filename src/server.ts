@@ -12,6 +12,7 @@
 import fastifyCors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { registerOauthRoutes } from "./auth/oauth/token.ts";
 import type { Config } from "./config.ts";
 import { mcpHttpRoutes } from "./mcp/http-transport.ts";
 import type { RequestRecorder } from "./mcp/telemetry.ts";
@@ -76,6 +77,11 @@ export async function buildFastify(
 	// challenge (spec 11), so the two are intentionally separate.
 	const baseUrl = `http://${config.host}:${config.port}`;
 	registerWellKnown(fastify, baseUrl);
+
+	// The OAuth Authorization Server (spec 20c): RFC 8414 metadata + the
+	// `POST /oauth/token` client-credentials grant + formbody for form posts.
+	// Unauthenticated — token issuance is the auth, and discovery precedes it.
+	await registerOauthRoutes(fastify, { baseUrl });
 
 	// The `/mcp` Streamable-HTTP routes — POST is gated by the bearer preHandler
 	// wired inside `mcpHttpRoutes`. Called directly (it is an async arity-2
