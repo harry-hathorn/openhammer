@@ -221,14 +221,30 @@ export function ensureJwtSecret(path: string = credentialsPath()): string | unde
 }
 
 /**
+ * Read-only resolve of the jwtSecret for diagnostics: `OAUTH_JWT_SECRET` (env) wins;
+ * else the persisted one. Unlike {@link resolveJwtSecret}, this does **not** mint —
+ * `doctor` (20f) must not mutate state. `undefined` when neither is set.
+ */
+export function peekJwtSecret(
+	env: NodeJS.ProcessEnv = process.env,
+	path: string = credentialsPath(),
+): string | undefined {
+	const envSecret = env.OAUTH_JWT_SECRET;
+	if (envSecret && envSecret.trim() !== "") return envSecret;
+	return readState(path).jwtSecret;
+}
+
+/**
  * Resolve the jwtSecret for signing/verifying: `OAUTH_JWT_SECRET` (env) wins; else
  * the persisted/minted one. The single source of the secret for the `/oauth/token`
- * grant (20c) + the auth middleware (20d). `undefined` when neither is available.
+ * grant (20c) + the auth middleware (20d). `undefined` when neither is available
+ * (an unwritable cred dir + no env — the grant surfaces its own `server_error`).
+ * Delegates the read to {@link peekJwtSecret} (single source for the env/whitespace
+ * check), then mints on first use if still absent.
  */
 export function resolveJwtSecret(
 	env: NodeJS.ProcessEnv = process.env,
 	path: string = credentialsPath(),
 ): string | undefined {
-	const envSecret = env.OAUTH_JWT_SECRET;
-	return envSecret && envSecret.trim() !== "" ? envSecret : ensureJwtSecret(path);
+	return peekJwtSecret(env, path) ?? ensureJwtSecret(path);
 }

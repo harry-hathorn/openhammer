@@ -135,6 +135,7 @@ Settings persist under `~/.openhammer` (`config.json` for non-secret config + `d
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on LAN). |
 | `MCP_ROOT_DIR` | launch cwd | Tool filesystem root; resolved absolute. |
 | `MCP_AUTH_TOKEN` | _minted_ | Override the minted bearer (no cred-file I/O). |
+| `OAUTH_JWT_SECRET` | _minted_ | HS256 secret for the OAuth client-credentials AS (`POST /oauth/token`); minted into `credentials.json` on first use. |
 | `MCP_MAX_RESPONSE_BYTES` | `512000` | Universal `tools/call` size backstop. |
 | `MCP_ALLOWED_CLIENTS` | _any_ | Comma-list of allowed MCP client `User-Agent`s (opt-in `403` gate). |
 | `LOG_LEVEL` | `info` | pino level. |

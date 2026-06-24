@@ -197,8 +197,11 @@ describe("Tier-2 CLI: real `openhammer` subprocess", () => {
 				const result = await runCliPty(["doctor"], home);
 				expect(result.code).toBe(0);
 				expect(result.stdout).toContain(BANNER);
-				expect(result.stdout).toContain("Ran 4 check(s)");
+				expect(result.stdout).toContain("Ran 5 check(s)");
 				expect(result.stdout).toContain("[pass]");
+				// Fresh HOME: no jwtSecret yet (no env, never booted) → an advisory warn.
+				expect(result.stdout).toContain("[warn]");
+				expect(result.stdout).toContain("oauth-jwt-secret:");
 			} finally {
 				rmSync(home, { recursive: true, force: true });
 			}

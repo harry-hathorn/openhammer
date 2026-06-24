@@ -7,7 +7,9 @@
  * and is a valid settings doc; each `Settings.channels` entry's provider is
  * `isAvailable` (live — binary/secret present) or `probe`-reachable (static — the
  * operator's declared endpoint answers `/health`); `credentials.json` is
- * owner-only (`0600`); `rg`/`fd` are on `PATH`. Each check is isolated
+ * owner-only (`0600`); the OAuth `jwtSecret` is set (`OAUTH_JWT_SECRET` env or
+ * persisted — minted on first use, so absent is a `warn`, not a `fail`);
+ * `rg`/`fd` are on `PATH`. Each check is isolated
  * ({@link safeRun} turns a throw into a `fail`), so `doctor` never throws.
  *
  * **Self-registration.** The built-in checks register into the global
@@ -31,6 +33,7 @@
  * command (the install still works).
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { peekJwtSecret } from "../auth/oauth/clients.ts";
 import { type CredentialValues, credentialsPath, getCredentials } from "../config/credentials.ts";
 import { type ChannelEntry, loadSettings, normalizeSettings, type Settings, settingsPath } from "../config/settings.ts";
 import {
@@ -120,6 +123,35 @@ export function createCredentialsCheck(path: string = credentialsPath()): Diagno
 }
 
 /**
+ * The OAuth `jwtSecret`-present check (spec 20f): either `OAUTH_JWT_SECRET` is set
+ * in the env, or a secret is persisted in `credentials.json`. Present → `pass`;
+ * absent → `warn` — the AS mints one on first use (at server boot or the first
+ * `/oauth/token` grant), so a missing secret is advisory, not fatal (the install
+ * still works localhost-only with the opaque bearer). **Read-only:** uses
+ * {@link peekJwtSecret} (never `resolveJwtSecret`), so `doctor` never mints state.
+ */
+export function createJwtSecretCheck(
+	deps: { env?: NodeJS.ProcessEnv; credentialsPath?: string } = {},
+): DiagnosticCheck {
+	const env = deps.env ?? process.env;
+	const path = deps.credentialsPath ?? credentialsPath();
+	return {
+		id: "oauth-jwt-secret",
+		run: async () => {
+			const secret = peekJwtSecret(env, path);
+			if (!secret) return { status: "warn", message: "OAuth jwtSecret not set (minted on first use)" };
+			const fromEnv = env.OAUTH_JWT_SECRET !== undefined && env.OAUTH_JWT_SECRET.trim() !== "";
+			return {
+				status: "pass",
+				message: fromEnv
+					? "OAuth jwtSecret set via OAUTH_JWT_SECRET"
+					: "OAuth jwtSecret present in credentials.json",
+			};
+		},
+	};
+}
+
+/**
  * The binary-presence check for a runtime tool (`rg`/`fd`): present → `pass`;
  * absent → `fail` (the tool backed by it — `grep` for `rg`, `find` for `fd` — is
  * unavailable). Mirrors the `grep`/`find` `isToolAvailable` gate.
@@ -185,17 +217,24 @@ export function createChannelCheck(
 }
 
 /**
- * The canonical static check set (config + credentials + rg + fd), built with the
- * given paths/`isAvailable` so tests inject temp paths; production calls it with
- * no args (real paths + the real `isToolAvailable`). Registered into the global
- * registry at module load so `getDiagnostics()` reflects what `doctor` runs.
+ * The canonical static check set (config + credentials + oauth-jwt-secret + rg +
+ * fd), built with the given paths/env/`isAvailable` so tests inject temp paths +
+ * an isolated env; production calls it with no args (real paths + `process.env` +
+ * the real `isToolAvailable`). Registered into the global registry at module load
+ * so `getDiagnostics()` reflects what `doctor` runs.
  */
 export function createDefaultChecks(
-	deps: { settingsPath?: string; credentialsPath?: string; isAvailable?: (name: string) => boolean } = {},
+	deps: {
+		settingsPath?: string;
+		credentialsPath?: string;
+		isAvailable?: (name: string) => boolean;
+		env?: NodeJS.ProcessEnv;
+	} = {},
 ): DiagnosticCheck[] {
 	return [
 		createConfigCheck(deps.settingsPath),
 		createCredentialsCheck(deps.credentialsPath),
+		createJwtSecretCheck({ env: deps.env, credentialsPath: deps.credentialsPath }),
 		createBinaryCheck("rg", deps.isAvailable),
 		createBinaryCheck("fd", deps.isAvailable),
 	];

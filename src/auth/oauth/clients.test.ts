@@ -14,6 +14,7 @@ import {
 	listClients,
 	newClientId,
 	newClientSecret,
+	peekJwtSecret,
 	removeClient,
 	resolveJwtSecret,
 	verifySecret,
@@ -233,6 +234,35 @@ describe("ensureJwtSecret", () => {
 		writeFileSync(blocker, "", { mode: 0o600 });
 		const blockedPath = join(blocker, ".openhammer", "credentials.json");
 		expect(ensureJwtSecret(blockedPath)).toBeUndefined();
+	});
+});
+
+describe("peekJwtSecret", () => {
+	let path: string;
+
+	beforeEach(() => {
+		path = tempCredPath();
+	});
+	afterEach(() => rmUnder(path));
+
+	it("prefers OAUTH_JWT_SECRET from the env", () => {
+		expect(peekJwtSecret({ OAUTH_JWT_SECRET: "env-secret" }, path)).toBe("env-secret");
+	});
+
+	it("reads a persisted secret when the env is unset — and never mints", () => {
+		const persisted = ensureJwtSecret(path); // mint + persist a real secret
+		expect(peekJwtSecret({}, path)).toBe(persisted);
+	});
+
+	it("returns undefined when neither env nor a persisted secret is present (no mint)", () => {
+		expect(peekJwtSecret({}, path)).toBeUndefined();
+		// Read-only: no file was created.
+		expect(existsSync(path)).toBe(false);
+	});
+
+	it("treats a whitespace-only env value as unset (falls back to the persisted secret)", () => {
+		const persisted = ensureJwtSecret(path);
+		expect(peekJwtSecret({ OAUTH_JWT_SECRET: "   " }, path)).toBe(persisted);
 	});
 });
 

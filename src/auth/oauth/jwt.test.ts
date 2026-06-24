@@ -17,12 +17,16 @@ function segments(jwt: string): string[] {
 	return jwt.split(".");
 }
 
-/** Flip one character (a signature byte) to invalidate the signature. */
-function tamperLastChar(jwt: string): string {
-	const chars = [...jwt];
-	const i = chars.length - 1;
-	chars[i] = chars[i] === "A" ? "B" : "A";
-	return chars.join("");
+/** Flip the first character of the signature segment to invalidate the signature.
+ * The first char — **not** the last — so every flipped bit is a real signature bit: the
+ * final base64url char of a 32-byte signature carries 2 unused trailing bits, so
+ * flipping the last char can leave the decoded signature unchanged (a flaky pass). */
+function tamperSignature(jwt: string): string {
+	const [header, payload, signature] = segments(jwt);
+	if (signature === undefined) throw new Error("not a compact JWT");
+	const chars = [...signature];
+	chars[0] = chars[0] === "A" ? "B" : "A";
+	return [header, payload, chars.join("")].join(".");
 }
 
 describe("signAccessToken + verifyAccessToken round-trip", () => {
@@ -53,7 +57,7 @@ describe("signAccessToken + verifyAccessToken round-trip", () => {
 describe("verifyAccessToken failure paths → null", () => {
 	it("returns null for a tampered signature", async () => {
 		const token = await signAccessToken(claims, SECRET, 3600);
-		expect(await verifyAccessToken(tamperLastChar(token), SECRET, ISSUER, AUDIENCE)).toBeNull();
+		expect(await verifyAccessToken(tamperSignature(token), SECRET, ISSUER, AUDIENCE)).toBeNull();
 	});
 
 	it("returns null for an expired token", async () => {
