@@ -63,12 +63,34 @@ export type FrameProducer = (width: number, height: number) => string[];
  * - `onKey(cb)`: register the key handler; `data` is the raw pi-tui input
  *   sequence (match it with `matchesKey`/`parseKey` from pi-tui).
  * - `clear()`: force a full screen clear + redraw on the next tick.
+ * - `suspend()`/`resume()`: temporarily hand the terminal to a cooked-mode modal
+ *   (a clack wizard, 19d) and take it back. `stop()`/`start()` is NOT reentrant
+ *   here (`stop()` removes the input listener permanently + sets a final flag),
+ *   so modals use this lighter pair: `suspend()` = `tui.stop()` (cooked mode) with
+ *   the cadence paused, `resume()` = `tui.start()` + a forced full redraw. The
+ *   pi-tui input listener survives the cycle (its `Set` is untouched by `stop()`),
+ *   so keys work again once resumed — the proven pi modal pattern
+ *   (`interactive-mode`'s external-editor bracket).
  */
 export interface DashboardRenderer {
 	start(produceFrame: FrameProducer): void;
 	stop(): void;
 	onKey(cb: (data: string) => void): void;
 	clear(): void;
+	/**
+	 * Release the terminal for a cooked-mode modal (a clack wizard, 19d): stop the
+	 * render loop + refresh cadence and restore cooked mode (the inverse of
+	 * {@link DashboardRenderer.start}'s raw-mode entry). Pair with
+	 * {@link DashboardRenderer.resume}. No-op if not started, already suspended, or
+	 * permanently stopped.
+	 */
+	suspend(): void;
+	/**
+	 * Resume the render loop after {@link DashboardRenderer.suspend}: re-enter raw
+	 * mode and force a full redraw (a clack modal uses the alternate/cleared screen,
+	 * so the resumed dashboard must repaint fully). No-op if not currently suspended.
+	 */
+	resume(): void;
 }
 
 /**
@@ -140,31 +162,67 @@ export function createDashboardRenderer(deps: DashboardRendererDeps = {}): Dashb
 		return { consume: true };
 	});
 
+	const interval = deps.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS;
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
+	let started = false;
 	let stopped = false;
+	/** True while a modal (19d) holds the terminal via {@link suspend}. While set,
+	 * the refresh cadence is paused and the TUI is in cooked mode. */
+	let suspended = false;
+
+	const stopTimer = (): void => {
+		if (refreshTimer) {
+			clearInterval(refreshTimer);
+			refreshTimer = undefined;
+		}
+	};
+	const startTimer = (): void => {
+		if (interval > 0 && !refreshTimer) {
+			refreshTimer = setInterval(() => {
+				if (!stopped && !suspended) {
+					tui.requestRender();
+				}
+			}, interval);
+		}
+	};
 
 	return {
 		start(produceFrame) {
 			root.produce = (width) => produceFrame(width, terminal.rows);
 			tui.start();
-			const interval = deps.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS;
-			if (interval > 0) {
-				refreshTimer = setInterval(() => {
-					if (!stopped) {
-						tui.requestRender();
-					}
-				}, interval);
+			started = true;
+			startTimer();
+		},
+		suspend() {
+			// No-op unless running and not already suspended: pause the cadence and
+			// restore cooked mode (tui.stop) so a clack modal can drive the terminal.
+			// The input listener (added once at construction) is left in place — pi-tui
+			// keeps its input-listener Set across stop/start, so keys return on resume.
+			if (!started || stopped || suspended) {
+				return;
 			}
+			suspended = true;
+			stopTimer();
+			tui.stop();
+		},
+		resume() {
+			// Re-enter raw mode + force a full redraw (a modal used the alt/cleared
+			// screen), then restart the cadence. The input listener is still registered.
+			if (!started || stopped || !suspended) {
+				return;
+			}
+			suspended = false;
+			tui.start();
+			tui.requestRender(true);
+			startTimer();
 		},
 		stop() {
 			if (stopped) {
 				return;
 			}
 			stopped = true;
-			if (refreshTimer) {
-				clearInterval(refreshTimer);
-				refreshTimer = undefined;
-			}
+			started = false;
+			stopTimer();
 			removeInputListener();
 			tui.stop();
 		},

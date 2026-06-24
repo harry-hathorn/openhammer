@@ -28,6 +28,11 @@ class FakeTerminal implements Terminal {
 	}
 
 	stop(): void {
+		// Mirror ProcessTerminal.stop(): detach the input + resize handlers so no keys
+		// arrive while suspended (the stdin "data" listener is removed in real stop()).
+		// start() re-attaches them, so keys work again after resume.
+		this.inputHandler = undefined;
+		this.resizeHandler = undefined;
 		this.stopped = true;
 		this.started = false;
 	}
@@ -230,6 +235,90 @@ describe("dashboard renderer — refresh cadence", () => {
 		await flush();
 
 		expect(pulls).toBeGreaterThan(afterStart);
+		renderer.stop();
+	});
+});
+
+describe("dashboard renderer — suspend/resume (19d modals)", () => {
+	it("suspend() restores the terminal (cooked mode); resume() re-enters raw mode", async () => {
+		const term = new FakeTerminal();
+		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
+		renderer.start(() => ["frame"]);
+		await flush();
+		expect(term.stopped).toBe(false);
+
+		renderer.suspend(); // tui.stop() → terminal.stop()
+		expect(term.stopped).toBe(true);
+
+		renderer.resume(); // tui.start() → terminal.start()
+		expect(term.stopped).toBe(false);
+		renderer.stop();
+	});
+
+	it("suspend is a no-op before start, idempotent, and resume is a no-op when not suspended", () => {
+		const term = new FakeTerminal();
+		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
+		expect(() => renderer.suspend()).not.toThrow(); // before start — no-op
+
+		renderer.start(() => ["frame"]);
+		renderer.suspend();
+		expect(() => renderer.suspend()).not.toThrow(); // double suspend — no-op
+		renderer.resume();
+		expect(() => renderer.resume()).not.toThrow(); // double resume — no-op
+		renderer.stop();
+	});
+
+	it("resume restarts the render loop (a fresh frame is pulled after resume)", async () => {
+		const term = new FakeTerminal();
+		let pulls = 0;
+		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
+		renderer.start(() => {
+			pulls += 1;
+			return ["frame"];
+		});
+		await flush();
+		const beforeSuspend = pulls;
+
+		renderer.suspend();
+		await flush();
+		const whileSuspended = pulls;
+		renderer.resume();
+		await flush();
+
+		expect(whileSuspended).toBe(beforeSuspend); // nothing rendered while suspended
+		expect(pulls).toBeGreaterThan(whileSuspended); // resume re-rendered
+		renderer.stop();
+	});
+
+	it("stop() after suspend() is permanent, and resume() after stop() is a no-op", async () => {
+		const term = new FakeTerminal();
+		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
+		renderer.start(() => ["frame"]);
+		await flush();
+		renderer.suspend();
+		expect(() => renderer.stop()).not.toThrow();
+		expect(term.stopped).toBe(true);
+		expect(() => renderer.resume()).not.toThrow(); // stopped → resume no-op
+		expect(term.stopped).toBe(true);
+	});
+
+	it("keys still work after a suspend/resume cycle (the input listener survives)", async () => {
+		const term = new FakeTerminal();
+		const seen: string[] = [];
+		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
+		renderer.onKey((data) => seen.push(data));
+		renderer.start(() => ["frame"]);
+		await flush();
+
+		renderer.suspend();
+		await flush();
+		term.send("x"); // suspended → terminal has no input handler → not delivered
+		expect(seen).toEqual([]);
+
+		renderer.resume();
+		await flush();
+		term.send("a"); // resumed → input handler re-attached → delivered
+		expect(seen).toEqual(["a"]);
 		renderer.stop();
 	});
 });

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { Settings } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
+import type { Result } from "../tools/result.ts";
+import { err, ok } from "../tools/result.ts";
 import type { ChannelProbeState } from "./dashboard/channel-probe.ts";
 import type { DashboardRenderer, FrameProducer } from "./dashboard/render.ts";
 import { DASHBOARD_MONITOR_LIMIT, runDashboard } from "./dashboard.ts";
@@ -17,6 +19,8 @@ class FakeRenderer implements DashboardRenderer {
 	private keyHandler: ((data: string) => void) | undefined;
 	stopped = false;
 	clearCount = 0;
+	suspendCount = 0;
+	resumeCount = 0;
 
 	onKey(cb: (data: string) => void): void {
 		this.keyHandler = cb;
@@ -32,6 +36,14 @@ class FakeRenderer implements DashboardRenderer {
 
 	clear(): void {
 		this.clearCount += 1;
+	}
+
+	suspend(): void {
+		this.suspendCount += 1;
+	}
+
+	resume(): void {
+		this.resumeCount += 1;
 	}
 
 	/** Pull a frame at a given size (the producer ignores height — panels are width-only). */
@@ -444,5 +456,192 @@ describe("runDashboard — keys + shutdown", () => {
 		});
 		r2.key("q");
 		await expect(threw).resolves.toBeUndefined();
+	});
+});
+
+/** Flush one macrotask so a fire-and-forget modal (`void withModal(...)`) settles:
+ * the modal is async, so `r.key("a")` returns before suspend→run→resume completes. */
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("runDashboard — key-menu modals (19d)", () => {
+	it("shows the modal keys in the footer only when wired (no dead keys)", async () => {
+		// add/config always appear (same-layer defaults); doctor only when wired.
+		const r = new FakeRenderer();
+		const done = runDashboard({ renderer: r, settings: emptySettings() });
+		expect(r.frame().join("\n")).toContain("a add channel");
+		expect(r.frame().join("\n")).toContain("c config");
+		expect(r.frame().join("\n")).not.toContain("d doctor");
+
+		const r2 = new FakeRenderer();
+		const done2 = runDashboard({ renderer: r2, settings: emptySettings(), doctorModal: async () => 0 });
+		expect(r2.frame().join("\n")).toContain("d doctor");
+
+		r.key("q");
+		await done;
+		r2.key("q");
+		await done2;
+	});
+
+	it("'a' suspends, runs addChannel with the current settings, persists, resumes, and refreshes the channels panel", async () => {
+		const r = new FakeRenderer();
+		let modalCalledWith: Settings | undefined;
+		let persisted: Settings | undefined;
+		const next: Settings = {
+			...emptySettings(),
+			channels: [{ id: "x", kind: "ngrok", mode: "live", label: "edge", options: {} }],
+			defaultChannel: "x",
+		};
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			addChannelModal: async (s) => {
+				modalCalledWith = s;
+				return ok(next);
+			},
+			persist: (s) => {
+				persisted = s;
+			},
+		});
+
+		expect(r.frame().join("\n")).toContain("(none configured)"); // before
+		r.key("a");
+		await tick();
+		expect(r.suspendCount).toBe(1);
+		expect(r.resumeCount).toBe(1);
+		expect(modalCalledWith).toBeDefined(); // the wizard sees the current settings
+		expect(persisted).toBe(next); // the new doc is persisted
+		const out = r.frame().join("\n"); // after — the new channel is rendered
+		expect(out).toContain("edge");
+		expect(out).toContain("ngrok");
+		r.key("q");
+		await done;
+	});
+
+	it("a cancelled modal (null) does not persist and leaves the panel unchanged", async () => {
+		const r = new FakeRenderer();
+		let persisted = false;
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			addChannelModal: async () => null,
+			persist: () => {
+				persisted = true;
+			},
+		});
+		r.key("a");
+		await tick();
+		expect(persisted).toBe(false);
+		expect(r.suspendCount).toBe(1);
+		expect(r.resumeCount).toBe(1); // resume still runs (terminal restored)
+		expect(r.frame().join("\n")).toContain("(none configured)");
+		r.key("q");
+		await done;
+	});
+
+	it("a failed probe (err) does not persist", async () => {
+		const r = new FakeRenderer();
+		let persisted = false;
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			addChannelModal: async () => err(new Error("probe failed")),
+			persist: () => {
+				persisted = true;
+			},
+		});
+		r.key("a");
+		await tick();
+		expect(persisted).toBe(false);
+		r.key("q");
+		await done;
+	});
+
+	it("'c' config modal persists the new settings", async () => {
+		const r = new FakeRenderer();
+		let persisted: Settings | undefined;
+		const next: Settings = { ...emptySettings(), mcp: { allowedClients: ["claude-code"] } };
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			setSectionModal: async () => ok(next),
+			persist: (s) => {
+				persisted = s;
+			},
+		});
+		r.key("c");
+		await tick();
+		expect(persisted).toBe(next);
+		r.key("q");
+		await done;
+	});
+
+	it("'d' doctor modal suspends + resumes with no persist", async () => {
+		const r = new FakeRenderer();
+		let doctorRan = false;
+		let persisted = false;
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			doctorModal: async () => {
+				doctorRan = true;
+				return 0;
+			},
+			persist: () => {
+				persisted = true;
+			},
+		});
+		r.key("d");
+		await tick();
+		expect(doctorRan).toBe(true);
+		expect(r.suspendCount).toBe(1);
+		expect(r.resumeCount).toBe(1);
+		expect(persisted).toBe(false);
+		r.key("q");
+		await done;
+	});
+
+	it("ignores keys while a modal is running (re-entry guard)", async () => {
+		const r = new FakeRenderer();
+		let resolveModal: (v: Result<Settings, Error> | null) => void = () => {};
+		let calls = 0;
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			addChannelModal: async () => {
+				calls += 1;
+				return new Promise((res) => {
+					resolveModal = res;
+				});
+			},
+		});
+		r.key("a"); // starts the modal (pending)
+		await tick();
+		expect(calls).toBe(1);
+		r.key("a"); // ignored — a modal is active
+		r.key("q"); // ignored too — can't quit mid-modal
+		await tick();
+		expect(calls).toBe(1); // not re-entered
+		expect(r.stopped).toBe(false); // the ignored 'q' did not quit
+		resolveModal(null);
+		await tick();
+		r.key("q");
+		await done;
+	});
+
+	it("a thrown modal is caught — resume still runs and the dashboard stays alive", async () => {
+		const r = new FakeRenderer();
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			doctorModal: async () => {
+				throw new Error("boom");
+			},
+		});
+		r.key("d");
+		await tick();
+		expect(r.resumeCount).toBe(1); // resume ran despite the throw
+		expect(r.stopped).toBe(false); // dashboard still alive
+		r.key("q");
+		await done;
 	});
 });
