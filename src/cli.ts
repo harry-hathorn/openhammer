@@ -10,6 +10,7 @@
  *   or boot headless when non-interactive. `start` always boots headless.
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
+ * - `auth { add-client | list | remove <id> }` — manage OAuth clients (spec 20e).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  * - `monitor` — stream live client + tool-call activity over the status socket (17t).
  *
@@ -17,6 +18,7 @@
  */
 import { pathToFileURL } from "node:url";
 import { type ParsedArgs, parseArgs } from "./cli/args.ts";
+import { authCommand } from "./cli/auth.ts";
 import { doctorCommand } from "./cli/doctor.ts";
 import { monitorCommand } from "./cli/monitor.ts";
 import { CONFIG_SECTIONS } from "./config/sections.ts";
@@ -99,6 +101,8 @@ export interface DispatchDeps {
 	channel?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `config` subcommand handler (defaults to {@link configCommand}). */
 	config?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
+	/** `auth` subcommand handler (defaults to {@link authCommand}). */
+	auth?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `doctor` handler (defaults to {@link doctorCommand}). */
 	doctor?: (io: CommandIo) => Promise<number>;
 	/** `monitor` handler (defaults to {@link monitorCommand}). */
@@ -131,6 +135,7 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 	const isTTY = deps.isTTY ?? process.stdout.isTTY === true;
 	const channel = deps.channel ?? channelCommand;
 	const config = deps.config ?? configCommand;
+	const auth = deps.auth ?? authCommand;
 	const doctor = deps.doctor ?? doctorCommand;
 	const monitor = deps.monitor ?? monitorCommand;
 
@@ -156,6 +161,8 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 			return channel(parsed.rest[0], parsed.rest.slice(1), io);
 		case "config":
 			return config(parsed.rest[0], parsed.rest.slice(1), io);
+		case "auth":
+			return auth(parsed.rest[0], parsed.rest.slice(1), io);
 		case "doctor":
 			return doctor(io);
 		case "monitor":
@@ -364,6 +371,10 @@ Commands:
   config <subcommand>    Manage settings
     get                    Show current settings
     set [section]          Edit a settings section (default: mcp)
+  auth <subcommand>      Manage OAuth clients (client-credentials AS)
+    add-client             Issue a client (interactive) — secret shown once
+    list                   List registered clients
+    remove <client_id>     Remove a client by id
   doctor                 Run diagnostics checks
   monitor                Stream live client + tool-call activity
 
