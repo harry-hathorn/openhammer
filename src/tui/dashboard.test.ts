@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Settings } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
+import type { ChannelProbeState } from "./dashboard/channel-probe.ts";
 import type { DashboardRenderer, FrameProducer } from "./dashboard/render.ts";
 import { DASHBOARD_MONITOR_LIMIT, runDashboard } from "./dashboard.ts";
 
@@ -235,6 +236,124 @@ describe("runDashboard — channel live-state (19c-channel)", () => {
 		expect(out).not.toContain("unknown");
 		r.key("q");
 		await done;
+	});
+});
+
+describe("runDashboard — static-channel probe (19c-probe)", () => {
+	it("folds probe results into the channels panel (non-active static channel up/down, not unknown)", async () => {
+		const r = new FakeRenderer();
+		let pushProbe: ((s: ChannelProbeState) => void) | undefined;
+		const done = runDashboard({
+			renderer: r,
+			settings: {
+				...emptySettings(),
+				channels: [
+					{
+						id: "edge",
+						kind: "static-url",
+						mode: "static",
+						label: "edge",
+						options: { publicUrl: "https://edge.example" },
+					},
+				],
+			},
+			probeChannels: (report) => {
+				pushProbe = report;
+				return () => {};
+			},
+		});
+
+		// Before the probe: the channel shows `unknown` + its declared publicUrl.
+		let out = r.frame().join("\n");
+		expect(out).toContain("unknown");
+
+		// The probe reports the static channel reachable → `up` + URL, not `unknown`.
+		pushProbe?.({ id: "edge", up: true, url: "https://edge.example" });
+		out = r.frame().join("\n");
+		expect(out).toContain("static-url  static  up  https://edge.example");
+		expect(out).not.toContain("unknown");
+		r.key("q");
+		await done;
+	});
+
+	it("keeps the server-reported (active) channel authoritative over a late probe result", async () => {
+		const r = new FakeRenderer();
+		let pushState: ((state: ChannelStateLine) => void) | undefined;
+		let pushProbe: ((s: ChannelProbeState) => void) | undefined;
+		const done = runDashboard({
+			renderer: r,
+			settings: {
+				...emptySettings(),
+				channels: [
+					{
+						id: "active",
+						kind: "static-url",
+						mode: "static",
+						label: "active",
+						options: { publicUrl: "https://active.example" },
+					},
+				],
+			},
+			subscribe: (_onEvent, onChannelState) => {
+				pushState = onChannelState;
+				return () => {};
+			},
+			probeChannels: (report) => {
+				pushProbe = report;
+				return () => {};
+			},
+		});
+
+		// The server reports the active channel down (authoritative).
+		pushState?.({ type: "channel-state", id: "active", up: false, url: "https://active.example" });
+		// A probe result for the same channel arrives late → ignored (server wins).
+		pushProbe?.({ id: "active", up: true, url: "https://active.example" });
+		const out = r.frame().join("\n");
+		expect(out).toContain("static-url  static  down");
+		expect(out).not.toContain("static-url  static  up");
+		r.key("q");
+		await done;
+	});
+
+	it("passes isReported to the probe (true for server-reported channels)", async () => {
+		const r = new FakeRenderer();
+		let receivedIsReported: ((id: string) => boolean) | undefined;
+		const done = runDashboard({
+			renderer: r,
+			settings: {
+				...emptySettings(),
+				channels: [{ id: "active", kind: "static-url", mode: "static", options: { publicUrl: "https://x" } }],
+			},
+			subscribe: (_onEvent, onChannelState) => {
+				onChannelState?.({ type: "channel-state", id: "active", up: true, url: "https://x" });
+				return () => {};
+			},
+			probeChannels: (_report, isReported) => {
+				receivedIsReported = isReported;
+				return () => {};
+			},
+		});
+		// subscribe fires synchronously on start → "active" is server-reported before
+		// the probe seam is wired, so isReported reflects it (the probe would skip it).
+		expect(receivedIsReported?.("active")).toBe(true);
+		expect(receivedIsReported?.("other")).toBe(false);
+		r.key("q");
+		await done;
+	});
+
+	it("unsubscribes the probe on quit", async () => {
+		const r = new FakeRenderer();
+		let unsubbed = false;
+		const done = runDashboard({
+			renderer: r,
+			settings: emptySettings(),
+			probeChannels: () => () => {
+				unsubbed = true;
+			},
+		});
+		r.key("q");
+		await done;
+		expect(unsubbed).toBe(true);
 	});
 });
 

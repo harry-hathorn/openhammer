@@ -35,6 +35,7 @@
 import type { Settings } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
+import type { ChannelProbeState } from "./dashboard/channel-probe.ts";
 import {
 	type ChannelLiveState,
 	composeDashboard,
@@ -75,7 +76,8 @@ export interface DashboardDeps {
 	settings: Settings;
 	/** Initial server status (19e populates from the running child). Defaults to "down"/unknown. */
 	status?: ServerStatusState;
-	/** Initial per-channel live state (19c populates from the server). Defaults to none. */
+	/** Initial per-channel live state (19c populates from the server, 19c-probe from
+	 * the dashboard). Defaults to none. */
 	channelState?: Record<string, ChannelLiveState>;
 	/** Live event feed (19c wires this to the status socket). The optional 2nd
 	 * callback receives channel-state lines (19c-channel) → the `channelState`
@@ -84,6 +86,14 @@ export interface DashboardDeps {
 		onEvent: (event: RequestEvent) => void,
 		onChannelState?: (state: ChannelStateLine) => void,
 	) => () => void;
+	/** Static-channel probe (19c-probe). Probes non-active static channels'
+	 * `publicUrl/health` directly (reusing the registry `probe`) so they show live
+	 * `up`/`down` + URL instead of `unknown`. `report` folds a probe outcome into
+	 * `channelState`; `isReported(id)` is true for channels the server has already
+	 * reported (the active channel) — those are skipped so the server stays
+	 * authoritative and the probe wastes no fetch on them. Returns an unsubscribe
+	 * called on shutdown. Omit for a dashboard that does not probe channels. */
+	probeChannels?: (report: (state: ChannelProbeState) => void, isReported?: (id: string) => boolean) => () => void;
 	/** Monitor-feed depth. Defaults to {@link DASHBOARD_MONITOR_LIMIT}. */
 	monitorLimit?: number;
 	/** Footer key-menu entries. Defaults to {@link DEFAULT_19B_KEYS} (19d extends). */
@@ -126,12 +136,18 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 	return new Promise<void>((resolve) => {
 		let settled = false;
 		let unsub: (() => void) | undefined;
+		let unsubProbe: (() => void) | undefined;
+		/** Channel ids the server has authoritatively reported (the active channel,
+		 * 19c-channel). The probe (19c-probe) skips these so the server stays
+		 * authoritative and a probe result never overwrites a server report. */
+		const serverReported = new Set<string>();
 
 		/** Quit: idempotent. Restore the terminal first, then run the best-effort shutdown hook. */
 		const quit = async (): Promise<void> => {
 			if (settled) return;
 			settled = true;
 			unsub?.();
+			unsubProbe?.();
 			deps.renderer.stop();
 			try {
 				await deps.onQuit?.();
@@ -158,8 +174,9 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 
 		// Wire the live feed last: 19c's subscriber delivers parsed events (recent dump
 		// first, then live). Each folds into the monitor ring (capped) + the clients
-		// reducer; channel-state lines (19c-channel) fold into the `channelState`
-		// snapshot. The next refresh tick renders the updated state.
+		// reducer; channel-state lines (19c-channel) mark the channel server-reported
+		// (authoritative) and fold into the `channelState` snapshot. The next refresh
+		// tick renders the updated state.
 		unsub = deps.subscribe?.(
 			(event) => {
 				monitorState.apply(event);
@@ -167,8 +184,22 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 				while (eventRing.length > monitorLimit) eventRing.shift();
 			},
 			(state) => {
+				serverReported.add(state.id);
 				channelState[state.id] = { up: state.up, url: state.url };
 			},
+		);
+
+		// 19c-probe: probe non-active static channels' `publicUrl/health` directly
+		// (reusing the registry `probe`) so they show live `up`/`down` + URL. A probe
+		// outcome folds into `channelState` only when the server has NOT reported that
+		// channel (`isReported`) — the server stays authoritative for the active
+		// channel; the probe fills the rest. The probe is skipped entirely for a
+		// channel the server reports (no wasted fetch).
+		unsubProbe = deps.probeChannels?.(
+			(state) => {
+				if (!serverReported.has(state.id)) channelState[state.id] = { up: state.up, url: state.url };
+			},
+			(id) => serverReported.has(id),
 		);
 	});
 }
