@@ -5,8 +5,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RequestEvent, RequestRecorder } from "../mcp/telemetry.ts";
 import {
+	type ChannelStateLine,
+	formatChannelStateLine,
 	formatEventLine,
 	handleConnection,
+	parseChannelStateLine,
 	type StatusSocket,
 	startStatusSocket,
 	statusSocketPath,
@@ -57,6 +60,11 @@ function event(ts: string, tool: string | null = null): RequestEvent {
 	};
 }
 
+/** Build a channel-state line. */
+function channelState(id: string, up: boolean, url: string | null): ChannelStateLine {
+	return { type: "channel-state", id, up, url };
+}
+
 /** Clean up any temp dirs created during a test. */
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -82,6 +90,37 @@ describe("statusSocketPath + formatEventLine", () => {
 		const line = formatEventLine(event("1", "bash"));
 		expect(line.endsWith("\n")).toBe(true);
 		expect(JSON.parse(line)).toMatchObject({ ts: "1", tool: "bash" });
+	});
+});
+
+describe("channel-state wire format", () => {
+	it("serializes a channel-state line as compact JSON + newline", () => {
+		const line = formatChannelStateLine(channelState("deployed", true, "https://x.ngrok.app"));
+		expect(line.endsWith("\n")).toBe(true);
+		expect(JSON.parse(line)).toMatchObject({
+			type: "channel-state",
+			id: "deployed",
+			up: true,
+			url: "https://x.ngrok.app",
+		});
+	});
+
+	it("parses a well-formed channel-state line", () => {
+		expect(parseChannelStateLine(formatChannelStateLine(channelState("a", false, null)))).toEqual(
+			channelState("a", false, null),
+		);
+	});
+
+	it("returns null for blank / malformed / non-channel-state lines", () => {
+		// A RequestEvent line shares the socket but carries no `type` → not channel-state.
+		expect(parseChannelStateLine(formatEventLine(event("1", "bash")))).toBeNull();
+		expect(parseChannelStateLine("")).toBeNull();
+		expect(parseChannelStateLine("not-json")).toBeNull();
+		// Right shape, wrong value types → rejected (never mis-parsed).
+		expect(
+			parseChannelStateLine(JSON.stringify({ type: "channel-state", id: "a", up: "yes", url: null })),
+		).toBeNull();
+		expect(parseChannelStateLine(JSON.stringify({ type: "event", id: "a", up: true, url: null }))).toBeNull();
 	});
 });
 
@@ -131,6 +170,43 @@ describe("handleConnection (fake socket)", () => {
 		const socket = fakeSocket();
 		handleConnection(socket, recorder);
 		socket.emit("error");
+		recorder.record(event("2"));
+		expect(socket.lines).toHaveLength(0);
+	});
+
+	it("dumps the channel-state snapshot before the event history", () => {
+		const recorder = new RequestRecorder();
+		recorder.record(event("1", "bash"));
+		const socket = fakeSocket();
+
+		handleConnection(socket, recorder, [
+			channelState("deployed", true, "https://x.ngrok.app"),
+			channelState("down", false, null),
+		]);
+		// 2 channel-state lines first, then the 1 historical event.
+		expect(socket.lines).toHaveLength(3);
+		expect(JSON.parse(socket.lines[0] ?? "{}")).toMatchObject({ type: "channel-state", id: "deployed", up: true });
+		expect(JSON.parse(socket.lines[1] ?? "{}")).toMatchObject({
+			type: "channel-state",
+			id: "down",
+			up: false,
+			url: null,
+		});
+		expect(JSON.parse(socket.lines[2] ?? "{}").tool).toBe("bash");
+
+		recorder.record(event("2", "ls")); // live event streams after the dumps
+		expect(socket.lines).toHaveLength(4);
+		expect(JSON.parse(socket.lines[3] ?? "{}").tool).toBe("ls");
+	});
+
+	it("stops the channel-state dump when a client is already gone (first write fails)", () => {
+		const recorder = new RequestRecorder();
+		recorder.record(event("1"));
+		const socket = fakeSocket();
+		socket.failNext(true); // the first channel-state write returns false
+
+		handleConnection(socket, recorder, [channelState("a", true, "https://x")]);
+		expect(socket.lines).toHaveLength(0); // nothing buffered; unsubscribed before the event dump
 		recorder.record(event("2"));
 		expect(socket.lines).toHaveLength(0);
 	});
@@ -225,5 +301,34 @@ describe("startStatusSocket (real net)", () => {
 			warn: () => {},
 		});
 		expect(handle).toBeNull();
+	});
+
+	it("dumps the channel-state snapshot to a connecting client (before events)", async () => {
+		const recorder = new RequestRecorder();
+		recorder.record(event("1", "bash"));
+		const path = join(tempDir(), "openhammer.sock");
+
+		const handle = await startStatusSocket(recorder, {
+			path,
+			channels: [channelState("deployed", true, "https://edge.example/mcp")],
+			warn: () => {},
+		});
+		expect(handle).not.toBeNull();
+		if (handle === null) return;
+
+		const collector = collectLines(path);
+		try {
+			await collector.waitFor(2); // channel-state line, then the 1 historical event
+			expect(JSON.parse(collector.lines[0] ?? "{}")).toMatchObject({
+				type: "channel-state",
+				id: "deployed",
+				up: true,
+				url: "https://edge.example/mcp",
+			});
+			expect(JSON.parse(collector.lines[1] ?? "{}").tool).toBe("bash");
+		} finally {
+			collector.close();
+		}
+		await handle.close();
 	});
 });

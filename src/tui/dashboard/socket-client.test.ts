@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RequestEvent, RequestRecorder } from "../../mcp/telemetry.ts";
-import { startStatusSocket } from "../../observability/status-socket.ts";
+import { type ChannelStateLine, formatChannelStateLine, startStatusSocket } from "../../observability/status-socket.ts";
 import { createSocketSubscriber, type SocketConnection } from "./socket-client.ts";
 
 /** A baseline event (the recorder's always-present 8 fields). */
@@ -24,6 +24,11 @@ function event(over: Partial<RequestEvent> = {}): RequestEvent {
 /** Compact-JSON NDJSON line (exactly what `formatEventLine` emits on the wire). */
 function ndjson(e: RequestEvent): string {
 	return JSON.stringify(e);
+}
+
+/** A channel-state line (spec 19c-channel). */
+function csLine(id: string, up: boolean, url: string | null): ChannelStateLine {
+	return { type: "channel-state", id, up, url };
 }
 
 /**
@@ -139,6 +144,44 @@ describe("createSocketSubscriber — NDJSON parsing", () => {
 
 		fake.push(...Array.from({ length: 5 }, (_, i) => ndjson(event({ ms: i }))));
 		expect(received).toHaveLength(5);
+		unsub();
+	});
+});
+
+describe("createSocketSubscriber — channel-state (19c-channel)", () => {
+	it("delivers channel-state lines to onChannelState, events to onEvent", () => {
+		const fake = fakeConnection();
+		const subscribe = subscriberOver(fake.conn);
+		const events: RequestEvent[] = [];
+		const states: ChannelStateLine[] = [];
+		const unsub = subscribe(
+			(e) => events.push(e),
+			(s) => states.push(s),
+		);
+
+		// A mixed stream — channel-state line, then an event, then another channel-state.
+		fake.push(
+			formatChannelStateLine(csLine("deployed", true, "https://edge.example/mcp")),
+			ndjson(event({ tool: "bash" })),
+			formatChannelStateLine(csLine("broken", false, null)),
+		);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.tool).toBe("bash");
+		expect(states).toEqual([csLine("deployed", true, "https://edge.example/mcp"), csLine("broken", false, null)]);
+		unsub();
+	});
+
+	it("delivers nothing to onChannelState when it is omitted (backward compatible)", () => {
+		const fake = fakeConnection();
+		const subscribe = subscriberOver(fake.conn);
+		const events: RequestEvent[] = [];
+		// 1-arg subscribe — the existing call shape (monitor-style consumers).
+		const unsub = subscribe((e) => events.push(e));
+
+		fake.push(formatChannelStateLine(csLine("deployed", true, "https://x")), ndjson(event({ tool: "ls" })));
+		// Events still flow; channel-state lines are simply skipped (no callback).
+		expect(events).toHaveLength(1);
+		expect(events[0]?.tool).toBe("ls");
 		unsub();
 	});
 });
@@ -292,5 +335,30 @@ describe("createSocketSubscriber (real status socket)", () => {
 		unsub();
 		await handle.close(); // the server tears its side down cleanly
 		expect(received.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("delivers the channel-state dump through the real net adapter (19c-channel)", async () => {
+		const recorder = new RequestRecorder();
+		const path = join(tempDir(), "openhammer.sock");
+		const handle = await startStatusSocket(recorder, {
+			path,
+			channels: [csLine("deployed", true, "https://edge.example/mcp")],
+			warn: () => {},
+		});
+		expect(handle).not.toBeNull();
+		if (handle === null) return;
+
+		const states: ChannelStateLine[] = [];
+		const subscribe = createSocketSubscriber({ path, warn: () => {} });
+		const unsub = subscribe(
+			() => {},
+			(s) => states.push(s),
+		);
+
+		await waitFor(() => states.some((s) => s.id === "deployed"));
+		expect(states[0]).toEqual(csLine("deployed", true, "https://edge.example/mcp"));
+
+		unsub();
+		await handle.close();
 	});
 });
