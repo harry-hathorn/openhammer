@@ -1,3 +1,4 @@
+import type { Terminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { BANNER } from "./banner.ts";
 import {
@@ -5,7 +6,9 @@ import {
 	askSecret,
 	askSelect,
 	askText,
+	createDefaultIo,
 	flagIo,
+	MaskedInput,
 	type PromptIo,
 	type SelectOption,
 	withSession,
@@ -197,5 +200,173 @@ describe("prompts — flagIo (non-interactive seam, spec 20g)", () => {
 		const io = flagIo({});
 		expect(() => io.intro("x")).not.toThrow();
 		expect(() => io.outro()).not.toThrow();
+	});
+});
+
+/**
+ * A fake pi-tui `Terminal` — the `prompt-loop.test.ts` shape, reproduced inline
+ * (the 19f per-file-fakes convention). Implements the full `Terminal` interface
+ * honestly (no `as`): cursor/clear/title/progress ops are inert; what matters is
+ * `start` (raw-mode entry), `stop` (restore), and `send` (drive a keystroke into
+ * the TUI's input handler).
+ */
+class FakeTerminal implements Terminal {
+	columns = 80;
+	rows = 24;
+	kittyProtocolActive = false;
+	private inputHandler: ((data: string) => void) | undefined;
+
+	start(onInput: (data: string) => void): void {
+		this.inputHandler = onInput;
+	}
+
+	stop(): void {
+		this.inputHandler = undefined; // detach — no keys arrive after restore
+	}
+
+	drainInput(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	write(): void {}
+
+	moveBy(): void {}
+	hideCursor(): void {}
+	showCursor(): void {}
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(): void {}
+	setProgress(): void {}
+
+	/** Simulate a keypress reaching the TUI's input handler. */
+	send(data: string): void {
+		this.inputHandler?.(data);
+	}
+}
+
+/** A discarding `BannerStream` sink so the hermetic trio writes nothing to stdout. */
+const silentStream = { write: (): boolean => true };
+
+/** `createDefaultIo` wired to a fake terminal — drive real components via `runPrompt`. */
+function ioWith(terminal: FakeTerminal) {
+	return createDefaultIo({ terminal, stdout: silentStream });
+}
+
+describe("MaskedInput — masking (the only new render logic)", () => {
+	it("shows one dot per glyph and never leaks the value", () => {
+		const input = new MaskedInput();
+		input.setValue("hunter2");
+		const [line] = input.render(80);
+		expect(line).toContain("•".repeat("hunter2".length));
+		// The secret itself must not appear anywhere in the rendered frame.
+		expect(input.render(80).join("")).not.toContain("hunter2");
+	});
+
+	it("renders just the caret when the value is empty", () => {
+		const input = new MaskedInput();
+		const [line] = input.render(80);
+		expect(line).toContain("> ");
+		expect(line).not.toContain("•");
+	});
+
+	it("caps the dot count to the available width (no line overflow)", () => {
+		const input = new MaskedInput();
+		input.setValue("x".repeat(100)); // far wider than a 20-col terminal
+		const [line] = input.render(20); // 20 cols → "> " (2) leaves 18, minus 1 for caret = 17 dots
+		expect(line).toContain("•".repeat(17));
+		expect(input.render(20).join("")).not.toContain("x".repeat(2)); // the value itself never renders
+	});
+
+	it("falls back to the bare prompt when the terminal is too narrow", () => {
+		const input = new MaskedInput();
+		input.setValue("secret");
+		expect(input.render(1)).toEqual(["> "]); // 1 col → no room for the prompt even
+	});
+});
+
+describe("createDefaultIo — pi-tui wiring via runPrompt", () => {
+	it("select: Enter confirms the first option's value", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.select({
+			message: "Pick",
+			options: [
+				{ value: "ngrok", label: "ngrok" },
+				{ value: "cloudflare", label: "cloudflare" },
+			],
+		});
+		term.send("\r"); // Enter → onSelect(first)
+		await expect(promise).resolves.toBe("ngrok");
+	});
+
+	it("select: Down then Enter confirms the second option", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.select({
+			message: "Pick",
+			options: [
+				{ value: "ngrok", label: "ngrok" },
+				{ value: "cloudflare", label: "cloudflare" },
+			],
+		});
+		term.send("\x1b[B"); // Down
+		term.send("\r"); // Enter
+		await expect(promise).resolves.toBe("cloudflare");
+	});
+
+	it("select: Escape cancels → null", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.select({ message: "Pick", options: [{ value: "a", label: "A" }] });
+		term.send("\x1b"); // Escape → onCancel
+		await expect(promise).resolves.toBeNull();
+	});
+
+	it("confirm: Enter (Yes) → true", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.confirm({ message: "Continue?" });
+		term.send("\r");
+		await expect(promise).resolves.toBe(true);
+	});
+
+	it("confirm: Down then Enter (No) → false", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.confirm({ message: "Continue?" });
+		term.send("\x1b[B"); // Down → "No"
+		term.send("\r");
+		await expect(promise).resolves.toBe(false);
+	});
+
+	it("confirm: Escape cancels → null (not false)", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.confirm({ message: "Continue?" });
+		term.send("\x1b");
+		await expect(promise).resolves.toBeNull();
+	});
+
+	it("text: typing then Enter submits the value", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.text({ message: "Name" });
+		for (const ch of "ada") {
+			term.send(ch);
+		}
+		term.send("\r");
+		await expect(promise).resolves.toBe("ada");
+	});
+
+	it("password: typing then Enter submits the value (round-trip)", async () => {
+		const term = new FakeTerminal();
+		const io = ioWith(term);
+		const promise = io.password({ message: "Token" });
+		for (const ch of "s3cr3t") {
+			term.send(ch);
+		}
+		term.send("\r");
+		await expect(promise).resolves.toBe("s3cr3t");
 	});
 });

@@ -275,11 +275,15 @@ describe("createAuthMiddleware — JWT path (20d)", () => {
 		return signAccessToken({ iss: ISSUER, aud: AUDIENCE, sub: clientId, client_id: clientId }, secret, 3600);
 	}
 
-	/** Flip the last signature char to invalidate the signature. */
+	/** Flip the first char of the signature segment to invalidate the signature.
+	 * All 6 bits of the first base64url char map to the first signature byte, so
+	 * this ALWAYS changes the decoded signature. (Flipping the last char is flaky:
+	 * its trailing bits are unused, so ~6% of tokens decode byte-identical and jose
+	 * still verifies — the 20f `jwt.test.ts` precedent, fixed the same way here.) */
 	function tamper(jwt: string): string {
+		const sigStart = jwt.lastIndexOf(".") + 1; // first char of the signature segment
 		const chars = [...jwt];
-		const i = chars.length - 1;
-		chars[i] = chars[i] === "A" ? "B" : "A";
+		chars[sigStart] = chars[sigStart] === "A" ? "B" : "A";
 		return chars.join("");
 	}
 
