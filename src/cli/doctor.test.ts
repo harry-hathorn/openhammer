@@ -1,7 +1,8 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ensureJwtSecret } from "../auth/oauth/clients.ts";
 import { type ChannelEntry, type ChannelMode, defaultSettings, type Settings } from "../config/settings.ts";
 import { err, ok } from "../tools/result.ts";
 import type { ChannelProvider } from "../tunnel/index.ts";
@@ -11,6 +12,7 @@ import {
 	createConfigCheck,
 	createCredentialsCheck,
 	createDefaultChecks,
+	createJwtSecretCheck,
 	type DiagnosticReport,
 	doctorCommand,
 	formatDoctor,
@@ -144,16 +146,78 @@ describe("binary check", () => {
 	});
 });
 
+describe("jwt secret check", () => {
+	it("passes (env source) when OAUTH_JWT_SECRET is set", async () => {
+		const { path, cleanup } = tempFile("credentials.json");
+		try {
+			const result = await createJwtSecretCheck({
+				env: { OAUTH_JWT_SECRET: "env-secret" },
+				credentialsPath: path,
+			}).run();
+			expect(result.status).toBe("pass");
+			expect(result.message).toContain("OAUTH_JWT_SECRET");
+			// The env value wins before any persistence.
+			expect(existsSync(path)).toBe(false);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("passes (persisted source) when a jwtSecret is in credentials.json", async () => {
+		const { path, cleanup } = tempFile("credentials.json");
+		try {
+			ensureJwtSecret(path); // mint + persist a real jwtSecret
+			const result = await createJwtSecretCheck({ env: {}, credentialsPath: path }).run();
+			expect(result.status).toBe("pass");
+			expect(result.message).toContain("credentials.json");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("warns when neither env nor a persisted secret is present — and does NOT mint", async () => {
+		const { path, cleanup } = tempFile("credentials.json");
+		try {
+			const result = await createJwtSecretCheck({ env: {}, credentialsPath: path }).run();
+			expect(result.status).toBe("warn");
+			expect(result.message).toContain("minted on first use");
+			// Read-only: the check must not have created the secrets file.
+			expect(existsSync(path)).toBe(false);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("treats a whitespace-only env value as unset (falls back to the persisted secret)", async () => {
+		const { path, cleanup } = tempFile("credentials.json");
+		try {
+			ensureJwtSecret(path);
+			const result = await createJwtSecretCheck({ env: { OAUTH_JWT_SECRET: "   " }, credentialsPath: path }).run();
+			expect(result.status).toBe("pass");
+			expect(result.message).toContain("credentials.json");
+		} finally {
+			cleanup();
+		}
+	});
+});
+
 describe("createDefaultChecks", () => {
-	it("builds the four built-in checks in a stable order", () => {
+	it("builds the five built-in checks in a stable order", () => {
 		const checks = createDefaultChecks({ isAvailable: () => true });
-		expect(checks.map((c) => c.id)).toEqual(["config", "credentials", "rg", "fd"]);
+		expect(checks.map((c) => c.id)).toEqual(["config", "credentials", "oauth-jwt-secret", "rg", "fd"]);
 	});
 
 	it("threads the injected isAvailable into the binary checks", async () => {
 		const checks = createDefaultChecks({ isAvailable: () => false });
 		const rg = await checks.find((c) => c.id === "rg")!.run();
 		expect(rg.status).toBe("fail");
+	});
+
+	it("threads the injected env into the jwt-secret check (env-set → pass)", async () => {
+		const checks = createDefaultChecks({ isAvailable: () => true, env: { OAUTH_JWT_SECRET: "x" } });
+		const jwt = await checks.find((c) => c.id === "oauth-jwt-secret")!.run();
+		expect(jwt.status).toBe("pass");
+		expect(jwt.message).toContain("OAUTH_JWT_SECRET");
 	});
 });
 
