@@ -64,7 +64,7 @@ export type FrameProducer = (width: number, height: number) => string[];
  *   sequence (match it with `matchesKey`/`parseKey` from pi-tui).
  * - `clear()`: force a full screen clear + redraw on the next tick.
  * - `suspend()`/`resume()`: temporarily hand the terminal to a cooked-mode modal
- *   (a clack wizard, 19d) and take it back. `stop()`/`start()` is NOT reentrant
+ *   (a pi-tui wizard, 19d) and take it back. `stop()`/`start()` is NOT reentrant
  *   here (`stop()` removes the input listener permanently + sets a final flag),
  *   so modals use this lighter pair: `suspend()` = `tui.stop()` (cooked mode) with
  *   the cadence paused, `resume()` = `tui.start()` + a forced full redraw. The
@@ -78,7 +78,7 @@ export interface DashboardRenderer {
 	onKey(cb: (data: string) => void): void;
 	clear(): void;
 	/**
-	 * Release the terminal for a cooked-mode modal (a clack wizard, 19d): stop the
+	 * Release the terminal for a cooked-mode modal (a pi-tui wizard, 19d): stop the
 	 * render loop + refresh cadence and restore cooked mode (the inverse of
 	 * {@link DashboardRenderer.start}'s raw-mode entry). Pair with
 	 * {@link DashboardRenderer.resume}. No-op if not started, already suspended, or
@@ -87,7 +87,7 @@ export interface DashboardRenderer {
 	suspend(): void;
 	/**
 	 * Resume the render loop after {@link DashboardRenderer.suspend}: re-enter raw
-	 * mode and force a full redraw (a clack modal uses the alternate/cleared screen,
+	 * mode and force a full redraw (a pi-tui modal uses the alternate/cleared screen,
 	 * so the resumed dashboard must repaint fully). No-op if not currently suspended.
 	 */
 	resume(): void;
@@ -155,7 +155,7 @@ export function createDashboardRenderer(deps: DashboardRendererDeps = {}): Dashb
 	// returns early from the TUI's handleInput — before its own requestRender — and
 	// an *unconsumed* one with no focused component never reaches that requestRender
 	// either, so the redraw must be requested here either way. (Modals suspend the
-	// loop entirely and run clack, so this listener is idle during a wizard.)
+	// loop entirely and run a pi-tui wizard, so this listener is idle then.)
 	const removeInputListener = tui.addInputListener((data) => {
 		keyHandler?.(data);
 		tui.requestRender();
@@ -195,7 +195,7 @@ export function createDashboardRenderer(deps: DashboardRendererDeps = {}): Dashb
 		},
 		suspend() {
 			// No-op unless running and not already suspended: pause the cadence and
-			// restore cooked mode (tui.stop) so a clack modal can drive the terminal.
+			// restore cooked mode (tui.stop) so a pi-tui modal can drive the terminal.
 			// The input listener (added once at construction) is left in place — pi-tui
 			// keeps its input-listener Set across stop/start, so keys return on resume.
 			if (!started || stopped || suspended) {

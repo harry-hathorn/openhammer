@@ -155,10 +155,13 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
 
 - **Stateless MCP.** Per-request `Server` + `StreamableHTTPServerTransport` (`enableJsonResponse:true`),
   no `sessionIdGenerator` (the SDK's stateless mode).
-- **Opaque bearer auth.** Constant-time compared; one token per instance; `MCP_AUTH_TOKEN` overrides.
-  No OAuth AS — only a `/.well-known/oauth-protected-resource` discovery pointer.
+- **Opaque bearer auth + OAuth client-credentials.** The bearer token is constant-time compared;
+  one token per instance; `MCP_AUTH_TOKEN` overrides. OAuth-only clients (which can't set a raw
+  `Authorization` header) get an HS256 JWT from `POST /oauth/token` (client_id/client_secret),
+  advertised via RFC 8414/9728 metadata and accepted by the `/mcp` gate alongside the opaque token
+  (spec 20) — alongside the `/.well-known/oauth-protected-resource` discovery pointer.
 - **Channels & config are pluggable.** A channel provider registry (`live`/`static`) + a settings-section
-  registry drive a schema-based TUI wizard (`@clack/prompts`) — adding a channel or a settings section is
+  registry drive a schema-based TUI wizard (`@earendil-works/pi-tui`) — adding a channel or a settings section is
   one file + one registry line.
 - **Live monitoring.** A non-blocking recorder streams client + tool-call activity over a local-only
   Unix socket (`~/.openhammer/openhammer.sock`, `0600`); `openhammer monitor` tails it.
