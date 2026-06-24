@@ -12,6 +12,7 @@
 import fastifyCors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 
+import type { OauthMiddlewareOptions } from "./auth/middleware.ts";
 import { registerOauthRoutes } from "./auth/oauth/token.ts";
 import type { Config } from "./config.ts";
 import { mcpHttpRoutes } from "./mcp/http-transport.ts";
@@ -22,12 +23,16 @@ import { registerWellKnown } from "./mcp/well-known.ts";
  * Build the OpenHammer Fastify app: CORS, `/health`, well-known discovery, the
  * `/mcp` transport, and global error/404 handlers. Does not listen — the caller
  * owns binding + lifecycle (see module header).
+ *
+ * `oauth` (spec 20d), when supplied, enables the JWT acceptance path in the
+ * `/mcp` auth gate (resolved at boot by `main.ts`); omit it for opaque-only.
  */
 export async function buildFastify(
 	config: Config,
 	token: string,
 	allowedClients: string[] = [],
 	recorder?: RequestRecorder,
+	oauth?: OauthMiddlewareOptions,
 ): Promise<FastifyInstance> {
 	// pino-pretty only in development (`NODE_ENV=development`) — production gets
 	// raw JSON for structured log shipping; tests run with `NODE_ENV=test`, so
@@ -87,7 +92,7 @@ export async function buildFastify(
 	// wired inside `mcpHttpRoutes`. Called directly (it is an async arity-2
 	// function shaped for this) so the routes land on the parent scope alongside
 	// `/health` + well-known, with no plugin wrapper or `fastify-plugin` dep.
-	await mcpHttpRoutes(fastify, { token, config, allowedClients, recorder });
+	await mcpHttpRoutes(fastify, { token, config, allowedClients, recorder, oauth });
 
 	// Global error handler — preserves Fastify's `statusCode` (e.g. 400 on a
 	// malformed JSON body) and otherwise 500s. The `/mcp` POST handler calls
