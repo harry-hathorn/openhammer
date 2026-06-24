@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { BANNER } from "./banner.ts";
-import { askConfirm, askSecret, askSelect, askText, type PromptIo, type SelectOption, withSession } from "./prompts.ts";
+import {
+	askConfirm,
+	askSecret,
+	askSelect,
+	askText,
+	flagIo,
+	type PromptIo,
+	type SelectOption,
+	withSession,
+} from "./prompts.ts";
 
 /**
  * A recording fake `PromptIo` — no TTY, no clack. `returns` controls each
@@ -145,5 +154,48 @@ describe("prompts — withSession", () => {
 			),
 		).rejects.toThrow("boom");
 		expect(calls.outro).toHaveLength(1);
+	});
+});
+
+describe("prompts — flagIo (non-interactive seam, spec 20g)", () => {
+	it("resolves each primitive by its message (the flag value)", async () => {
+		const io = flagIo({ "Channel type": "ngrok", "ngrok authtoken": "T0KEN" });
+		await expect(io.select({ message: "Channel type", options: [] })).resolves.toBe("ngrok");
+		await expect(io.password({ message: "ngrok authtoken" })).resolves.toBe("T0KEN");
+	});
+
+	it("`select` returns null when the message is absent (picker not supplied)", async () => {
+		const io = flagIo({});
+		await expect(io.select({ message: "Channel type", options: [] })).resolves.toBeNull();
+	});
+
+	it("`password` returns null when the message is absent (a required secret missing its flag)", async () => {
+		const io = flagIo({});
+		await expect(io.password({ message: "ngrok authtoken" })).resolves.toBeNull();
+	});
+
+	it("`text` falls back to the seeded default so an unspecified field is left unchanged (not cancel)", async () => {
+		const io = flagIo({ "Allowed clients": "claude-code" });
+		// The target field resolves to its flag value…
+		await expect(io.text({ message: "Allowed clients", defaultValue: "old" })).resolves.toBe("claude-code");
+		// …an unspecified field keeps its seeded current value (the default), not null.
+		await expect(io.text({ message: "Other field", defaultValue: "current" })).resolves.toBe("current");
+		await expect(io.text({ message: "No default" })).resolves.toBe("");
+	});
+
+	it('`confirm` reads `"true"`/`"false"` from the answers, else the seeded initialValue', async () => {
+		const io = flagIo({ "Make default": "true" });
+		await expect(io.confirm({ message: "Make default" })).resolves.toBe(true);
+		const io2 = flagIo({ "Make default": "false" });
+		await expect(io2.confirm({ message: "Make default" })).resolves.toBe(false);
+		const io3 = flagIo({});
+		await expect(io3.confirm({ message: "x", initialValue: true })).resolves.toBe(true);
+		await expect(io3.confirm({ message: "x" })).resolves.toBeNull();
+	});
+
+	it("intro/outro are no-ops (no banner, no clack framing)", async () => {
+		const io = flagIo({});
+		expect(() => io.intro("x")).not.toThrow();
+		expect(() => io.outro()).not.toThrow();
 	});
 });

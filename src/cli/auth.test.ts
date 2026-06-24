@@ -176,6 +176,96 @@ describe("authCommand — add-client", () => {
 	});
 });
 
+describe("authCommand — add-client (non-interactive, spec 20g)", () => {
+	it("`--label` issues a client with no prompt and prints only the id (no --print-secret)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const { io, out } = recordingIo();
+			const code = await authCommand("add-client", ["--label", "ci-bot"], io, { credPath: path });
+			expect(code).toBe(0);
+			const text = out();
+			expect(text).toContain("Added OAuth client oh_");
+			// The secret is withheld (stdout may be logged)…
+			expect(text).not.toContain("client_secret:");
+			expect(text).toContain("--print-secret");
+			// …but the client is persisted with the label (same issueClient path as interactive).
+			const listed = listClients(path);
+			expect(listed).toHaveLength(1);
+			expect(listed[0]?.label).toBe("ci-bot");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("`--label --print-secret` reveals the plaintext secret to stdout (capturable in CI)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const { io, out } = recordingIo();
+			const code = await authCommand("add-client", ["--label", "ci-bot", "--print-secret"], io, { credPath: path });
+			expect(code).toBe(0);
+			const text = out();
+			expect(text).toContain("client_id:     oh_");
+			expect(text).toContain("client_secret:");
+			expect(text).toContain('Issued OAuth client "ci-bot".');
+			// The persisted bag holds only the hash, never the revealed plaintext.
+			const revealedSecret = text.match(/client_secret:\s+(\S+)/)?.[1] ?? "<no-secret>";
+			const bag: CredentialValues = getCredentials("__openhammer_oauth__", path);
+			expect(JSON.stringify(bag)).not.toContain(revealedSecret);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("`--label=` (equals form) issues a client (parseSubFlags handles both forms)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const { io } = recordingIo();
+			await authCommand("add-client", ["--label=equals-form"], io, { credPath: path });
+			expect(listClients(path)[0]?.label).toBe("equals-form");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("a blank `--label` issues a client without one (parity with the interactive blank label)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const { io } = recordingIo();
+			await authCommand("add-client", ["--label", ""], io, { credPath: path });
+			expect(listClients(path)).toHaveLength(1);
+			expect(listClients(path)[0]?.label).toBe("");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("the flag path persists a client identical to the interactive path (≡ on the same label)", async () => {
+		// Same label via flag vs interactive prompt → same registry shape (id minted, hash stored).
+		const { path: flagPath, cleanup: flagCleanup } = tempCredPath();
+		const { path: promptPath, cleanup: promptCleanup } = tempCredPath();
+		try {
+			const flagIo = recordingIo();
+			await authCommand("add-client", ["--label", "same", "--print-secret"], flagIo.io, { credPath: flagPath });
+			const promptIo = fakeTextIo(["same"]);
+			const promptRec = recordingIo();
+			await authCommand("add-client", [], promptRec.io, { io: promptIo.io, credPath: promptPath });
+
+			const flagClients = listClients(flagPath);
+			const promptClients = listClients(promptPath);
+			expect(flagClients).toHaveLength(1);
+			expect(promptClients).toHaveLength(1);
+			expect(flagClients[0]?.label).toBe(promptClients[0]?.label);
+			// Both store a secret hash under the same reserved credId bag shape.
+			const flagBag = getCredentials("__openhammer_oauth__", flagPath);
+			const promptBag = getCredentials("__openhammer_oauth__", promptPath);
+			expect(Object.keys(flagBag).sort()).toEqual(Object.keys(promptBag).sort());
+		} finally {
+			flagCleanup();
+			promptCleanup();
+		}
+	});
+});
+
 describe("authCommand — list", () => {
 	it("prints the empty hint when no clients are registered (exit 0)", async () => {
 		const { path, cleanup } = tempCredPath();
