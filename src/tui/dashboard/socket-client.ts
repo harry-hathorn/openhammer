@@ -30,16 +30,17 @@
  * lower layer than the CLI) does not depend on `src/cli/` — a future consolidation
  * could lift a shared status-socket client into `src/observability/`.
  *
- * **Channel live-state is deferred (the other half of 19c).** The 17s socket
- * carries only `RequestEvent`s; per-channel up/down + URL requires the
- * server-side protocol addition spec 19 flags as future ("a small addition to the
- * status protocol"). The dashboard's `channelState` seam + the panels' `unknown`
- * rendering already accommodate its absence, so this client (live clients +
- * monitor feed) is a complete, non-blocking increment — see IMPLEMENTATION_PLAN 19c.
+ * **Channel live-state (spec 19c-channel).** The server emits a
+ * `{ type: "channel-state", id, up, url }` line in the connection dump (threaded
+ * from `resolveChannelHandle` in `main.ts` via `startStatusSocket`). This client
+ * parses both line kinds — `RequestEvent`s go to `onEvent` (unchanged),
+ * channel-state lines go to an optional `onChannelState` callback (the 2nd arg).
+ * The 2nd arg is optional, so every existing `subscribe((e) => …)` call site is
+ * unchanged; `openhammer monitor` (which ignores channel-state) is unaffected too.
  */
 import { createConnection } from "node:net";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
-import { statusSocketPath } from "../../observability/status-socket.ts";
+import { type ChannelStateLine, parseChannelStateLine, statusSocketPath } from "../../observability/status-socket.ts";
 import { parseEventLine } from "../monitor-view.ts";
 
 /**
@@ -91,17 +92,22 @@ function messageOf(e: unknown): string {
  * Build the dashboard's `subscribe` seam from the status socket. The returned
  * function opens a fresh connection when the dashboard subscribes (once, on
  * start), delivers the recent dump then live {@link RequestEvent}s to `onEvent`,
- * and returns an idempotent unsubscribe that destroys the connection. Never
- * throws — a missing/errored socket warns + delivers nothing.
+ * and any channel-state lines to the optional `onChannelState` (the dashboard
+ * folds them into its `channelState` snapshot). Returns an idempotent unsubscribe
+ * that destroys the connection. Never throws — a missing/errored socket warns +
+ * delivers nothing.
  */
 export function createSocketSubscriber(
 	deps: DashboardSocketDeps = {},
-): (onEvent: (event: RequestEvent) => void) => () => void {
+): (onEvent: (event: RequestEvent) => void, onChannelState?: (state: ChannelStateLine) => void) => () => void {
 	const path = deps.path ?? statusSocketPath();
 	const connect = deps.connect ?? connectStatusSocket;
 	const warn = deps.warn ?? ((message: string) => console.warn(message));
 
-	return (onEvent: (event: RequestEvent) => void): (() => void) => {
+	return (
+		onEvent: (event: RequestEvent) => void,
+		onChannelState?: (state: ChannelStateLine) => void,
+	): (() => void) => {
 		let destroyed = false;
 		let buf = "";
 		let conn: SocketConnection | undefined;
@@ -126,14 +132,21 @@ export function createSocketSubscriber(
 		conn.onData((chunk) => {
 			if (destroyed) return;
 			buf += chunk.toString("utf8");
-			// NDJSON: a chunk may split a line or carry many. Parse each complete line.
+			// NDJSON: a chunk may split a line or carry many. Parse each complete line:
+			// a RequestEvent → onEvent; a channel-state line → onChannelState (19c-channel).
 			let nl = buf.indexOf("\n");
 			while (nl >= 0) {
 				const line = buf.slice(0, nl);
 				buf = buf.slice(nl + 1);
 				nl = buf.indexOf("\n");
 				const event = parseEventLine(line);
-				if (event !== null) onEvent(event); // blank/malformed skipped — the feed never aborts
+				if (event !== null) {
+					onEvent(event);
+					continue;
+				}
+				const state = parseChannelStateLine(line);
+				if (state !== null && onChannelState !== undefined) onChannelState(state);
+				// blank/malformed lines are skipped — the feed never aborts
 			}
 		});
 		conn.onError((err) => {
