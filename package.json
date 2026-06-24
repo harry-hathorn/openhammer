@@ -33,6 +33,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.0",
 		"@clack/prompts": "^1.6.0",
+		"@earendil-works/pi-tui": "^0.80.2",
 		"@types/node": "^20.19.43",
 		"ora": "^9.4.1",
 		"pino-pretty": "^13.1.3",
