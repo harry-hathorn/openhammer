@@ -85,9 +85,10 @@ Point your MCP client (Claude Code, Cursor, the MCP Inspector, …) at that URL 
 with the inspector: `npx @modelcontextprotocol/inspector` → POST `…/mcp` with the bearer → `initialize`
 → `tools/list` (expect 8 tools: `guide` + the 7 capability tools) → call each.
 
-> **The `openhammer` command** is the package bin. After `npm run build`, invoke it as
-> `./node_modules/.bin/openhammer …` or `node dist/cli.js …`; `npm link` puts it on your `PATH`, and
-> `npx tsx src/cli.ts …` runs it during development without building.
+> **Running the CLI:** after `npm run build`, invoke it as **`node dist/cli.js …`** — npm does *not* link
+> a package's own bin into `node_modules/.bin`, so `./node_modules/.bin/openhammer` won't exist. For the
+> bare `openhammer …` shortcut, run **`npm link`** once (puts it on your `PATH`); during development
+> without building, use **`npx tsx src/cli.ts …`**.
 
 ## The `openhammer` CLI
 
