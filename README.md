@@ -28,6 +28,8 @@
 [![TypeScript: strict](https://img.shields.io/badge/TypeScript-strict-blue.svg)](./tsconfig.json)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-purple.svg)](https://modelcontextprotocol.io)
 
+> "OpenHammer allows you to serve a file system and shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows, like OpenClaw, Hermes, PI, OpenCode, Claude Code, etc. The OGs know that the best agents aren't heavily abstracted behind sdks like Crew AI, LangChain or N8N, but are simply an LLM iterating over a filesystem with bash. You'll be able to tunnel your local environment straight to any MCP client, so no need for a million connectors to share your code with an AI chat, and turns any streaming chat loop into a harness. Or, you could launch a web server for any AI to drive. A few simple tools with the right access make this possible. This allows you to use any MCP compatible client to control a computer. Once the base tools are done, I'll be adding all the tools needed for managing agents, from memories, skills, tools, sessions, all persisting, cross compatible and portable to any MCP client." — Harry Hathorn
+
 A **standalone MCP server with no LLM** that mints a per-instance bearer token and exposes 7 local
 shell & filesystem tools — `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` — to a remote agent
 over Fastify + stateless Streamable HTTP, rooted at `MCP_ROOT_DIR` and gated by the credential. It is
@@ -139,6 +141,14 @@ Settings persist under `~/.openhammer` (`config.json` for non-secret config + `d
 
 `mcp.allowedClients` (set via `openhammer config set mcp`) is a secondary, best-effort client-type
 filter on top of the bearer token; default is any client. The bearer token remains the real gate.
+
+## Headless / server deployment
+
+No TUI required — a server deploy (Docker / systemd / k8s) is configured via **environment variables** and/or **provisioning the dotfile**:
+
+- **Env (simplest):** `HOST=0.0.0.0 MCP_ROOT_DIR=/srv/web MCP_AUTH_TOKEN=… LOG_LEVEL=info node dist/main.js`. Env overrides the dotfile, so a server can run with **zero** `~/.openhammer` state. Point `MCP_ROOT_DIR` at the filesystem you want to serve to the agent.
+- **Provision the dotfile** for what env can't express (a persisted channel + its secret, an OAuth client pair): write `~/.openhammer/config.json` + `credentials.json` (`0600`) directly — bake into the image, mount a volume, or cloud-init; `node dist/main.js` reads them at boot. (Precedence: CLI flags > env > dotfile.)
+- **Non-interactive CLI** (scripted / CI — *planned, `20g`*): `openhammer channel add --provider ngrok --authtoken "$T"`, `openhammer config set mcp.allowedClients claude-code`, `openhammer auth add-client --label ci` — flag-driven, no wizard, validated. Until then, script those via env (`NGROK_AUTHTOKEN`, `MCP_ALLOWED_CLIENTS`) or by writing the dotfile JSON.
 
 ## Architecture
 
