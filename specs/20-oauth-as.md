@@ -78,6 +78,16 @@ export const verifySecret = (provided: string, hash: string): boolean => {
 //   plaintext secret is returned ONCE; only the hash is stored.
 ```
 
+> **Implementation note (20b, shipped):** the on-disk layout is a **reserved credId**
+> (`__openhammer_oauth__`) bag `{ jwtSecret?, clients }` (with `clients` JSON-stringified)
+> inside 17e's `Record<credId, Record<string,string>>` `credentials.json` — **not** the
+> top-level `{ jwtSecret, clients: {…} }` sketched above. 17e's `isCredentialsMap`
+> whole-file validation rejects any non-string-bag value (data loss on the next channel
+> write), so the registry must ride inside a valid string bag. The bag shape is fully
+> encapsulated behind the domain functions (`findClient`/`listClients`/`issueClient`/
+> `removeClient`/`ensureJwtSecret`/`resolveJwtSecret`). Full rationale in
+> `IMPLEMENTATION_PLAN.md` 20b.
+
 ### `src/auth/oauth/token.ts` — the client-credentials grant
 ```ts
 // POST /oauth/token  (JSON or form body; mount under @fastify/formbody for form posts)
