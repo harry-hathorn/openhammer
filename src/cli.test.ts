@@ -109,14 +109,61 @@ describe("dispatch — arg → command routing", () => {
 		expect(code).toBeUndefined();
 	});
 
-	it("no command (null) delegates to boot (the default) and signals running", async () => {
+	it("no command (null) in a non-TTY delegates to boot (headless) and signals running", async () => {
 		let booted = false;
+		let dashboardCalled = false;
 		const code = await dispatch(parsed(null), {
+			isTTY: false,
 			boot: async () => {
 				booted = true;
 			},
+			dashboard: async () => {
+				dashboardCalled = true;
+				return 0;
+			},
 		});
 		expect(booted).toBe(true);
+		expect(dashboardCalled).toBe(false);
+		expect(code).toBeUndefined();
+	});
+
+	it("no command (null) in a TTY opens the dashboard (not boot) and returns its exit code", async () => {
+		let booted = false;
+		// A holder (not a `let`) so TS narrows the property reads across the dashboard closure.
+		const captured: { parsed: ParsedArgs | null } = { parsed: null };
+		const code = await dispatch(parsed(null, [], { tunnel: true, channel: "abc" }), {
+			isTTY: true,
+			boot: async () => {
+				booted = true;
+			},
+			dashboard: async (p) => {
+				captured.parsed = p;
+				return 0;
+			},
+		});
+		expect(booted).toBe(false);
+		expect(captured.parsed).not.toBeNull();
+		expect(captured.parsed?.command).toBeNull();
+		expect(captured.parsed?.tunnel).toBe(true); // flags are forwarded to the dashboard
+		expect(captured.parsed?.channel).toBe("abc");
+		expect(code).toBe(0);
+	});
+
+	it("`start` is headless even in a TTY (the dashboard is the no-args entry)", async () => {
+		let booted = false;
+		let dashboardCalled = false;
+		const code = await dispatch(parsed("start"), {
+			isTTY: true,
+			boot: async () => {
+				booted = true;
+			},
+			dashboard: async () => {
+				dashboardCalled = true;
+				return 0;
+			},
+		});
+		expect(booted).toBe(true);
+		expect(dashboardCalled).toBe(false);
 		expect(code).toBeUndefined();
 	});
 

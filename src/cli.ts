@@ -5,8 +5,9 @@
  * unknown options become diagnostics), prints the README banner on an interactive
  * launch, writes diagnostics to stderr, then {@link dispatch}es on `command`.
  *
- * The command dispatch table (17o + 17p):
- * - `start` / no command → boot (delegate to the spec-14 {@link main}).
+ * The command dispatch table (17o + 17p + 19e):
+ * - no command → the **dashboard** in a terminal (spec 19; it starts/manages the server),
+ *   or boot headless when non-interactive. `start` always boots headless.
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
@@ -20,7 +21,9 @@ import { doctorCommand } from "./cli/doctor.ts";
 import { monitorCommand } from "./cli/monitor.ts";
 import { CONFIG_SECTIONS } from "./config/sections.ts";
 import { loadSettings, saveSettings, settingsPath } from "./config/settings.ts";
+import { loadConfig } from "./config.ts";
 import { type BannerStream, printBanner } from "./tui/banner.ts";
+import type { ServerStatusState } from "./tui/dashboard/panels.ts";
 import { addChannel } from "./tui/wizards/channel.ts";
 import { setSection } from "./tui/wizards/section.ts";
 import { listChannels, removeChannel, setDefaultChannel } from "./tunnel/manage.ts";
@@ -83,8 +86,15 @@ const silentStream: BannerStream = { write: () => false };
 export interface DispatchDeps {
 	stdout?: BannerStream;
 	stderr?: BannerStream;
-	/** The boot path for `start`/default (defaults to the spec-14 {@link main}, lazy-imported so `channel list` etc. never load the server stack). */
+	/** Interactive (TTY) launch? Defaults to `process.stdout.isTTY`. Decides whether a
+	 * command-less launch opens the dashboard (TTY) or boots headless (non-TTY). */
+	isTTY?: boolean;
+	/** The boot path for `start`/default-headless (defaults to the spec-14 {@link main}, lazy-imported so `channel list` etc. never load the server stack). */
 	boot?: () => Promise<void>;
+	/** The dashboard for a command-less **TTY** launch (defaults to {@link defaultDashboard},
+	 * lazy-imported so the pi-tui render lib never loads on the headless path). Returns the
+	 * exit code (`0` clean quit, `1` the server could not start). */
+	dashboard?: (parsed: ParsedArgs) => Promise<number>;
 	/** `channel` subcommand handler (defaults to {@link channelCommand}). */
 	channel?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `config` subcommand handler (defaults to {@link configCommand}). */
@@ -117,6 +127,8 @@ export type DispatchOutcome = number | undefined;
 export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Promise<DispatchOutcome> {
 	const io: CommandIo = { stdout: deps.stdout ?? process.stdout, stderr: deps.stderr ?? process.stderr };
 	const boot = deps.boot ?? defaultBoot;
+	const dashboard = deps.dashboard ?? defaultDashboard;
+	const isTTY = deps.isTTY ?? process.stdout.isTTY === true;
 	const channel = deps.channel ?? channelCommand;
 	const config = deps.config ?? configCommand;
 	const doctor = deps.doctor ?? doctorCommand;
@@ -128,10 +140,18 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 	}
 
 	switch (parsed.command) {
-		case "start":
 		case null:
+			// A command-less launch in a terminal opens the control-center dashboard,
+			// which manages the server (spec 19e). Headless (non-TTY / containers) boots
+			// the server directly — the dashboard is an interactive (TTY) affordance.
+			if (isTTY) return await dashboard(parsed);
 			await boot();
 			return undefined; // server running — the event loop (Fastify) keeps the process alive
+		case "start":
+			// `start` is always headless (the explicit "just run the server" command),
+			// even in a terminal — the dashboard is the no-args interactive entry.
+			await boot();
+			return undefined;
 		case "channel":
 			return channel(parsed.rest[0], parsed.rest.slice(1), io);
 		case "config":
@@ -150,6 +170,50 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 const defaultBoot = async (): Promise<void> => {
 	const { main } = await import("./main.ts");
 	await main();
+};
+
+/**
+ * The default dashboard (spec 19e) — lazy-imports the dashboard stack (the pi-tui
+ * render lib is a devDep; the headless path never loads it) so `channel list` etc.
+ * stay light. Ensures the server is up (spawning it as a child if needed), wires
+ * the live status-socket feed + static-channel probe + doctor modal + the status
+ * snapshot, and blocks on the dashboard until the operator quits — then the server
+ * child is torn down (no orphan). Returns `0` on a clean quit, `1` if the server
+ * could not be started (the failure is surfaced on stderr).
+ */
+const defaultDashboard = async (parsed: ParsedArgs): Promise<number> => {
+	const { runDashboard } = await import("./tui/dashboard.ts");
+	const { createDashboardRenderer } = await import("./tui/dashboard/render.ts");
+	const { createSocketSubscriber } = await import("./tui/dashboard/socket-client.ts");
+	const { createChannelProbe } = await import("./tui/dashboard/channel-probe.ts");
+	const { ensureServer, serverArgs } = await import("./tui/dashboard/server-control.ts");
+
+	const settings = loadSettings();
+	const config = loadConfig();
+	const control = await ensureServer(config, { args: serverArgs(parsed.tunnel, parsed.channel) });
+	if (!control.ok) {
+		process.stderr.write(`${control.error.message}\n`);
+		return 1;
+	}
+	const { localUrl, token, stop } = control.value;
+	// The active channel's public URL reaches the channels panel via the status-socket
+	// feed (19c-channel); the status panel's tunnel line is the local endpoint + token
+	// for now (a live tunnel URL in the status panel is a future refinement).
+	const status: ServerStatusState = { up: true, localUrl, publicUrl: null, token };
+
+	await runDashboard({
+		renderer: createDashboardRenderer(),
+		settings,
+		status,
+		subscribe: createSocketSubscriber(),
+		probeChannels: createChannelProbe({ channels: settings.channels }),
+		doctorModal: () => doctorCommand({ stdout: process.stdout }),
+		onQuit: async () => {
+			const result = await stop();
+			if (!result.ok) process.stderr.write(`${result.error.message}\n`);
+		},
+	});
+	return 0;
 };
 
 // ---- `channel` subcommands --------------------------------------------------
@@ -289,7 +353,9 @@ async function setConfigCmd(section: string | undefined, io: CommandIo): Promise
 const USAGE = `Usage: openhammer [command] [options]
 
 Commands:
-  start                  Start the OpenHammer server (default when no command)
+  (no command)           In a terminal: open the control-center dashboard (it
+                         starts the server). Otherwise: start the server headless.
+  start                  Start the OpenHammer server headless
   channel <subcommand>   Manage channels (how OpenHammer is reached)
     add                    Add a channel (interactive wizard)
     list                   List configured channels
