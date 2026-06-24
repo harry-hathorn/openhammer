@@ -23,13 +23,15 @@ describe("registerWellKnown", () => {
 		await app.close();
 	});
 
-	it("responds 200 with the resource URL + bearer_methods", async () => {
+	it("responds 200 with the resource URL, AS advertisement, + bearer_methods", async () => {
 		const res = await app.inject({ method: "GET", url: "/.well-known/oauth-protected-resource" });
 
 		expect(res.statusCode).toBe(200);
 		expect(JSON.parse(res.body)).toEqual({
 			resource: `${BASE_URL}/mcp`,
+			authorization_servers: [BASE_URL],
 			bearer_methods: ["header"],
+			scopes_supported: [],
 		});
 	});
 
@@ -55,7 +57,9 @@ describe("registerWellKnown", () => {
 
 			expect(JSON.parse(res.body)).toEqual({
 				resource: "https://tunnel.example:9999/mcp",
+				authorization_servers: ["https://tunnel.example:9999"],
 				bearer_methods: ["header"],
+				scopes_supported: [],
 			});
 		} finally {
 			await custom.close();
