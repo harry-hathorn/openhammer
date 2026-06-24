@@ -115,4 +115,40 @@ describe("parseArgs", () => {
 			expect(() => parseArgs(["-z", "--bogus", "cmd"])).not.toThrow();
 		});
 	});
+
+	describe("subcommand flag passthrough (spec 20g)", () => {
+		it("an unknown long option AFTER the command passes through to `rest` (no diagnostic)", () => {
+			const r = parseArgs(["channel", "add", "--provider", "ngrok", "--authtoken", "T"]);
+			expect(r.command).toBe("channel");
+			expect(r.rest).toEqual(["add", "--provider", "ngrok", "--authtoken", "T"]);
+			expect(r.diagnostics).toEqual([]);
+		});
+
+		it("`--flag=value` AFTER the command passes through verbatim", () => {
+			const r = parseArgs(["auth", "add-client", "--label=ci-bot", "--print-secret"]);
+			expect(r.command).toBe("auth");
+			expect(r.rest).toEqual(["add-client", "--label=ci-bot", "--print-secret"]);
+			expect(r.diagnostics).toEqual([]);
+		});
+
+		it("a boolean-style subcommand flag (`--default` at the tail) passes through", () => {
+			const r = parseArgs(["channel", "add", "--provider", "ngrok", "--default"]);
+			expect(r.rest).toEqual(["add", "--provider", "ngrok", "--default"]);
+			expect(r.diagnostics).toEqual([]);
+		});
+
+		it("recognized top-level flags are still extracted even after the command", () => {
+			// `--tunnel` is a known top-level flag → parsed out of `rest`, not passthrough.
+			const r = parseArgs(["channel", "--tunnel", "remove", "abc"]);
+			expect(r.command).toBe("channel");
+			expect(r.tunnel).toBe(true);
+			expect(r.rest).toEqual(["remove", "abc"]);
+		});
+
+		it("an unknown long option BEFORE the command is still a warning (top-level typo)", () => {
+			const r = parseArgs(["--bogus", "start"]);
+			expect(r.command).toBe("start");
+			expect(r.diagnostics).toEqual([{ type: "warning", message: "Unknown option: --bogus" }]);
+		});
+	});
 });

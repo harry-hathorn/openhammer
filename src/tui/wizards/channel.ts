@@ -77,8 +77,18 @@ const defaultProbeRunner: ProbeRunner = async (label, fn) => {
 	return r;
 };
 
+/**
+ * The provider-picker select's message — the non-interactive address for the
+ * picker (spec 20g): the flag path builds its `flagIo` answers keyed by this, so
+ * the flag-driven {@link addChannel} resolves the `--provider` choice through the
+ * same `io.select` the interactive wizard uses. Exported (not a private literal)
+ * so the cli + the wizard share one source — a rename here can't silently break
+ * the flag path.
+ */
+export const CHANNEL_SELECT_PROMPT = "Channel type";
+
 /** Read the global registry's providers at call time (tests mutate CHANNELS — never snapshot at load). */
-function registryProviders(): ChannelProvider[] {
+export function registryProviders(): ChannelProvider[] {
 	return Object.values(CHANNELS).filter((p): p is ChannelProvider => p !== undefined);
 }
 
@@ -131,7 +141,7 @@ export async function addChannel(settings: Settings, deps: AddChannelDeps = {}):
 
 	// 1. Pick a provider kind from the registry.
 	const chosen = await io.select({
-		message: "Channel type",
+		message: CHANNEL_SELECT_PROMPT,
 		options: providers.map((p) => ({ value: p.kind, label: p.kind, hint: p.mode })),
 	});
 	if (chosen === null) return null; // cancel

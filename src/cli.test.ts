@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ParsedArgs } from "./cli/args.ts";
 import { type CommandIo, dispatch, runCli } from "./cli.ts";
+import { getCredentials } from "./config/credentials.ts";
 import { type ChannelEntry, defaultSettings, loadSettings, type Settings } from "./config/settings.ts";
 import { BANNER } from "./tui/banner.ts";
 
@@ -407,3 +408,142 @@ describe("dispatch — real handlers against an isolated HOME", () => {
 		});
 	});
 });
+
+describe("dispatch — non-interactive flag mode (spec 20g)", () => {
+	it("`channel add --provider ngrok --authtoken` persists a ngrok channel + its secret + sets default (first)", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("channel", ["add", "--provider", "ngrok", "--authtoken", "T0KEN"]), {
+				stdout: out.stream,
+			});
+			expect(code).toBe(0);
+			const after = loadSettings();
+			expect(after.channels).toHaveLength(1);
+			const ch = after.channels[0];
+			expect(ch).toMatchObject({ kind: "ngrok", mode: "live", options: {} });
+			expect(after.defaultChannel).toBe(ch?.id); // first channel → default
+			// The authtoken is split into the secrets store, keyed by the channel id.
+			expect(getCredentials(ch?.id ?? "").authtoken).toBe("T0KEN");
+			expect(out.text()).toContain("Added ngrok channel");
+			expect(out.text()).toContain("(default)");
+		});
+	});
+
+	it("`channel add --provider ngrok` without the required authtoken is a usage error (exit 2), no write", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("channel", ["add", "--provider", "ngrok"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Missing required field(s) for ngrok: authtoken");
+			expect(loadSettings().channels).toEqual([]);
+		});
+	});
+
+	it("`channel add --provider <unknown>` is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("channel", ["add", "--provider", "bogus"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Unknown channel provider: bogus");
+		});
+	});
+
+	it("`channel add` with no flags is unchanged (interactive) — flags presence gates the branch", async () => {
+		// No --provider → the interactive branch; with a no-op io this would prompt.
+		// Here we only assert the dispatch routes `add` with an empty rest without erroring
+		// on flag parsing (the interactive wizard is exercised elsewhere).
+		await withTempHome(async () => {
+			const err = recordingStream();
+			// Inject a channel handler that short-circuits to 0 so no TTY is touched.
+			const code = await dispatch(parsed("channel", ["add"]), {
+				stderr: err.stream,
+				channel: async () => 0,
+			});
+			expect(code).toBe(0);
+			expect(err.text()).toBe("");
+		});
+	});
+
+	it("`channel add --default` forces the new channel to be the default even when not first", async () => {
+		await withTempHome(async (home) => {
+			seedSettings(home, homeWithChannel(channelA));
+			const out = recordingStream();
+			const code = await dispatch(
+				parsed("channel", ["add", "--provider", "ngrok", "--authtoken", "T", "--default"]),
+				{ stdout: out.stream },
+			);
+			expect(code).toBe(0);
+			const after = loadSettings();
+			expect(after.channels).toHaveLength(2);
+			// --default points the default at the newly-added channel (not channelA).
+			expect(after.defaultChannel).toBe(after.channels[1]?.id);
+		});
+	});
+
+	it("`config set <section>.<key> <value>` sets one field non-interactively (≡ wizard path)", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "mcp.allowedClients", "claude-code"]), {
+				stdout: out.stream,
+			});
+			expect(code).toBe(0);
+			expect(out.text()).toContain("Set mcp.allowedClients");
+			// Same parse the wizard's mcpSection.write applies (parseClientList).
+			expect(loadSettings().mcp.allowedClients).toEqual(["claude-code"]);
+		});
+	});
+
+	it('`config set mcp.allowedClients "a, b ,c"` parses the list like the wizard', async () => {
+		await withTempHome(async () => {
+			await dispatch(parsed("config", ["set", "mcp.allowedClients", "a, b ,c"]), {
+				stdout: recordingStream().stream,
+			});
+			expect(loadSettings().mcp.allowedClients).toEqual(["a", "b", "c"]);
+		});
+	});
+
+	it("`config set` flag mode preserves the other settings (the channel list is untouched)", async () => {
+		await withTempHome(async (home) => {
+			seedSettings(home, homeWithChannel(channelA));
+			await dispatch(parsed("config", ["set", "mcp.allowedClients", "claude-code"]), {
+				stdout: recordingStream().stream,
+			});
+			const after = loadSettings();
+			expect(after.channels.map((c) => c.id)).toEqual([channelA.id]);
+			expect(after.defaultChannel).toBe(channelA.id);
+			expect(after.mcp.allowedClients).toEqual(["claude-code"]);
+		});
+	});
+
+	it("`config set <unknown-section>.key <value>` is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "bogus.key", "v"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Unknown section: bogus");
+		});
+	});
+
+	it("`config set mcp.<unknown-key> <value>` is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "mcp.nope", "v"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Unknown key: nope");
+		});
+	});
+
+	it("`config set <section>.<key>` with no value is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "mcp.allowedClients"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Usage: openhammer config set <section>.<key> <value>");
+		});
+	});
+});
+
+/** A fresh default settings doc seeded with one channel (the default), for the `--default` / preserve tests. */
+function homeWithChannel(channel: ChannelEntry): Settings {
+	return { ...defaultSettings(), channels: [channel], defaultChannel: channel.id };
+}
