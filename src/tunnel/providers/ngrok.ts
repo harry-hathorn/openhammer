@@ -53,8 +53,8 @@
  *   than spinning to the timeout — a bad authtoken makes `ngrok` exit at once.
  *   `child.kill()` on an already-exited child returns `false` without throwing
  *   (verified), so the null-path teardown needs no `try`/`catch`.
- * - Like the SDK version, `ora` is **not** imported here (it is a devDependency; the
- *   prod server calls `start`) — the spinner is a caller/wizard concern (17k).
+ * - Like the SDK version, the pi-tui `Loader` spinner is **not** imported here (it is a
+ *   devDependency; the prod server calls `start`) — the spinner is a caller/wizard concern (17k).
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { isToolAvailable } from "../../tools/bin.ts";

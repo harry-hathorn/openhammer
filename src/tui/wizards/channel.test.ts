@@ -12,7 +12,7 @@ import type { ChannelProvider } from "../../tunnel/index.ts";
 import { BANNER } from "../banner.ts";
 import type { ConfigField } from "../schema.ts";
 import type { WizardIo } from "../wizard.ts";
-import { type AddChannelResult, addChannel } from "./channel.ts";
+import { type AddChannelResult, addChannel, formatProbeResult } from "./channel.ts";
 
 /**
  * A recording fake {@link WizardIo} — no TTY, no clack. Each primitive shifts its
@@ -91,6 +91,18 @@ function recordingSecrets(): {
 }
 
 const fixedId = () => "id-1234";
+
+describe("formatProbeResult — spinner final status line (spec 21c)", () => {
+	it("formats a success with ✓ + the label", () => {
+		expect(formatProbeResult("Validating nginx…", ok(undefined))).toBe("✓ Validating nginx…");
+	});
+
+	it("formats a failure with ✗ + the error message", () => {
+		expect(formatProbeResult("Validating nginx…", err(new Error("publicUrl /health returned 502")))).toBe(
+			"✗ publicUrl /health returned 502",
+		);
+	});
+});
 
 describe("addChannel — happy path", () => {
 	it("appends a static channel, probes it, and sets defaultChannel (first channel)", async () => {

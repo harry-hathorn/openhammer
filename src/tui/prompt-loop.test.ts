@@ -7,7 +7,7 @@ import {
 	type Terminal,
 } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { type PromptMounter, runPrompt } from "./prompt-loop.ts";
+import { type PromptMounter, runPrompt, runSpinner } from "./prompt-loop.ts";
 
 /**
  * A passthrough `SelectListTheme` so a real `SelectList` renders without pulling
@@ -330,5 +330,95 @@ describe("runPrompt — real pi-tui components (integration)", () => {
 
 		expect(await promise).toBeNull();
 		expect(term.stopped).toBe(true);
+	});
+});
+
+/**
+ * The spinner's `Result`-shaped test result + formatter — mirrors the channel
+ * wizard's probe contract (`Result<T, Error>` → `✓`/`✗`) without importing the
+ * domain module, keeping `runSpinner`'s tests domain-free like the helper itself.
+ */
+type ProbeOutcome = { ok: true; value: string } | { ok: false; message: string };
+const probeFormatter =
+	(label: string) =>
+	(r: ProbeOutcome): string =>
+		r.ok ? `✓ ${label}` : `✗ ${r.message}`;
+
+describe("runSpinner — probe spinner (spec 21c — the ora replacement)", () => {
+	it("returns fn's result unchanged and restores the terminal", async () => {
+		const term = new FakeTerminal();
+		const result = await runSpinner<ProbeOutcome>(
+			"Validating nginx…",
+			async () => ({ ok: true, value: "up" }),
+			probeFormatter("Validating nginx…"),
+			{ terminal: term },
+		);
+
+		expect(result).toEqual({ ok: true, value: "up" });
+		expect(term.stopped).toBe(true); // finally → tui.stop() restored the terminal
+		expect(term.started).toBe(false); // stop() reset the started flag
+	});
+
+	it("paints the spinner label while the probe runs (the loader animated)", async () => {
+		const term = new FakeTerminal();
+		let midRunOutput = "";
+		await runSpinner<ProbeOutcome>(
+			"Validating nginx…",
+			async () => {
+				// Hold long enough for the first coalesced render (~16ms) to paint the
+				// spinner label before the probe resolves.
+				await new Promise((resolve) => setTimeout(resolve, 30));
+				midRunOutput = term.output();
+				return { ok: true, value: "up" };
+			},
+			probeFormatter("Validating nginx…"),
+			{ terminal: term },
+		);
+
+		expect(midRunOutput).toContain("Validating nginx…"); // label was on screen mid-probe
+		expect(term.stopped).toBe(true);
+	});
+
+	it("overwrites the spinner with the ✓ status line on success", async () => {
+		const term = new FakeTerminal();
+		await runSpinner<ProbeOutcome>(
+			"Validating nginx…",
+			async () => ({ ok: true, value: "up" }),
+			probeFormatter("Validating nginx…"),
+			{ terminal: term },
+		);
+
+		expect(term.output()).toContain("✓ Validating nginx…");
+		expect(term.stopped).toBe(true);
+	});
+
+	it("overwrites the spinner with the ✗ status line on failure", async () => {
+		const term = new FakeTerminal();
+		await runSpinner<ProbeOutcome>(
+			"Validating nginx…",
+			async () => ({ ok: false, message: "publicUrl /health returned 502" }),
+			probeFormatter("Validating nginx…"),
+			{ terminal: term },
+		);
+
+		expect(term.output()).toContain("✗ publicUrl /health returned 502");
+		expect(term.stopped).toBe(true);
+	});
+
+	it("restores the terminal even if fn throws (no raw-mode leak)", async () => {
+		const term = new FakeTerminal();
+		const boom = new Error("probe exploded");
+		await expect(
+			runSpinner<ProbeOutcome>(
+				"Validating nginx…",
+				async () => {
+					throw boom;
+				},
+				probeFormatter("Validating nginx…"),
+				{ terminal: term },
+			),
+		).rejects.toBe(boom);
+
+		expect(term.stopped).toBe(true); // finally restored the terminal before rethrowing
 	});
 });
