@@ -264,7 +264,7 @@ function listChannelsCmd(io: CommandIo): number {
  * `channel add` — interactive when flag-less, non-interactive (spec 20g) when any
  * flag is present (`--provider`, `--default`, or a `--<field>` value). The two
  * paths share {@link addChannel} + {@link persistAddedChannel}; only the `io`
- * (real clack vs flag-derived) and the `--default` override differ.
+ * (real pi-tui prompts vs flag-derived) and the `--default` override differ.
  */
 async function addChannelCmd(rest: string[], io: CommandIo): Promise<number> {
 	const flags = parseSubFlags(rest);
