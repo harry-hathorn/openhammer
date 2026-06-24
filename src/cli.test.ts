@@ -209,6 +209,12 @@ describe("dispatch — arg → command routing", () => {
 		expect(code).toBe(0);
 	});
 
+	it("routes `auth <sub>` to the auth handler with sub + trailing rest", async () => {
+		const auth = fakeHandler();
+		await dispatch(parsed("auth", ["remove", "oh_abc"]), { auth: auth.handler });
+		expect(auth.calls).toEqual([{ sub: "remove", rest: ["oh_abc"] }]);
+	});
+
 	it("--help prints usage to stdout and exits 0 (help wins over the command)", async () => {
 		const out = recordingStream();
 		const err = recordingStream();
@@ -376,6 +382,15 @@ describe("dispatch — real handlers against an isolated HOME", () => {
 			const code = await dispatch(parsed("config", ["set", "bogus"]), { stderr: err.stream });
 			expect(code).toBe(2);
 			expect(err.text()).toContain("Unknown section: bogus");
+		});
+	});
+
+	it("`auth list` against an isolated HOME prints the empty hint and exits 0", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("auth", ["list"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("No OAuth clients registered");
 		});
 	});
 
