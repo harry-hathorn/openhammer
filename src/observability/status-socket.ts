@@ -42,6 +42,65 @@ export function formatEventLine(event: RequestEvent): string {
 }
 
 /**
+ * A channel-state line — the server's report of a configured channel's live
+ * reachability, emitted on the status socket (spec 19c-channel). Distinct from a
+ * {@link RequestEvent} (which carries no `type`): the `type: "channel-state"`
+ * discriminator lets a client tell the two line kinds apart on one NDJSON stream.
+ * Carried in the connection dump (channel state is static for a server's lifetime
+ * — resolved once at boot), so a connecting dashboard reads it once and renders
+ * the channels panel's live `up`/`down` + URL instead of `unknown`.
+ */
+export interface ChannelStateLine {
+	/** The wire discriminator — distinguishes this from a `RequestEvent` line. */
+	type: "channel-state";
+	/** The configured channel's id (matches a `Settings.channels[].id` row). */
+	id: string;
+	/** Is the channel up (the boot resolved a handle for it)? */
+	up: boolean;
+	/** The channel's public URL, or `null` when it is down/has no URL. */
+	url: string | null;
+}
+
+/** Serialize a channel-state line as one NDJSON line (compact JSON + `\n`). */
+export function formatChannelStateLine(line: ChannelStateLine): string {
+	return `${JSON.stringify(line)}\n`;
+}
+
+/** Is `v` a plain object (not an array, not null)? */
+function isStringRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Is `v` a structurally-valid {@link ChannelStateLine}? */
+function isChannelStateLine(v: unknown): v is ChannelStateLine {
+	if (!isStringRecord(v)) return false;
+	return (
+		v.type === "channel-state" &&
+		typeof v.id === "string" &&
+		typeof v.up === "boolean" &&
+		(v.url === null || typeof v.url === "string")
+	);
+}
+
+/**
+ * Parse one NDJSON line into a {@link ChannelStateLine}. Returns `null` for a
+ * blank line, malformed JSON, or a value that isn't a channel-state line (a
+ * {@link RequestEvent} shares the socket but carries no `type`). A skipped line,
+ * never a throw — the same posture as `parseEventLine`.
+ */
+export function parseChannelStateLine(line: string): ChannelStateLine | null {
+	const trimmed = line.trim();
+	if (trimmed === "") return null;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	return isChannelStateLine(parsed) ? parsed : null;
+}
+
+/**
  * The minimal sink a connection needs — `net.Socket` satisfies it. Declared so a
  * unit test can inject a recording fake without spinning a real socket. `once`
  * returns `unknown` (we never use the return value); `net.Socket.once` returns
@@ -66,6 +125,12 @@ export interface StartStatusSocketDeps {
 	path?: string;
 	/** Factory for the net server (tests inject a fresh one). Defaults to `net.createServer()`. */
 	createServer?: () => Server;
+	/**
+	 * The per-channel live-state snapshot to dump on each connect (spec 19c-channel).
+	 * Static for a server's lifetime (resolved once at boot); absent/empty means no
+	 * channel state is advertised and the dashboard shows `unknown`. Defaults to `[]`.
+	 */
+	channels?: ChannelStateLine[];
 	/** Best-effort logger for a server-level socket error. Defaults to `console.warn`. */
 	warn?: (message: string) => void;
 }
@@ -109,12 +174,17 @@ export function safeWrite(socket: StatusSocket, line: string): boolean {
 }
 
 /**
- * Handle one monitor connection: dump the recent buffer (history), then stream
+ * Handle one monitor connection: dump the channel-state snapshot (the "what's
+ * configured + live now" view), then the recent buffer (history), then stream
  * live events. A write failure or a `close`/`error` on the socket unsubscribes
  * (idempotently) so a dead client never leaks a subscriber. Exported so the
  * dump-then-stream + cleanup logic is unit-tested with a fake socket.
  */
-export function handleConnection(socket: StatusSocket, recorder: RequestRecorder): void {
+export function handleConnection(
+	socket: StatusSocket,
+	recorder: RequestRecorder,
+	channels: readonly ChannelStateLine[] = [],
+): void {
 	let closed = false;
 	// Initialized to a no-op so `cleanup` can run before `subscribe` reassigns it.
 	let unsub: () => void = () => {};
@@ -128,7 +198,16 @@ export function handleConnection(socket: StatusSocket, recorder: RequestRecorder
 		if (!safeWrite(socket, formatEventLine(event))) cleanup();
 	});
 
-	// Dump history first (oldest → newest); bail out if the client is already gone.
+	// Channel state first (static per server lifetime — the dashboard reads it
+	// once on connect to render the channels panel). Bail if the client is gone.
+	for (const line of channels) {
+		if (!safeWrite(socket, formatChannelStateLine(line))) {
+			cleanup();
+			return;
+		}
+	}
+
+	// Dump history next (oldest → newest); bail out if the client is already gone.
 	for (const event of recorder.recent()) {
 		if (!safeWrite(socket, formatEventLine(event))) {
 			cleanup();
@@ -152,13 +231,14 @@ export async function startStatusSocket(
 	const path = deps.path ?? statusSocketPath();
 	const server = deps.createServer?.() ?? createServer();
 	const warn = deps.warn ?? ((message: string) => console.warn(message));
+	const channels = deps.channels ?? [];
 	const sockets = new Set<Socket>();
 
 	// Track open connections so `close()` can drop monitor clients promptly.
 	server.on("connection", (socket) => {
 		sockets.add(socket);
 		socket.once("close", () => sockets.delete(socket));
-		handleConnection(socket, recorder);
+		handleConnection(socket, recorder, channels);
 	});
 	// A server-level error after listen must not crash the process (connection
 	// errors are handled per-socket in `handleConnection`).

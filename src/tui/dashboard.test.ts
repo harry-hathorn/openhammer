@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Settings } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
+import type { ChannelStateLine } from "../observability/status-socket.ts";
 import type { DashboardRenderer, FrameProducer } from "./dashboard/render.ts";
 import { DASHBOARD_MONITOR_LIMIT, runDashboard } from "./dashboard.ts";
 
@@ -168,6 +169,70 @@ describe("runDashboard — live feed", () => {
 		const feed = monitorLines(r.frame()).join("\n");
 		// Older events beyond the default limit are dropped from the feed.
 		expect(feed).not.toContain("c0");
+		r.key("q");
+		await done;
+	});
+});
+
+describe("runDashboard — channel live-state (19c-channel)", () => {
+	it("folds channel-state into the channels panel (live up + url, not unknown)", async () => {
+		const r = new FakeRenderer();
+		let pushState: ((state: ChannelStateLine) => void) | undefined;
+		const done = runDashboard({
+			renderer: r,
+			settings: {
+				...emptySettings(),
+				channels: [
+					{
+						id: "deployed",
+						kind: "static-url",
+						mode: "static",
+						label: "edge",
+						options: { publicUrl: "https://old.example" },
+					},
+				],
+			},
+			// The 2nd subscribe callback receives channel-state lines (19c-channel).
+			subscribe: (_onEvent, onChannelState) => {
+				pushState = onChannelState;
+				return () => {};
+			},
+		});
+
+		// Before any state: the channel shows `unknown` + its declared publicUrl.
+		let out = r.frame().join("\n");
+		expect(out).toContain("unknown");
+		expect(out).toContain("https://old.example");
+
+		// The server reports the channel up with a live URL → `up` + live URL, not `unknown`.
+		pushState?.({ type: "channel-state", id: "deployed", up: true, url: "https://edge.example/mcp" });
+		out = r.frame().join("\n");
+		expect(out).toContain("static-url  static  up  https://edge.example/mcp");
+		expect(out).not.toContain("unknown");
+		expect(out).not.toContain("https://old.example"); // the live URL overrides the stale declared one
+		r.key("q");
+		await done;
+	});
+
+	it("reports a channel as down when the server says so", async () => {
+		const r = new FakeRenderer();
+		let pushState: ((state: ChannelStateLine) => void) | undefined;
+		const done = runDashboard({
+			renderer: r,
+			settings: {
+				...emptySettings(),
+				channels: [{ id: "dead", kind: "ngrok", mode: "live", label: "gone", options: {} }],
+			},
+			subscribe: (_onEvent, onChannelState) => {
+				pushState = onChannelState;
+				return () => {};
+			},
+		});
+
+		pushState?.({ type: "channel-state", id: "dead", up: false, url: null });
+		const out = r.frame().join("\n");
+		expect(out).toContain("ngrok  live  down");
+		expect(out).not.toContain("unknown");
 		r.key("q");
 		await done;
 	});

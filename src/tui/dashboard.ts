@@ -34,6 +34,7 @@
  */
 import type { Settings } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
+import type { ChannelStateLine } from "../observability/status-socket.ts";
 import {
 	type ChannelLiveState,
 	composeDashboard,
@@ -59,8 +60,9 @@ const REFRESH_KEYS = new Set<string>(["r", "R"]);
  * `renderer` + `settings` are required; the rest are the 19c/19d/19e seams:
  * - `subscribe`: the live status-socket feed (19c wires the real socket). Each event
  *   folds into the monitor ring + the clients reducer and reaches the screen on the
- *   next refresh tick. Returns an unsubscribe called on shutdown. Omit for a static
- *   dashboard (no live clients/monitor).
+ *   next refresh tick. Its optional 2nd callback receives channel-state lines
+ *   (19c-channel) which fold into the `channelState` snapshot. Returns an
+ *   unsubscribe called on shutdown. Omit for a static dashboard (no live feed).
  * - `status`/`channelState`: initial reachability snapshots (19e/19c update these in
  *   their own iterations; 19b renders them as given).
  * - `onQuit`: shutdown hook (19e stops the server child). Best-effort.
@@ -75,8 +77,13 @@ export interface DashboardDeps {
 	status?: ServerStatusState;
 	/** Initial per-channel live state (19c populates from the server). Defaults to none. */
 	channelState?: Record<string, ChannelLiveState>;
-	/** Live event feed (19c wires this to the status socket). Omit for a static dashboard. */
-	subscribe?: (onEvent: (event: RequestEvent) => void) => () => void;
+	/** Live event feed (19c wires this to the status socket). The optional 2nd
+	 * callback receives channel-state lines (19c-channel) → the `channelState`
+	 * snapshot. Omit for a static dashboard. */
+	subscribe?: (
+		onEvent: (event: RequestEvent) => void,
+		onChannelState?: (state: ChannelStateLine) => void,
+	) => () => void;
 	/** Monitor-feed depth. Defaults to {@link DASHBOARD_MONITOR_LIMIT}. */
 	monitorLimit?: number;
 	/** Footer key-menu entries. Defaults to {@link DEFAULT_19B_KEYS} (19d extends). */
@@ -151,11 +158,17 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 
 		// Wire the live feed last: 19c's subscriber delivers parsed events (recent dump
 		// first, then live). Each folds into the monitor ring (capped) + the clients
-		// reducer; the next refresh tick renders the updated state.
-		unsub = deps.subscribe?.((event) => {
-			monitorState.apply(event);
-			eventRing.push(event);
-			while (eventRing.length > monitorLimit) eventRing.shift();
-		});
+		// reducer; channel-state lines (19c-channel) fold into the `channelState`
+		// snapshot. The next refresh tick renders the updated state.
+		unsub = deps.subscribe?.(
+			(event) => {
+				monitorState.apply(event);
+				eventRing.push(event);
+				while (eventRing.length > monitorLimit) eventRing.shift();
+			},
+			(state) => {
+				channelState[state.id] = { up: state.up, url: state.url };
+			},
+		);
 	});
 }

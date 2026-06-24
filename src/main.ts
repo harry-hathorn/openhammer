@@ -30,7 +30,7 @@ import { parseArgs } from "./cli/args.ts";
 import { loadSettings } from "./config/settings.ts";
 import { resolveConfig } from "./config.ts";
 import { RequestRecorder } from "./mcp/telemetry.ts";
-import { startStatusSocket } from "./observability/status-socket.ts";
+import { type ChannelStateLine, startStatusSocket } from "./observability/status-socket.ts";
 import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
 import { resolveChannelHandle } from "./tunnel/boot.ts";
@@ -52,18 +52,12 @@ export async function main(): Promise<void> {
 	const fastify = await buildFastify(config, token, config.allowedClients, recorder);
 	await fastify.listen({ port: config.port, host: config.host });
 
-	// The local inspector channel (17s): `~/.openhammer/openhammer.sock` (0600).
-	// Null-safe — a bind failure logs + continues serving; the bearer gate (not
-	// the socket) is the real gate.
-	const statusSocket = await startStatusSocket(recorder, { warn: (message) => fastify.log.warn(message) });
-	if (statusSocket === null) {
-		fastify.log.warn("status socket unavailable — `openhammer monitor` will not work");
-	}
-
-	// Resolve the boot channel via the registry (17q). `null` + a `notice` is the
-	// null-safe localhost-only fallback (no channel, or the channel failed to
-	// start) — logged here, never fatal. The handle's `stop` tears a live channel
-	// down on shutdown; static channels have none (the operator owns the endpoint).
+	// Resolve the boot channel via the registry (17q) BEFORE the status socket so
+	// the channel's live state is final when a monitor/dashboard connects — channel
+	// state is static for a server's lifetime (resolved once at boot). `null` + a
+	// `notice` is the null-safe localhost-only fallback (no channel, or the channel
+	// failed to start) — logged here, never fatal. The handle's `stop` tears a live
+	// channel down on shutdown; static channels have none (the operator owns the endpoint).
 	const { handle, notice } = await resolveChannelHandle({
 		channelId: config.channelId,
 		channels: settings.channels,
@@ -73,6 +67,28 @@ export async function main(): Promise<void> {
 	});
 	if (notice !== null) {
 		fastify.log.warn(notice);
+	}
+
+	// The active channel's live state, advertised over the status socket
+	// (19c-channel): only the persisted channel (`config.channelId`) maps to a
+	// dashboard row, so it is the only id emitted — a provider / `--tunnel`
+	// channel has no persisted id (its URL reaches the dashboard via the status
+	// panel instead). `up` is whether the boot resolved a handle for it.
+	const channelState: ChannelStateLine[] =
+		config.channelId !== null
+			? [{ type: "channel-state", id: config.channelId, up: handle !== null, url: handle?.url ?? null }]
+			: [];
+
+	// The local inspector channel (17s): `~/.openhammer/openhammer.sock` (0600).
+	// Null-safe — a bind failure logs + continues serving; the bearer gate (not
+	// the socket) is the real gate. Carries the channel-state snapshot (19c-channel)
+	// so a connecting dashboard reads each configured channel's up/down + URL.
+	const statusSocket = await startStatusSocket(recorder, {
+		channels: channelState,
+		warn: (message) => fastify.log.warn(message),
+	});
+	if (statusSocket === null) {
+		fastify.log.warn("status socket unavailable — `openhammer monitor` will not work");
 	}
 
 	printStartup({
