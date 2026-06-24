@@ -5,13 +5,14 @@
  *
  * **Decomposed from the spec's `runDashboard({ socketPath, settings, serverControl })`**
  * (spec 19 line 30) into a testable core with injectable seams: the status-socket
- * client (19c), the key-menu modals (19d), and the server lifecycle (19e) are *not*
- * wired here — wiring them would require stubs against not-yet-existing modules. So
- * 19b's {@link runDashboard} takes the seams they will fill (`subscribe` for the live
- * feed, `status`/`onQuit` for server reachability + shutdown) and 19e will assemble
- * the spec's public `{ socketPath, settings, serverControl }` entrypoint around it.
- * The loop itself is complete: it renders the panels, refreshes on key/resize, folds
- * live events into the monitor + clients panels, and quits cleanly.
+ * client (19c) and the server lifecycle (19e) are wired by their own iterations; the
+ * key-menu modals (19d) are wired here. So {@link runDashboard} takes the seams they
+ * fill (`subscribe` for the live feed, `status`/`onQuit` for server reachability +
+ * shutdown, the `*Modal`/`persist` seams for the key menu) and 19e assembles the
+ * spec's public `{ socketPath, settings, serverControl }` entrypoint around it. The
+ * loop itself is complete: it renders the panels, refreshes on key/resize, folds live
+ * events into the monitor + clients panels, drives the add/config/doctor modals, and
+ * quits cleanly.
  *
  * **Live updates ride the renderer's refresh cadence** (19a's `refreshIntervalMs`,
  * default 150ms): the frame producer reads live state on every tick, so events that
@@ -32,21 +33,23 @@
  * caught + logged to stderr — the terminal is already restored, so the message
  * surfaces in the operator's shell rather than corrupting the dashboard screen.
  */
-import type { Settings } from "../config/settings.ts";
+import { type Settings, saveSettings, settingsPath } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
+import type { Result } from "../tools/result.ts";
 import type { ChannelProbeState } from "./dashboard/channel-probe.ts";
 import {
 	type ChannelLiveState,
 	composeDashboard,
 	type DashboardState,
-	DEFAULT_19B_KEYS,
 	emptyStatus,
 	type KeyHint,
 	type ServerStatusState,
 } from "./dashboard/panels.ts";
 import type { DashboardRenderer } from "./dashboard/render.ts";
 import { MonitorState } from "./monitor-view.ts";
+import { addChannel } from "./wizards/channel.ts";
+import { setSection } from "./wizards/section.ts";
 
 /** Default monitor-feed depth — the last 8 events are shown in the monitor panel. */
 export const DASHBOARD_MONITOR_LIMIT = 8;
@@ -55,6 +58,32 @@ export const DASHBOARD_MONITOR_LIMIT = 8;
 const QUIT_KEYS = new Set<string>(["q", "Q", "\x03"]);
 /** Keys that force a full redraw via `renderer.clear()`. */
 const REFRESH_KEYS = new Set<string>(["r", "R"]);
+/** `a` opens the add-channel modal (19d). */
+const ADD_CHANNEL_KEY = "a";
+/** `c` opens the config-set modal (19d). */
+const CONFIG_KEY = "c";
+/** `d` opens the doctor modal (19d; only wired when {@link DashboardDeps.doctorModal} is set). */
+const DOCTOR_KEY = "d";
+
+/**
+ * The default footer key menu (19d): always-present `r`/`a`/`c`/`q` plus `d` doctor
+ * only when {@link DashboardDeps.doctorModal} is wired. `addChannel`/`setSection`
+ * have same-layer production defaults (so their keys always appear); `doctorCommand`
+ * is wired by the CLI layer (19e), so `d` is hidden until then — the footer never
+ * advertises a dead key. A caller-supplied {@link DashboardDeps.keys} overrides this.
+ */
+function dashboardKeys(deps: DashboardDeps): KeyHint[] {
+	const keys: KeyHint[] = [
+		{ key: "r", label: "refresh" },
+		{ key: ADD_CHANNEL_KEY, label: "add channel" },
+		{ key: CONFIG_KEY, label: "config" },
+	];
+	if (deps.doctorModal) {
+		keys.push({ key: DOCTOR_KEY, label: "doctor" });
+	}
+	keys.push({ key: "q", label: "quit" });
+	return keys;
+}
 
 /**
  * Injectable seams for {@link runDashboard} (the `11a`/`13`/`17b`–`17t` precedent).
@@ -67,7 +96,12 @@ const REFRESH_KEYS = new Set<string>(["r", "R"]);
  * - `status`/`channelState`: initial reachability snapshots (19e/19c update these in
  *   their own iterations; 19b renders them as given).
  * - `onQuit`: shutdown hook (19e stops the server child). Best-effort.
- * - `keys`: the footer key menu (defaults to 19b's wired keys; 19d passes the fuller set).
+ * - `addChannelModal`/`setSectionModal`/`doctorModal`/`persist`: the key-menu modals
+ *   (19d). `a` runs `addChannel`, `c` runs `setSection`, `d` runs `doctorCommand` —
+ *   each suspends the render loop, runs as a clack modal, resumes, and (for the
+ *   settings modals) persists + refreshes. They call the **existing** functions
+ *   (defaults to the production wizards; injectable for tests — no reimplementation).
+ * - `keys`: the footer key menu (defaults to the wired set, 19d).
  */
 export interface DashboardDeps {
 	/** The render substrate (19a). The loop drives its frame producer + key handler. */
@@ -96,8 +130,27 @@ export interface DashboardDeps {
 	probeChannels?: (report: (state: ChannelProbeState) => void, isReported?: (id: string) => boolean) => () => void;
 	/** Monitor-feed depth. Defaults to {@link DASHBOARD_MONITOR_LIMIT}. */
 	monitorLimit?: number;
-	/** Footer key-menu entries. Defaults to {@link DEFAULT_19B_KEYS} (19d extends). */
+	/** Footer key-menu entries. Defaults to the wired set (19d): `r` refresh, `a`
+	 * add channel, `c` config, `d` doctor (only when {@link doctorModal} is wired),
+	 * `q` quit — so the footer never advertises a dead key. */
 	keys?: ReadonlyArray<KeyHint>;
+	/** Add-channel modal (19d). Pressing `a` suspends the render loop, runs the
+	 * wizard, resumes, and on `ok` persists + refreshes the channels panel. Defaults
+	 * to the production {@link addChannel} (real clack). Returns the new `Settings`
+	 * (`ok`), an `err` (probe failed — nothing written), or `null` (cancelled). */
+	addChannelModal?: (settings: Settings) => Promise<Result<Settings, Error> | null>;
+	/** Config-set modal (19d). Pressing `c` runs the section wizard. Defaults to the
+	 * production {@link setSection}; same result contract as {@link addChannelModal}. */
+	setSectionModal?: (settings: Settings) => Promise<Result<Settings, Error> | null>;
+	/** Doctor modal (19d). Pressing `d` runs `doctorCommand` (it writes its report to
+	 * stdout). **No production default here**: `doctorCommand` lives in `src/cli/` and
+	 * the layering rule (`src/tui/` must not import `src/cli/`) means the CLI layer
+	 * (19e) wires it; omit to hide the `d` key. The mechanism is fully built + tested
+	 * via an injected fake. */
+	doctorModal?: () => Promise<number>;
+	/** Persist the settings doc after a modal mutation (19d). Defaults to
+	 * `saveSettings(settingsPath(), s)`. */
+	persist?: (settings: Settings) => void;
 	/** Shutdown hook (19e stops the server child). Best-effort — a throw is logged, not fatal. */
 	onQuit?: () => void | Promise<void>;
 }
@@ -110,23 +163,36 @@ export interface DashboardDeps {
  *
  * All setup (`onKey`/`start`/`subscribe`) is synchronous, so a test can drive the
  * fake renderer's captured producer + key handler the moment the promise is returned
- * — there is no setup race. `subscribe` is the only path that mutates the rendered
- * state after start (the monitor ring + clients reducer); `status`/`channelState`
- * are fixed snapshots for 19b.
+ * — there is no setup race. After start, three paths mutate the rendered state: the
+ * live feed (`subscribe` → the monitor ring + clients reducer), the channel-state
+ * feed + probe (`channelState`), and a settings modal's `ok` (reassigns the settings
+ * doc → the channels/config panels, 19d); `status` is a fixed snapshot for 19b/19e.
  */
 export function runDashboard(deps: DashboardDeps): Promise<void> {
 	const status = deps.status ?? emptyStatus();
 	const channelState = deps.channelState ?? {};
 	const monitorLimit = deps.monitorLimit ?? DASHBOARD_MONITOR_LIMIT;
-	const keys = deps.keys ?? DEFAULT_19B_KEYS;
+	/** The settings doc is mutable: a settings modal (`addChannel`/`setSection`)
+	 * reassigns this so the next frame renders the new channels/config. Seeded from
+	 * `deps.settings`; the dashboard owns the live view while it runs (19d). */
+	let settings: Settings = deps.settings;
+	// Modal runners default to the production wizards (same `src/tui/` layer →
+	// importable; real clack via their `defaultIo`). `doctorModal` has no default —
+	// `doctorCommand` is in `src/cli/` (layering: `src/tui/` must not import it); the
+	// CLI layer (19e) wires it, and until then the `d` key is hidden + inert.
+	const addChannelModal = deps.addChannelModal ?? ((s: Settings) => addChannel(s));
+	const setSectionModal = deps.setSectionModal ?? ((s: Settings) => setSection(s));
+	const doctorModal = deps.doctorModal;
+	const persist = deps.persist ?? ((s: Settings) => saveSettings(settingsPath(), s));
+	const keys = deps.keys ?? dashboardKeys(deps);
 	const monitorState = new MonitorState();
 	const eventRing: RequestEvent[] = [];
 
 	/** Build the current dashboard state from the live monitor ring + clients reducer. */
 	const buildState = (): DashboardState => ({
 		status,
-		channels: deps.settings.channels,
-		defaultChannelId: deps.settings.defaultChannel,
+		channels: settings.channels,
+		defaultChannelId: settings.defaultChannel,
 		channelState,
 		clients: monitorState.stats(),
 		monitor: eventRing,
@@ -160,11 +226,55 @@ export function runDashboard(deps: DashboardDeps): Promise<void> {
 			resolve();
 		};
 
+		/** True while a modal (19d) holds the terminal. While set, all keys are
+		 * ignored — the real renderer delivers none during suspend (its stdin listener
+		 * is removed), but the guard also keeps an injected fake renderer honest. */
+		let modalActive = false;
+		/**
+		 * Suspend the render loop, run a cooked-mode modal (a clack wizard/command),
+		 * then resume + force a full redraw. Catches a thrown modal so resume always
+		 * runs (the terminal is always restored) — a modal failure surfaces via stderr
+		 * (cooked mode during suspend) and never corrupts the dashboard. Returns the
+		 * modal's value, or `undefined` if a modal was already active / it threw.
+		 */
+		const withModal = async <T>(fn: () => Promise<T>): Promise<T | undefined> => {
+			if (modalActive) return undefined;
+			modalActive = true;
+			deps.renderer.suspend();
+			try {
+				return await fn();
+			} catch (e) {
+				console.error(`dashboard modal error: ${e instanceof Error ? e.message : String(e)}`);
+				return undefined;
+			} finally {
+				deps.renderer.resume();
+				modalActive = false;
+			}
+		};
+		/** Run a settings-mutating modal (add channel / config) and, on `ok`, adopt the
+		 * new doc + persist it BEFORE resuming so the post-resume redraw shows it. */
+		const runSettingsModal = (run: (s: Settings) => Promise<Result<Settings, Error> | null>): void => {
+			void withModal(async () => {
+				const result = await run(settings);
+				if (result?.ok) {
+					settings = result.value;
+					persist(settings);
+				}
+			});
+		};
+
 		deps.renderer.onKey((data) => {
+			if (modalActive) return;
 			if (QUIT_KEYS.has(data)) {
 				void quit();
 			} else if (REFRESH_KEYS.has(data)) {
 				deps.renderer.clear();
+			} else if (data === ADD_CHANNEL_KEY) {
+				runSettingsModal(addChannelModal);
+			} else if (data === CONFIG_KEY) {
+				runSettingsModal(setSectionModal);
+			} else if (data === DOCTOR_KEY && doctorModal) {
+				void withModal(() => doctorModal());
 			}
 		});
 
