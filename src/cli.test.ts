@@ -359,15 +359,18 @@ describe("dispatch — real handlers against an isolated HOME", () => {
 		});
 	});
 
-	it("`doctor` runs the built-in checks against an isolated HOME and exits 0 (all pass)", async () => {
+	it("`doctor` runs the built-in checks against an isolated HOME and exits 0 (a warn does not fail)", async () => {
 		await withTempHome(async () => {
 			const out = recordingStream();
 			const code = await dispatch(parsed("doctor"), { stdout: out.stream });
 			expect(code).toBe(0);
 			const text = out.text();
-			expect(text).toContain("Ran 4 check(s)");
+			expect(text).toContain("Ran 5 check(s)");
 			expect(text).toContain("[pass]");
-			// The four built-in check ids are reported regardless of status.
+			// The jwtSecret is unset on a fresh HOME (no env, never booted) → an advisory warn.
+			expect(text).toContain("[warn]");
+			expect(text).toContain("oauth-jwt-secret:");
+			// The built-in check ids are reported regardless of status.
 			expect(text).toContain("config:");
 			expect(text).toContain("credentials:");
 			expect(text).toContain("rg:");
