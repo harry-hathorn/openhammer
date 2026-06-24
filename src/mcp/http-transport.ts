@@ -19,19 +19,21 @@
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { FastifyInstance } from "fastify";
-import { createAuthMiddleware } from "../auth/middleware.ts";
+import { createAuthMiddleware, type OauthMiddlewareOptions } from "../auth/middleware.ts";
 import type { Config } from "../config.ts";
 import { createMcpServer } from "./server.ts";
 import { attachRequestRecorder, type RequestRecorder } from "./telemetry.ts";
 
-/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + optional client allowlist (17r) + optional recorder (17s). */
+/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + optional client allowlist (17r) + optional recorder (17s) + optional OAuth/JWT config (20d). */
 export interface McpHttpRoutesOptions {
 	token: string;
 	config: Config;
-	/** The `allowedClients` allowlist — `[]`/`["*"]` (default) = any client; else a User-Agent filter (17r). */
+	/** The `allowedClients` allowlist — `[]`/`["*"]` (default) = any client; else a User-Agent (`opaque`) / `client_id` (`JWT`) filter (17r/20d). */
 	allowedClients?: string[];
 	/** When set, each `POST /mcp` is recorded into the ring buffer for `openhammer monitor` (spec 17s). */
 	recorder?: RequestRecorder;
+	/** When set, the auth gate also accepts an AS-issued HS256 JWT (spec 20d); omit for opaque-only. */
+	oauth?: OauthMiddlewareOptions;
 }
 
 /**
@@ -41,7 +43,7 @@ export interface McpHttpRoutesOptions {
  * pass the options as the 2nd arg. Either keeps the routes on the parent scope.
  */
 export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoutesOptions): Promise<void> {
-	const { token, config, allowedClients = [], recorder } = opts;
+	const { token, config, allowedClients = [], recorder, oauth } = opts;
 
 	// Live activity capture (17s): the `onRequest` hook records each `POST /mcp`.
 	// No-op per request when no recorder is wired (the default — existing tests).
@@ -51,7 +53,7 @@ export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoute
 
 	// Auth on POST only — discovery (`/.well-known/*`) and `/health` stay open.
 	fastify.post("/mcp", {
-		preHandler: createAuthMiddleware(token, config, allowedClients),
+		preHandler: createAuthMiddleware(token, config, allowedClients, oauth),
 		handler: async (req, reply) => {
 			// Per-request server + transport — stateless, isolates clients.
 			const server = createMcpServer(config.rootDir, config.maxResponseBytes);
