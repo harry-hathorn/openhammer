@@ -32,9 +32,11 @@ import {
 	issueClient,
 	listClients,
 	removeClient,
+	setOperatorLogin,
 } from "../auth/oauth/clients.ts";
 import { credentialsPath } from "../config/credentials.ts";
 import type { BannerStream } from "../tui/banner.ts";
+import { clientConfigFromFlags, collectClientConfig, toIssueOptions } from "../tui/client-wizard.ts";
 import { defaultIo, type PromptIo, withSession } from "../tui/prompts.ts";
 import { parseSubFlags } from "./flags.ts";
 
@@ -71,6 +73,23 @@ export interface AuthDeps {
 	 * path, which always reveals the secret once.
 	 */
 	printSecret?: boolean;
+	/**
+	 * Non-interactive client type (spec 20g): `--type client_credentials|authorization_code`.
+	 * Also reused by `set-login` is N/A. Omitted/other → `client_credentials`.
+	 */
+	type?: string;
+	/**
+	 * Non-interactive per-client login username (`--username`) for `add-client`, OR the
+	 * operator-login username for `set-login`.
+	 */
+	username?: string;
+	/**
+	 * Non-interactive password (`--password`) — the per-client login password for `add-client`,
+	 * OR the operator-login password for `set-login`.
+	 */
+	password?: string;
+	/** Non-interactive redirect URIs (`--redirect-uris`, comma/newline-separated) for `add-client`. */
+	redirectUris?: string;
 }
 
 /** A write-discarding stream — the add-client session frames with `intro`/`outro` only (no banner). */
@@ -113,8 +132,8 @@ export function formatClientList(clients: ClientInfo[]): string {
 	return lines.join("\n");
 }
 
-/** `Usage: openhammer auth { add-client | list | remove <client_id> }` */
-const AUTH_USAGE = "Usage: openhammer auth { add-client | list | remove <client_id> }";
+/** `Usage: openhammer auth { add-client | set-login | list | remove <client_id> }` */
+const AUTH_USAGE = "Usage: openhammer auth { add-client | set-login | list | remove <client_id> }";
 
 /**
  * `auth add-client` — issue a client and (interactively) reveal the plaintext secret once.
@@ -125,24 +144,24 @@ const AUTH_USAGE = "Usage: openhammer auth { add-client | list | remove <client_
  */
 async function addClientCmd(io: AuthIo, deps: AuthDeps): Promise<number> {
 	const credPath = deps.credPath ?? credentialsPath();
+	const promptIo = deps.io ?? defaultIo;
+	const stream = deps.stream ?? silentStream;
+	const interactive = deps.label === undefined;
 
-	// Non-interactive: the label comes from `--label` (no prompt). Interactive: prompt.
-	const flagLabel = deps.label;
-	let label: string | null;
-	if (flagLabel !== undefined) {
-		label = flagLabel;
-	} else {
-		const promptIo = deps.io ?? defaultIo;
-		const stream = deps.stream ?? silentStream;
-		label = await withSession(
-			"Add OAuth client",
-			async () => promptIo.text({ message: "Label (optional, press Enter to skip)" }),
-			{ io: promptIo, stream },
-		);
-	}
-	if (label === null) return 0; // cancelled — no write, silent
+	// Non-interactive: build the config from flags (no prompts). Interactive: prompt
+	// the full sequence (label → type →, for auth-code, redirect URIs + optional login).
+	const config = interactive
+		? await withSession("Add OAuth client", async () => collectClientConfig(promptIo), { io: promptIo, stream })
+		: clientConfigFromFlags({
+				label: deps.label ?? "",
+				type: deps.type,
+				username: deps.username,
+				password: deps.password,
+				redirectUris: deps.redirectUris,
+			});
+	if (config === null) return 0; // cancelled — no write, silent
 
-	const result = issueClient(label, credPath);
+	const result = issueClient(config.label, toIssueOptions(config), credPath);
 	if (!result.ok) {
 		io.stderr.write(`${result.error.message}\n`);
 		return 1;
@@ -150,13 +169,55 @@ async function addClientCmd(io: AuthIo, deps: AuthDeps): Promise<number> {
 
 	// Interactive always reveals the secret (shown once). Flag mode reveals only with
 	// `--print-secret` (stdout may be logged in CI); the id prints either way.
-	const interactive = flagLabel === undefined;
 	if (interactive || deps.printSecret === true) {
-		io.stdout.write(`${formatSecretReveal(result.value, label)}\n`);
+		io.stdout.write(`${formatSecretReveal(result.value, config.label)}\n`);
 	} else {
 		io.stdout.write(`Added OAuth client ${result.value.clientId}.\n`);
 		io.stdout.write("(Pass --print-secret to display the plaintext secret.)\n");
 	}
+	return 0;
+}
+
+/**
+ * `auth set-login` — set the global operator login (username + password) that
+ * `/authorize` falls back to for clients without their own login (e.g. one created
+ * dynamically by `/register`). Non-interactive (spec 20g): `--username <u> --password
+ * <p>` skips the prompts.
+ */
+async function setLoginCmd(io: AuthIo, deps: AuthDeps): Promise<number> {
+	const credPath = deps.credPath ?? credentialsPath();
+	const promptIo = deps.io ?? defaultIo;
+	const stream = deps.stream ?? silentStream;
+
+	let creds: { username: string; password: string } | null;
+	if (deps.username !== undefined && deps.password !== undefined) {
+		creds = { username: deps.username, password: deps.password };
+	} else {
+		creds = await withSession(
+			"Set operator login",
+			async () => {
+				const username = await promptIo.text({ message: "Operator username" });
+				if (username === null) return null;
+				const password = await promptIo.password({ message: "Operator password" });
+				if (password === null) return null;
+				return { username, password };
+			},
+			{ io: promptIo, stream },
+		);
+	}
+	if (creds === null) return 0; // cancelled — no write, silent
+
+	if (creds.username.trim() === "" || creds.password === "") {
+		io.stderr.write("Username and password are required.\n");
+		return 1;
+	}
+	try {
+		setOperatorLogin(creds.username.trim(), creds.password, credPath);
+	} catch (e) {
+		io.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
+		return 1;
+	}
+	io.stdout.write("Operator login set. Clients without their own login authenticate with it.\n");
 	return 0;
 }
 
@@ -202,14 +263,31 @@ export async function authCommand(
 ): Promise<number> {
 	switch (sub) {
 		case "add-client": {
-			// Non-interactive (spec 20g): `--label` skips the prompt; `--print-secret`
-			// gates the secret reveal. No `--label` → the interactive prompt path.
+			// Non-interactive (spec 20g): `--label` skips the prompts; `--type`/
+			// `--username`/`--password`/`--redirect-uris` build an auth-code client;`
+			// `--print-secret` gates the secret reveal. No `--label` → interactive wizard.
 			const flags = parseSubFlags(rest);
 			const label = flags.values.label;
 			if (label !== undefined) {
-				return addClientCmd(io, { ...deps, label, printSecret: flags.bools.has("print-secret") });
+				return addClientCmd(io, {
+					...deps,
+					label,
+					printSecret: flags.bools.has("print-secret"),
+					type: flags.values.type,
+					username: flags.values.username,
+					password: flags.values.password,
+					redirectUris: flags.values["redirect-uris"],
+				});
 			}
 			return addClientCmd(io, deps);
+		}
+		case "set-login": {
+			// Non-interactive (spec 20g): `--username` + `--password` skip the prompts.
+			const flags = parseSubFlags(rest);
+			if (flags.values.username !== undefined && flags.values.password !== undefined) {
+				return setLoginCmd(io, { ...deps, username: flags.values.username, password: flags.values.password });
+			}
+			return setLoginCmd(io, deps);
 		}
 		case "list":
 			return listClientsCmd(io, deps);

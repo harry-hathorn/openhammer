@@ -48,7 +48,9 @@ describe("DashboardStore — mutators", () => {
 		s.setStatus(up);
 		expect(s.status).toBe(up);
 
-		const clients: ClientInfo[] = [{ clientId: "oh_1", label: "a", createdAt: "now" }];
+		const clients: ClientInfo[] = [
+			{ clientId: "oh_1", label: "a", createdAt: "now", grantTypes: ["client_credentials"] },
+		];
 		s.setOauthClients(clients);
 		expect(s.oauthClients).toBe(clients);
 

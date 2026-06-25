@@ -35,6 +35,7 @@ import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { BannerStream } from "./banner.ts";
+import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
 import { type DashboardActions, DashboardRoot } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
@@ -261,18 +262,18 @@ function buildActions(
 	const issueClientAction: DashboardActions["issueClient"] =
 		overrides.issueClient ??
 		(async () => {
-			// The label prompt is the only TUI part; the issue itself is a sync domain call.
-			// `io` shares the dashboard's terminal, so the prompt runs on the same
-			// `ProcessTerminal` (clean stdin handoff — no second terminal).
+			// The full add-client sequence (label → type →, for auth-code, redirect URIs
+			// + optional login) runs on the dashboard's shared terminal (clean stdin
+			// handoff — no second terminal). The issue itself is a sync domain call.
 			ctx.renderer?.suspend();
-			let label: string | null;
+			let config: Awaited<ReturnType<typeof collectClientConfig>>;
 			try {
-				label = await io.text({ message: "Label (optional, press Enter to skip)" });
+				config = await collectClientConfig(io);
 			} finally {
 				ctx.renderer?.resume();
 			}
-			if (label === null) return null; // cancelled — silent
-			const result = issueClient(label, credPath);
+			if (config === null) return null; // cancelled — silent
+			const result = issueClient(config.label, toIssueOptions(config), credPath);
 			if (result.ok) store.setOauthClients(listClientsSafe(credPath));
 			return result;
 		});

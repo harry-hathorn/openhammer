@@ -105,12 +105,12 @@ describe("view — statusRows", () => {
 describe("view — clientRows + secretRevealRows", () => {
 	it("maps clients; a blank label becomes (no label)", () => {
 		const clients: ClientInfo[] = [
-			{ clientId: "oh_1", label: "ci", createdAt: "now" },
-			{ clientId: "oh_2", label: "  ", createdAt: "then" },
+			{ clientId: "oh_1", label: "ci", createdAt: "now", grantTypes: ["client_credentials"] },
+			{ clientId: "oh_2", label: "  ", createdAt: "then", grantTypes: ["authorization_code"] },
 		];
 		expect(clientRows(clients)).toEqual([
-			{ clientId: "oh_1", label: "ci", createdAt: "now" },
-			{ clientId: "oh_2", label: "(no label)", createdAt: "then" },
+			{ clientId: "oh_1", label: "ci", createdAt: "now", grantType: "machine" },
+			{ clientId: "oh_2", label: "(no label)", createdAt: "then", grantType: "login" },
 		]);
 	});
 

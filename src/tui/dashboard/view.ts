@@ -52,6 +52,16 @@ export interface ClientRow {
 	/** Display label ("(no label)" when blank). */
 	label: string;
 	createdAt: string;
+	/** Display label for the grant type: "login" (authorization code) or "machine" (client credentials). */
+	grantType: string;
+}
+
+/**
+ * A short display label for a client's grant types — "login" when it may use the
+ * authorization-code grant (a browser login), else "machine" (client credentials).
+ */
+export function grantTypeLabel(grantTypes: string[]): string {
+	return grantTypes.includes("authorization_code") ? "login" : "machine";
 }
 
 /**
@@ -128,6 +138,7 @@ export function clientRows(clients: ClientInfo[]): ClientRow[] {
 		clientId: c.clientId,
 		label: c.label.trim() ? c.label : "(no label)",
 		createdAt: c.createdAt,
+		grantType: grantTypeLabel(c.grantTypes),
 	}));
 }
 
