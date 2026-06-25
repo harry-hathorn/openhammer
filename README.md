@@ -19,6 +19,15 @@
 ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██╔══██╗
 ╚██████╔╝██║     ███████╗██║ ╚████║██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██║  ██║
  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝
+ OpenHammer
+
+  → Status          server up
+    Channels        1 configured
+    Clients & JWT   1 client
+    Monitor         quiet
+    Settings        037c083b-5923-4b9d-9f33-d7b4ec4828a6
+    Doctor          run diagnostics
+    Quit            exit OpenHammer
 ```
 
 # OpenHammer
