@@ -188,6 +188,26 @@ describe("runPrompt — lifecycle + teardown", () => {
 		expect(term.stopped).toBe(true);
 	});
 
+	it("renders the `header` above the component (so a bare Input isn't a blank modal)", async () => {
+		// The issue-client label / wizard field labels must appear in the modal —
+		// otherwise a bare Input (`> `) with no visible question looks blank.
+		const term = new FakeTerminal();
+		const promise = runPrompt(
+			(resolve) =>
+				new FakePromptComponent(
+					() => resolve("ok"),
+					() => resolve(null),
+				),
+			{ terminal: term, header: "Label (optional)" },
+		);
+		await flush();
+		expect(term.output()).toContain("Label (optional)"); // header rendered
+		expect(term.output()).toContain("fake prompt"); // component rendered below it
+
+		term.send("\r");
+		await promise;
+	});
+
 	it("stop() is called exactly once (idempotent teardown — no double-restore)", async () => {
 		const term = new FakeTerminal();
 		const promise = runPrompt(

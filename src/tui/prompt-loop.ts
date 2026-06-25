@@ -31,7 +31,7 @@
  * cancels the pending render timer, so a confirm keystroke's scheduled redraw
  * never fires after teardown.
  */
-import { type Component, Loader, ProcessTerminal, type Terminal, TUI } from "@earendil-works/pi-tui";
+import { type Component, Loader, ProcessTerminal, type Terminal, Text, TUI } from "@earendil-works/pi-tui";
 
 /**
  * Resolve the prompt: pass the chosen value, or `null` for cancel. Handed to a
@@ -66,6 +66,12 @@ export interface RunPromptDeps {
 	 * emit the marker.)
 	 */
 	showHardwareCursor?: boolean;
+	/**
+	 * A header line rendered above the mounted component ON THE ALT SCREEN (so the
+	 * prompt's message/question is visible inside the modal, not hidden on the
+	 * underlying screen). The component stays focused for input.
+	 */
+	header?: string;
 }
 
 /**
@@ -111,9 +117,21 @@ export async function runPrompt<T>(mount: PromptMounter<T>, deps: RunPromptDeps 
 	// is entered must NOT call `stop()` (which would restore `wasRaw` from a
 	// `start()` that never ran). The body up to `await completion` is synchronous,
 	// so `mount`/`addChild`/`setFocus`/`start` all run before the caller `await`s.
+	//
+	// **No alt screen here:** the prompt renders in place on whatever screen is
+	// active. The DASHBOARD owns the alt screen (see `render.ts`) and force-clears
+	// + redraws on resume after a modal — so a dashboard modal overwrites the
+	// dashboard frame in place, then the dashboard repainting restores it. The
+	// standalone CLI prompt renders in place below the banner (the original shape).
 	let started = false;
 	try {
 		const component = mount(finish);
+		// Render the message header ABOVE the component, then the component; focus the
+		// component so input routes to it. (`TUI extends Container` and renders all
+		// children in order; `setFocus` accepts any component.)
+		if (deps.header !== undefined) {
+			tui.addChild(new Text(deps.header, 0, 0));
+		}
 		tui.addChild(component);
 		tui.setFocus(component); // pi-tui routes raw input to component.handleInput + re-renders
 		tui.start();
