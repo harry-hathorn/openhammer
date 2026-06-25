@@ -33,6 +33,7 @@ export async function buildFastify(
 	allowedClients: string[] = [],
 	recorder?: RequestRecorder,
 	oauth?: OauthMiddlewareOptions,
+	publicBaseUrl?: string,
 ): Promise<FastifyInstance> {
 	// pino-pretty only in development (`NODE_ENV=development`) — production gets
 	// raw JSON for structured log shipping; tests run with `NODE_ENV=test`, so
@@ -77,10 +78,13 @@ export async function buildFastify(
 	fastify.get("/health", async () => ({ status: "ok" }));
 
 	// Protected-resource discovery — unauthenticated (must precede auth). The
-	// advertised `resource` uses the configured host:port (build-time `baseUrl`);
-	// the per-request `Host` is used only for the auth `WWW-Authenticate`
-	// challenge (spec 11), so the two are intentionally separate.
-	const baseUrl = `http://${config.host}:${config.port}`;
+	// advertised `resource` uses the public base URL when one is known (a live
+	// tunnel URL or `MCP_PUBLIC_URL`, resolved by `main.ts`), so OAuth metadata
+	// stays correct + https behind a tunnel; it falls back to the configured
+	// host:port for localhost boots. The per-request `Host` is used only for the
+	// auth `WWW-Authenticate` challenge (spec 11), so the two are intentionally
+	// separate.
+	const baseUrl = publicBaseUrl ?? `http://${config.host}:${config.port}`;
 	registerWellKnown(fastify, baseUrl);
 
 	// The OAuth Authorization Server (spec 20c): RFC 8414 metadata + the

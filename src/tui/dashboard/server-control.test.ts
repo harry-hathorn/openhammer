@@ -9,6 +9,7 @@ function config(port = 3000): Config {
 		host: "127.0.0.1",
 		rootDir: "/tmp",
 		authToken: undefined,
+		publicUrl: undefined,
 		maxResponseBytes: 512_000,
 		logLevel: "silent",
 	};

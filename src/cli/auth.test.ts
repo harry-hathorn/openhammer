@@ -2,7 +2,13 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type ClientInfo, type IssuedClient, listClients } from "../auth/oauth/clients.ts";
+import {
+	type ClientInfo,
+	hasOperatorLogin,
+	type IssuedClient,
+	listClients,
+	verifyOperatorLogin,
+} from "../auth/oauth/clients.ts";
 import { type CredentialValues, getCredentials } from "../config/credentials.ts";
 import type { PromptIo } from "../tui/prompts.ts";
 import { type AuthIo, authCommand, formatClientList, formatSecretReveal } from "./auth.ts";
@@ -36,7 +42,9 @@ function fakeTextIo(answers: (string | null)[]): { io: PromptIo; messages: strin
 	const messages: string[] = [];
 	const io: PromptIo = {
 		async select() {
-			return null;
+			// `add-client`'s type picker defaults to client-credentials; the label-only
+			// tests issue a client-credentials client, so answer it here.
+			return "client_credentials";
 		},
 		async text(o) {
 			messages.push(o.message);
@@ -53,6 +61,40 @@ function fakeTextIo(answers: (string | null)[]): { io: PromptIo; messages: strin
 		outro() {},
 	};
 	return { io, messages };
+}
+
+/**
+ * A fuller fake {@link PromptIo} — per-primitive queues for `text`/`select`/`password`
+ * (each pops its next answer, `null` on exhaustion). Drives the multi-step add-client
+ * wizard + `set-login`. No TTY, no casts.
+ */
+function fakeFullIo(opts: {
+	texts?: (string | null)[];
+	selects?: (string | null)[];
+	passwords?: (string | null)[];
+}): PromptIo {
+	const texts = [...(opts.texts ?? [])];
+	const selects = [...(opts.selects ?? [])];
+	const passwords = [...(opts.passwords ?? [])];
+	return {
+		async select() {
+			const v = selects.shift();
+			return v === undefined ? null : v;
+		},
+		async text() {
+			const v = texts.shift();
+			return v === undefined ? null : v;
+		},
+		async password() {
+			const v = passwords.shift();
+			return v === undefined ? null : v;
+		},
+		async confirm() {
+			return null;
+		},
+		intro() {},
+		outro() {},
+	};
 }
 
 /** A fresh temp `credentials.json` path under a temp dir (the dir is removed by `cleanup`). */
@@ -86,8 +128,13 @@ describe("formatClientList", () => {
 
 	it("lists clients with id + label + createdAt", () => {
 		const clients: ClientInfo[] = [
-			{ clientId: "oh_a", label: "alpha", createdAt: "2026-01-01T00:00:00.000Z" },
-			{ clientId: "oh_b", label: "beta", createdAt: "2026-02-01T00:00:00.000Z" },
+			{
+				clientId: "oh_a",
+				label: "alpha",
+				createdAt: "2026-01-01T00:00:00.000Z",
+				grantTypes: ["client_credentials"],
+			},
+			{ clientId: "oh_b", label: "beta", createdAt: "2026-02-01T00:00:00.000Z", grantTypes: ["client_credentials"] },
 		];
 		const text = formatClientList(clients);
 		expect(text).toContain("OAuth clients:");
@@ -96,7 +143,9 @@ describe("formatClientList", () => {
 	});
 
 	it("renders a blank label as (no label)", () => {
-		const text = formatClientList([{ clientId: "oh_a", label: "", createdAt: "2026-01-01T00:00:00.000Z" }]);
+		const text = formatClientList([
+			{ clientId: "oh_a", label: "", createdAt: "2026-01-01T00:00:00.000Z", grantTypes: ["client_credentials"] },
+		]);
 		expect(text).toContain("oh_a  (no label)");
 	});
 });
@@ -358,5 +407,108 @@ describe("authCommand — routing", () => {
 		const code = await authCommand(undefined, [], io);
 		expect(code).toBe(2);
 		expect(err()).toContain("Usage: openhammer auth");
+	});
+});
+
+describe("authCommand — add-client (authorization code)", () => {
+	it("issues an auth-code client with redirect URIs + a per-client login (interactive)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const prompt = fakeFullIo({
+				texts: ["web", "https://claude.ai/api/mcp/auth_callback", "op"],
+				selects: ["authorization_code"],
+				passwords: ["pw"],
+			});
+			const { io, out } = recordingIo();
+			const code = await authCommand("add-client", [], io, { io: prompt, credPath: path });
+			expect(code).toBe(0);
+
+			const listed = listClients(path);
+			expect(listed).toHaveLength(1);
+			expect(listed[0]?.grantTypes).toEqual(["authorization_code"]);
+			expect(listed[0]?.username).toBe("op");
+			expect(listed[0]?.redirectUris).toEqual(["https://claude.ai/api/mcp/auth_callback"]);
+			// The interactive path always reveals the secret once.
+			expect(out()).toContain("client_secret:");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("`--type authorization_code` issues an auth-code client non-interactively", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const { io } = recordingIo();
+			const code = await authCommand(
+				"add-client",
+				[
+					"--label",
+					"web",
+					"--type",
+					"authorization_code",
+					"--redirect-uris",
+					"https://cb",
+					"--username",
+					"op",
+					"--password",
+					"pw",
+					"--print-secret",
+				],
+				io,
+				{ credPath: path },
+			);
+			expect(code).toBe(0);
+			const listed = listClients(path);
+			expect(listed[0]?.grantTypes).toEqual(["authorization_code"]);
+			expect(listed[0]?.username).toBe("op");
+			expect(listed[0]?.redirectUris).toEqual(["https://cb"]);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+describe("authCommand — set-login", () => {
+	it("sets the global operator login interactively (exit 0)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const prompt = fakeFullIo({ texts: ["admin"], passwords: ["adminpw"] });
+			const { io, out } = recordingIo();
+			const code = await authCommand("set-login", [], io, { io: prompt, credPath: path });
+			expect(code).toBe(0);
+			expect(out()).toContain("Operator login set");
+			expect(hasOperatorLogin(path)).toBe(true);
+			expect(verifyOperatorLogin("admin", "adminpw", path)).toBe(true);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("`--username` + `--password` set the login non-interactively", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const { io } = recordingIo();
+			const code = await authCommand("set-login", ["--username", "admin", "--password", "adminpw"], io, {
+				credPath: path,
+			});
+			expect(code).toBe(0);
+			expect(verifyOperatorLogin("admin", "adminpw", path)).toBe(true);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("a cancelled prompt writes nothing (exit 0)", async () => {
+		const { path, cleanup } = tempCredPath();
+		try {
+			const prompt = fakeFullIo({ texts: [null] });
+			const { io, out } = recordingIo();
+			const code = await authCommand("set-login", [], io, { io: prompt, credPath: path });
+			expect(code).toBe(0);
+			expect(out()).toBe("");
+			expect(hasOperatorLogin(path)).toBe(false);
+		} finally {
+			cleanup();
+		}
 	});
 });
