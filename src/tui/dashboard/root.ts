@@ -90,6 +90,10 @@ export interface DashboardRootDeps {
 	store: DashboardStore;
 	style: Style;
 	actions: DashboardActions;
+	/** The terminal row count, so the banner can pin to the top + the list to the bottom
+	 *  with a gap between (pi-tui's `Component.render` is width-only, so the height is read
+	 *  here). Defaults to 24. */
+	getRows?: () => number;
 }
 
 /** The one-time secret reveal held until the user leaves the Clients screen. */
@@ -118,11 +122,14 @@ export class DashboardRoot implements Component {
 	private reveal: SecretReveal | null = null;
 	/** The doctor report, shown on the Doctor screen once run. */
 	private doctorReport: string | null = null;
+	/** The terminal row count (to pin the list at the bottom with a gap under the banner). */
+	private readonly getRows: () => number;
 
 	constructor(deps: DashboardRootDeps) {
 		this.store = deps.store;
 		this.style = deps.style;
 		this.actions = deps.actions;
+		this.getRows = deps.getRows ?? (() => 24);
 	}
 
 	invalidate(): void {
@@ -203,24 +210,30 @@ export class DashboardRoot implements Component {
 		return secretRevealRows(this.reveal.clientId, this.reveal.plaintext);
 	}
 
-	/** Render the active screen: title, header, focused list, flash, footer. */
+	/** Render the active screen: banner + title + header pinned at the TOP, the focused
+	 *  list + flash + footer pinned at the BOTTOM, with a gap between (so the banner stays
+	 *  at the top and the menu sits at the bottom of the viewport). The banner is part of
+	 *  the frame (not scrollback) so it survives the force-clear + redraw after a modal. */
 	render(width: number): string[] {
 		const spec = this.currentSpec();
-		const lines: string[] = [];
-		// The banner is part of the frame (not printed once to scrollback) so it
-		// survives the force-clear + redraw after a modal (pi-tui's force-clear wipes
-		// scrollback, which is why a scrollback banner "disappeared"). Pinned on every
-		// screen — the title + content render below it.
-		lines.push(...BANNER.split("\n"), "", titleLine(this.style), "");
-		for (const line of spec.header ?? []) lines.push(line);
-		if ((spec.header ?? []).length > 0) lines.push("");
-		const maxVisible = Math.max(1, width > 0 ? width : 80);
-		lines.push(...renderList(spec.items, this.focus, this.style, maxVisible));
-		if (this.flashMessage !== null) {
-			lines.push("", this.style.warning(this.flashMessage));
+		// Top: banner + title + the screen's header (field rows / monitor feed / reveal).
+		const top: string[] = [...BANNER.split("\n"), "", titleLine(this.style)];
+		if ((spec.header ?? []).length > 0) {
+			top.push("");
+			for (const line of spec.header ?? []) top.push(line);
 		}
-		lines.push("", footerLine(this.hint(), this.style));
-		return lines;
+		// Bottom: the focused list + flash + footer.
+		const maxVisible = Math.max(1, width > 0 ? width : 80);
+		const bottom: string[] = [...renderList(spec.items, this.focus, this.style, maxVisible)];
+		if (this.flashMessage !== null) {
+			bottom.push("", this.style.warning(this.flashMessage));
+		}
+		bottom.push("", footerLine(this.hint(), this.style));
+		// Gap = leftover viewport rows (clamped ≥ 0); inserts blank lines so the list sits
+		// at the bottom. When the content is tall (e.g. a long monitor feed) the gap is 0
+		// and the frame flows top-to-bottom (the banner scrolls off only if it overflows).
+		const gap = Math.max(0, this.getRows() - top.length - bottom.length);
+		return [...top, ...Array.from({ length: gap }, () => ""), ...bottom];
 	}
 
 	/** Route a raw keystroke to navigation or an activation. */

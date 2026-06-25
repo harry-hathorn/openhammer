@@ -136,7 +136,7 @@ export async function runDashboard(deps: DashboardDeps): Promise<void> {
 	// (the holder stays `| undefined` for the actions, which `?.` it).
 	const ctx: { renderer: DashboardRenderer | undefined } = { renderer: undefined };
 	const actions = buildActions(ctx, store, deps, credPath, persist, io);
-	const root = new DashboardRoot({ store, style, actions });
+	const root = new DashboardRoot({ store, style, actions, getRows: () => terminal.rows });
 	const renderer = createDashboardRenderer({
 		root,
 		terminal,

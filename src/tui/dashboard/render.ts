@@ -157,7 +157,10 @@ export function createDashboardRenderer(deps: DashboardRendererDeps): DashboardR
 			// stays on the main screen and reappears when the dashboard exits — and
 			// crucially, a force-clear/redraw on resume (after a modal) only touches the
 			// alt screen, so the banner is never wiped (the original compaction bug).
-			terminal.write(ENTER_ALT_SCREEN);
+			// `\x1b[H` homes the cursor: `\x1b[?1049h` enters the alt buffer but leaves the
+			// cursor where the main screen had it (mid-screen after the banner), which drew
+			// the first frame mid-screen (the "hammer in the middle" bug).
+			terminal.write(`${ENTER_ALT_SCREEN}\x1b[H`);
 			tui.start();
 			started = true;
 			startTimer();
