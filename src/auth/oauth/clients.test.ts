@@ -9,7 +9,10 @@ import {
 	type ClientInfo,
 	ensureJwtSecret,
 	findClient,
+	GRANT_AUTHORIZATION_CODE,
+	GRANT_CLIENT_CREDENTIALS,
 	hashSecret,
+	hasOperatorLogin,
 	issueClient,
 	listClients,
 	newClientId,
@@ -17,6 +20,9 @@ import {
 	peekJwtSecret,
 	removeClient,
 	resolveJwtSecret,
+	setOperatorLogin,
+	verifyClientLogin,
+	verifyOperatorLogin,
 	verifySecret,
 } from "./clients.ts";
 
@@ -96,7 +102,7 @@ describe("issueClient", () => {
 	afterEach(() => rmUnder(path));
 
 	it("issues a client with a plaintext secret + `oh_` id", () => {
-		const result = issueClient("ci", path);
+		const result = issueClient("ci", {}, path);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.value.clientId.startsWith("oh_")).toBe(true);
@@ -104,7 +110,7 @@ describe("issueClient", () => {
 	});
 
 	it("persists the hash (findable) but never the plaintext", () => {
-		const result = issueClient("ci", path);
+		const result = issueClient("ci", {}, path);
 		if (!result.ok) throw new Error("expected ok");
 
 		const record = findClient(result.value.clientId, path);
@@ -126,7 +132,7 @@ describe("issueClient", () => {
 		writeFileSync(blocker, "", { mode: 0o600 });
 		const blockedPath = join(blocker, ".openhammer", "credentials.json");
 
-		const result = issueClient("ci", blockedPath);
+		const result = issueClient("ci", {}, blockedPath);
 		expect(result).toEqual(err(expect.any(Error)));
 		expect(existsSync(blockedPath)).toBe(false);
 	});
@@ -145,7 +151,7 @@ describe("findClient", () => {
 	});
 
 	it("verifies the issued secret round-trip", () => {
-		const issued = issueClient("ci", path);
+		const issued = issueClient("ci", {}, path);
 		if (!issued.ok) throw new Error("expected ok");
 		const record = findClient(issued.value.clientId, path);
 		expect(record && verifySecret(issued.value.plaintextSecret, record.secretHash)).toBe(true);
@@ -165,8 +171,8 @@ describe("listClients", () => {
 	});
 
 	it("lists registered clients (id + label + createdAt), never the secret hash", () => {
-		const a = issueClient("ci-a", path);
-		const b = issueClient("ci-b", path);
+		const a = issueClient("ci-a", {}, path);
+		const b = issueClient("ci-b", {}, path);
 		if (!a.ok || !b.ok) throw new Error("expected ok");
 
 		const list: ClientInfo[] = listClients(path);
@@ -186,7 +192,7 @@ describe("removeClient", () => {
 	afterEach(() => rmUnder(path));
 
 	it("removes a registered client", () => {
-		const issued = issueClient("ci", path);
+		const issued = issueClient("ci", {}, path);
 		if (!issued.ok) throw new Error("expected ok");
 
 		expect(removeClient(issued.value.clientId, path)).toEqual(ok(undefined));
@@ -302,7 +308,7 @@ describe("coexistence with channel secrets (no clobber)", () => {
 		const channel = randomUUID();
 		setCredentials(channel, { authtoken: "ngrok-token" }, path);
 
-		const issued = issueClient("ci", path);
+		const issued = issueClient("ci", {}, path);
 		if (!issued.ok) throw new Error("expected ok");
 
 		// The channel secret survives the OAuth write.
@@ -314,7 +320,7 @@ describe("coexistence with channel secrets (no clobber)", () => {
 	it("survives a subsequent channel write (the read-merge-write that could clobber)", () => {
 		const channel = randomUUID();
 		setCredentials(channel, { authtoken: "ngrok-token" }, path);
-		const issued = issueClient("ci", path);
+		const issued = issueClient("ci", {}, path);
 		if (!issued.ok) throw new Error("expected ok");
 
 		// A later channel merge — the whole-file validator must not reject the OAuth bag.
@@ -326,7 +332,7 @@ describe("coexistence with channel secrets (no clobber)", () => {
 	});
 
 	it("does not read the reserved OAuth credId as a channel bag", () => {
-		issueClient("ci", path);
+		issueClient("ci", {}, path);
 		// A channel lookup never returns the OAuth bag.
 		expect(getCredentials("__openhammer_oauth__", path).authtoken).toBeUndefined();
 	});
@@ -347,5 +353,112 @@ describe("resilience", () => {
 		expect(findClient("oh_anything", path)).toBeUndefined();
 		// The jwtSecret is independent of the clients blob.
 		expect(ensureJwtSecret(path)).toBe("s");
+	});
+
+	it("normalizes a legacy v1 record (no grantTypes) to client_credentials on read", () => {
+		// Seed a pre-auth-code record directly: core fields, no grantTypes.
+		const legacy = { secretHash: hashSecret("x"), label: "legacy", createdAt: "2024-01-01T00:00:00.000Z" };
+		setCredentials("__openhammer_oauth__", { clients: JSON.stringify({ oh_legacy: legacy }) }, path);
+		const record = findClient("oh_legacy", path);
+		expect(record?.grantTypes).toEqual([GRANT_CLIENT_CREDENTIALS]);
+	});
+});
+
+describe("authorization-code clients + login", () => {
+	let path: string;
+
+	beforeEach(() => {
+		path = tempCredPath();
+	});
+	afterEach(() => rmUnder(path));
+
+	it("defaults grantTypes to [client_credentials] when no opts are given", () => {
+		const issued = issueClient("ci", {}, path);
+		if (!issued.ok) throw new Error("expected ok");
+		const record = findClient(issued.value.clientId, path);
+		expect(record?.grantTypes).toEqual([GRANT_CLIENT_CREDENTIALS]);
+	});
+
+	it("stores grantTypes + redirect URIs + a per-client login for an auth-code client", () => {
+		const issued = issueClient(
+			"web",
+			{
+				grantTypes: [GRANT_AUTHORIZATION_CODE],
+				redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
+				username: "operator",
+				password: "s3cret",
+			},
+			path,
+		);
+		if (!issued.ok) throw new Error("expected ok");
+		const record = findClient(issued.value.clientId, path);
+		expect(record?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+		expect(record?.redirectUris).toEqual(["https://claude.ai/api/mcp/auth_callback"]);
+		expect(record?.username).toBe("operator");
+		expect(record?.passwordHash).toBe(hashSecret("s3cret"));
+		// The plaintext password is never persisted.
+		expect(readFileSync(path, "utf-8")).not.toContain("s3cret");
+	});
+
+	it("verifyClientLogin accepts the right credentials and rejects wrong ones", () => {
+		const issued = issueClient(
+			"web",
+			{ grantTypes: [GRANT_AUTHORIZATION_CODE], username: "op", password: "right" },
+			path,
+		);
+		if (!issued.ok) throw new Error("expected ok");
+		const record = findClient(issued.value.clientId, path);
+		if (!record) throw new Error("expected record");
+		expect(verifyClientLogin(record, "op", "right")).toBe(true);
+		expect(verifyClientLogin(record, "op", "wrong")).toBe(false);
+		expect(verifyClientLogin(record, "other", "right")).toBe(false);
+	});
+
+	it("verifyClientLogin is false for a client with no login configured", () => {
+		const issued = issueClient("ci", {}, path);
+		if (!issued.ok) throw new Error("expected ok");
+		const record = findClient(issued.value.clientId, path);
+		if (!record) throw new Error("expected record");
+		expect(verifyClientLogin(record, "anyone", "anything")).toBe(false);
+	});
+
+	it("listClients surfaces grantTypes + username (never any hash)", () => {
+		issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE], username: "op", password: "pw" }, path);
+		const list = listClients(path);
+		expect(list.length).toBe(1);
+		expect(list[0].grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+		expect(list[0].username).toBe("op");
+		expect("passwordHash" in list[0]).toBe(false);
+	});
+});
+
+describe("global operator login", () => {
+	let path: string;
+
+	beforeEach(() => {
+		path = tempCredPath();
+	});
+	afterEach(() => rmUnder(path));
+
+	it("is absent until set (verify returns false, never throws)", () => {
+		expect(hasOperatorLogin(path)).toBe(false);
+		expect(verifyOperatorLogin("op", "pw", path)).toBe(false);
+	});
+
+	it("verifies the set username + password and rejects wrong ones", () => {
+		setOperatorLogin("operator", "hunter2", path);
+		expect(hasOperatorLogin(path)).toBe(true);
+		expect(verifyOperatorLogin("operator", "hunter2", path)).toBe(true);
+		expect(verifyOperatorLogin("operator", "wrong", path)).toBe(false);
+		expect(verifyOperatorLogin("other", "hunter2", path)).toBe(false);
+		// Only the hash is persisted.
+		expect(readFileSync(path, "utf-8")).not.toContain("hunter2");
+	});
+
+	it("overwrites the previous login on a re-set", () => {
+		setOperatorLogin("op", "old", path);
+		setOperatorLogin("op", "new", path);
+		expect(verifyOperatorLogin("op", "new", path)).toBe(true);
+		expect(verifyOperatorLogin("op", "old", path)).toBe(false);
 	});
 });

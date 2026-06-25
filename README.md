@@ -39,16 +39,24 @@
 
 > "What better way to ``bash`` than with a hammer? OpenHammer allows you to serve a file system and shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows, like OpenClaw, Hermes, PI, OpenCode, Claude Code, etc. The OGs know that the best agents aren't heavily abstracted behind sdks like Crew AI, LangChain or N8N, but are simply an LLM iterating over a filesystem with bash. You'll be able to tunnel your local environment straight to any MCP client, so no need for a million connectors to share your code with an AI chat, and turns any streaming chat loop into a harness. Or, you could launch a web server for any AI to drive. A few simple tools with the right access make this possible. This allows you to use any MCP compatible client to control a computer. Once the base tools are done, I'll be adding all the tools needed for managing agents, from memories, skills, tools, sessions, all persisting, cross compatible and portable to any MCP client." — Harry Hathorn
 
-A **standalone MCP server with no LLM** that mints a per-instance bearer token and exposes 7 local
-shell & filesystem tools — `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` — to a remote agent
-over Fastify + stateless Streamable HTTP, rooted at `MCP_ROOT_DIR` and gated by the credential. It is
-configured and operated through the **`openhammer` CLI**: set up public **channels** (ngrok,
-cloudflared, or a static URL), run health checks, and watch live tool activity.
+A **standalone MCP server with no LLM** that exposes 7 local shell & filesystem tools — `read`,
+`bash`, `edit`, `write`, `grep`, `find`, `ls` — to a remote agent over Fastify + stateless Streamable
+HTTP, rooted at `MCP_ROOT_DIR`. **The entrance is the TUI**: run `openhammer` (no args) for a
+full-screen control center that runs the server, manages **channels** (ngrok / cloudflared / a static
+URL), issues **OAuth clients**, and streams live tool activity. Authenticate any MCP client three ways
+— a raw **bearer token**, an OAuth **client-credentials** pair, or a full **authorization-code + PKCE**
+login (Claude web & Claude Code connect natively through a tunnel).
 
 > **No LLM, by design.** OpenHammer only *executes* tools. The intelligence — the agent loop, model
 > calls, and compaction — lives in the **MCP client** (your LLM provider, e.g. Claude Code). Point it
 > at OpenHammer's `/mcp` endpoint with the bearer token and it gets a safe, bounded filesystem+shell
 > surface to drive.
+
+> **Start here — the TUI is the entrance.** After `npm run build`, run **`node dist/cli.js`** (or
+> `npm link` once for the bare `openhammer` shortcut, or `npx tsx src/cli.ts` in development) with no
+> arguments: it boots the server and opens the dashboard in one. Everything below — channels,
+> clients, settings, doctor, monitor — is reachable from that control center; the one-shot
+> `openhammer <command>` forms are the same flows, scriptable/headless.
 
 ---
 
@@ -96,6 +104,25 @@ Point your MCP client (Claude Code, Cursor, the MCP Inspector, …) at that URL 
 with the inspector: `npx @modelcontextprotocol/inspector` → POST `…/mcp` with the bearer → `initialize`
 → `tools/list` (expect 8 tools: `guide` + the 7 capability tools) → call each.
 
+### OAuth clients (Claude web / Claude Code)
+
+Clients that can't set a raw `Authorization: Bearer` header connect via OAuth. OpenHammer ships a full
+Authorization Server — the **client-credentials** grant (machine clients) **and** the
+**authorization-code + PKCE** flow with dynamic registration (`/register`), which is what Claude web
+and Claude Code use. For an auth-code client you also need a login for `/oauth/authorize`:
+
+```bash
+openhammer auth set-login                  # the username + password Claude will prompt for
+openhammer auth add-client                 # → pick "Authorization code (login)"; paste its client_id into Claude Code
+# (Claude web registers its own client at /register and just needs the login above)
+```
+
+> **Behind a tunnel, set `MCP_PUBLIC_URL`.** OAuth discovery advertises the issuer/endpoints from the
+> server's base URL. With a manual ngrok/cloudflare URL in front, export
+> `MCP_PUBLIC_URL=https://<your-tunnel>.app` so the metadata points at the public https URL (an
+> OpenHammer-managed ngrok/cloudflare channel auto-derives this). Then connect Claude web/Code to
+> `https://<your-tunnel>.app/mcp` — it discovers the AS, you log in once, and it reaches `/mcp`.
+
 > **Running the CLI:** after `npm run build`, invoke it as **`node dist/cli.js …`** — npm does *not* link
 > a package's own bin into `node_modules/.bin`, so `./node_modules/.bin/openhammer` won't exist. For the
 > bare `openhammer …` shortcut, run **`npm link`** once (puts it on your `PATH`); during development
@@ -112,7 +139,8 @@ openhammer channel use <id>      Set the default channel
 openhammer channel remove <id>   Remove a channel (and its stored credentials)
 openhammer config get            Show persisted settings
 openhammer config set [section]  Edit a settings section (default: mcp) — wizard or flags
-openhammer auth add-client       Issue an OAuth client (id + secret shown once)
+openhammer auth add-client       Issue an OAuth client — client-credentials OR authorization-code (login); id+secret shown once
+openhammer auth set-login        Set the /authorize operator login (username + password)
 openhammer auth list             List OAuth clients
 openhammer auth remove <id>      Remove an OAuth client
 openhammer doctor                Run health checks (config, channels, credentials, rg/fd)
@@ -129,7 +157,7 @@ with `↑`/`↓`, open a section with `Enter`, go back with `Esc`/`←`, quit wi
 
 - **Status** — server up/down, local + tunnel URL, bearer token
 - **Channels** — configured channels + their live state/URLs; drill into one to **use**/**remove** it, or **add** a channel via the wizard
-- **Clients & JWT** — registered OAuth clients (client id); **issue** a new one to get a `client_id` + `client_secret` (shown once — only the SHA-256 hash is kept)
+- **Clients & JWT** — registered OAuth clients (id + grant type); **issue** a new one and pick its type — **client-credentials** (machine) or **authorization-code (login)** (with redirect URIs + an optional per-client username/password). The `client_id` + `client_secret` are shown once — only the SHA-256 hash is kept. (Set the `/authorize` operator login with `openhammer auth set-login`.)
 - **Monitor** — the live streaming feed of tool calls (who, which tool, duration, size)
 - **Settings** — allowed-client list + default channel; **edit** via the wizard
 - **Doctor** — run the diagnostics checks
@@ -165,7 +193,8 @@ Settings persist under `~/.openhammer` (`config.json` for non-secret config + `d
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on LAN). |
 | `MCP_ROOT_DIR` | launch cwd | Tool filesystem root; resolved absolute. |
 | `MCP_AUTH_TOKEN` | _minted_ | Override the minted bearer (no cred-file I/O). |
-| `OAUTH_JWT_SECRET` | _minted_ | HS256 secret for the OAuth client-credentials AS (`POST /oauth/token`); minted into `credentials.json` on first use. |
+| `MCP_PUBLIC_URL` | _derived_ | Public base URL advertised in OAuth discovery (issuer/endpoints). Auto from a managed tunnel; set it for a manual ngrok/cloudflare URL, else `http://$HOST:$PORT`. |
+| `OAUTH_JWT_SECRET` | _minted_ | HS256 secret for the OAuth AS (`POST /oauth/token` — client-credentials + auth-code + refresh); minted into `credentials.json` on first use. |
 | `MCP_MAX_RESPONSE_BYTES` | `512000` | Universal `tools/call` size backstop. |
 | `MCP_ALLOWED_CLIENTS` | _any_ | Comma-list of allowed MCP client `User-Agent`s (opt-in `403` gate). |
 | `LOG_LEVEL` | `info` | pino level. |
@@ -185,11 +214,15 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
 
 - **Stateless MCP.** Per-request `Server` + `StreamableHTTPServerTransport` (`enableJsonResponse:true`),
   no `sessionIdGenerator` (the SDK's stateless mode).
-- **Opaque bearer auth + OAuth client-credentials.** The bearer token is constant-time compared;
-  one token per instance; `MCP_AUTH_TOKEN` overrides. OAuth-only clients (which can't set a raw
-  `Authorization` header) get an HS256 JWT from `POST /oauth/token` (client_id/client_secret),
-  advertised via RFC 8414/9728 metadata and accepted by the `/mcp` gate alongside the opaque token
-  (spec 20) — alongside the `/.well-known/oauth-protected-resource` discovery pointer.
+- **Three auth paths.** The `/mcp` gate accepts, in fall-through order: the per-instance **opaque
+  bearer** (constant-time compared; `MCP_AUTH_TOKEN` overrides) **or** an AS-issued HS256 JWT. The
+  Authorization Server (spec 20) mints those JWTs via three grants — **client-credentials**
+  (`POST /oauth/token` with `client_id`/`client_secret`), **authorization-code + PKCE**
+  (`GET/POST /oauth/authorize` username/password login → `POST /oauth/token`), and **refresh_token** —
+  plus RFC 7591 **dynamic registration** (`POST /register`), all advertised via RFC 8414/9728 metadata.
+  Claude web & Claude Code connect through the auth-code flow; a raw bearer works for any client that
+  can set a header. (The `/authorize` login resolves a client's own credentials, else the global
+  operator login from `auth set-login`.)
 - **Channels & config are pluggable.** A channel provider registry (`live`/`static`) + a settings-section
   registry drive a schema-based TUI wizard (`@earendil-works/pi-tui`) — adding a channel or a settings section is
   one file + one registry line.
@@ -220,12 +253,12 @@ This repo ships from an **autonomous build loop** (`loop.sh` + `PROMPT_build.md`
 (`npm test` / `npm run typecheck` / `npm run lint`), Conventional Commits, tagged per iteration.
 
 - Standards: `AGENTS.md` (high-signal) → `docs/coding-standards.md` (detail).
-- Source of truth: `specs/01`–`specs/18` (+ `99`, the future agent-harness roadmap, out of scope for v1).
+- Source of truth: `specs/01`–`specs/21` (+ `99`, the future agent-harness roadmap, out of scope for v1).
 
 ```text
 src/{tools,mcp,auth,tunnel/providers,config,tui/wizards,cli,diagnostics,observability}
 test/{e2e-hermetic,fixtures,compose}  Dockerfile · docker-compose.yml · loop.sh
-specs/01–18 + 99   docs/{coding-standards,agent-harness-design}.md
+specs/01–21 + 99   docs/{coding-standards,agent-harness-design}.md
 ```
 
 ## Status

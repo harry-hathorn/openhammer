@@ -51,26 +51,14 @@ export async function main(): Promise<void> {
 	// `openhammer monitor`). Always created so the hook is wired — the socket is
 	// the best-effort part (null when it can't bind).
 	const recorder = new RequestRecorder();
-	// OAuth (spec 20d): resolve the JWT verify config once at boot so the `/mcp`
-	// gate accepts an AS-issued HS256 JWT in addition to the opaque token. The
-	// `jwtSecret` is the single source (`OAUTH_JWT_SECRET` env or the
-	// persisted/minted one — minting on first boot, like `ensureToken`); issuer/
-	// audience derive from the server base URL the `/oauth/token` grant signs with,
-	// so a grant-issued JWT verifies here. `undefined` (no secret resolvable) →
-	// the gate stays opaque-only; the grant still surfaces its own error.
-	const oauthBase = `http://${config.host}:${config.port}`;
-	const { issuer, audience } = oauthIssuerAudience(oauthBase);
-	const jwtSecret = resolveJwtSecret();
-	const oauth = jwtSecret !== undefined ? { jwtSecret, issuer, audience } : undefined;
-	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth);
-	await fastify.listen({ port: config.port, host: config.host });
 
-	// Resolve the boot channel via the registry (17q) BEFORE the status socket so
-	// the channel's live state is final when a monitor/dashboard connects — channel
-	// state is static for a server's lifetime (resolved once at boot). `null` + a
-	// `notice` is the null-safe localhost-only fallback (no channel, or the channel
-	// failed to start) — logged here, never fatal. The handle's `stop` tears a live
-	// channel down on shutdown; static channels have none (the operator owns the endpoint).
+	// Resolve the boot channel via the registry (17q) BEFORE building Fastify so
+	// a live tunnel URL is known and advertised as the public base URL — the OAuth
+	// AS metadata (issuer/authorization_endpoint/token_endpoint/resource) + the
+	// JWT iss/aud all derive from it, so they must be correct under the tunnel.
+	// `null` + a `notice` is the null-safe localhost-only fallback (no channel, or
+	// the channel failed to start); the handle's `stop` tears a live channel down
+	// on shutdown (static channels have none — the operator owns the endpoint).
 	const { handle, notice } = await resolveChannelHandle({
 		channelId: config.channelId,
 		channels: settings.channels,
@@ -78,6 +66,27 @@ export async function main(): Promise<void> {
 		wantTunnel: argv.tunnel,
 		localPort: config.port,
 	});
+
+	// Public base URL precedence: a live tunnel URL (an OpenHammer-managed
+	// ngrok/cloudflare channel) > `MCP_PUBLIC_URL` (a manual/external tunnel) >
+	// the configured localhost. The single source the OAuth AS metadata, the JWT
+	// iss/aud, and the protected-resource `resource` advertise — so a tunnel no
+	// longer drags `http://127.0.0.1:<port>` into discovery.
+	const baseUrl = handle?.url ?? config.publicUrl ?? `http://${config.host}:${config.port}`;
+
+	// OAuth (spec 20d): resolve the JWT verify config once at boot so the `/mcp`
+	// gate accepts an AS-issued HS256 JWT in addition to the opaque token. The
+	// `jwtSecret` is the single source (`OAUTH_JWT_SECRET` env or the
+	// persisted/minted one — minting on first boot, like `ensureToken`); issuer/
+	// audience derive from the public base URL the `/oauth/token` grant signs with,
+	// so a grant-issued JWT verifies here. `undefined` (no secret resolvable) →
+	// the gate stays opaque-only; the grant still surfaces its own error.
+	const { issuer, audience } = oauthIssuerAudience(baseUrl);
+	const jwtSecret = resolveJwtSecret();
+	const oauth = jwtSecret !== undefined ? { jwtSecret, issuer, audience } : undefined;
+	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth, baseUrl);
+	await fastify.listen({ port: config.port, host: config.host });
+
 	if (notice !== null) {
 		fastify.log.warn(notice);
 	}

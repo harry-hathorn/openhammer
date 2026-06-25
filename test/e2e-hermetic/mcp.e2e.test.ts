@@ -40,6 +40,7 @@ async function withServer<T>(
 		host: "127.0.0.1",
 		rootDir,
 		authToken: undefined,
+		publicUrl: undefined,
 		maxResponseBytes: options.maxResponseBytes ?? 512_000,
 		// Silent keeps `npm test` output clean — the SDK transport + per-request
 		// server are otherwise chatty on every request.

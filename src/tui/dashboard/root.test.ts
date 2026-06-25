@@ -65,7 +65,7 @@ function rooted(log: string[]): DashboardRoot {
 		{},
 		{ version: 1, channels: [ch({ id: "ch1", label: "tun" })], defaultChannel: null, mcp: { allowedClients: [] } },
 	);
-	store.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "now" }]);
+	store.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "now", grantTypes: ["client_credentials"] }]);
 	return new DashboardRoot({ store, style: createStyle(false), actions: fakeActions(log) });
 }
 

@@ -538,11 +538,16 @@ Commands:
     set <section>.<key> <value>
                            Set one setting non-interactively (e.g.
                            mcp.allowedClients claude-code)
-  auth <subcommand>      Manage OAuth clients (client-credentials AS)
+  auth <subcommand>      Manage OAuth clients (client-credentials + auth-code AS)
     add-client             Issue a client (interactive) — secret shown once
     add-client --label <name> [--print-secret]
                            Issue a client non-interactively (--print-secret
                            prints the plaintext secret to stdout for capture)
+      add --type authorization_code --redirect-uris <urls>
+      [--username <u> --password <p>]   make it an auth-code (login) client
+    set-login              Set the global /authorize operator login (interactive)
+    set-login --username <u> --password <p>
+                           Set the operator login non-interactively
     list                   List registered clients
     remove <client_id>     Remove a client by id
   doctor                 Run diagnostics checks

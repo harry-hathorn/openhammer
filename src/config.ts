@@ -10,6 +10,7 @@ export interface Config {
 	host: string; // HOST, default "127.0.0.1"
 	rootDir: string; // MCP_ROOT_DIR resolved absolute; default process.cwd()
 	authToken: string | undefined; // MCP_AUTH_TOKEN override; undefined → mint on boot
+	publicUrl: string | undefined; // MCP_PUBLIC_URL override; undefined → tunnel/host:port at boot
 	maxResponseBytes: number; // MCP_MAX_RESPONSE_BYTES, default 512_000
 	logLevel: string; // LOG_LEVEL, default "info"
 }
@@ -67,6 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		host: env.HOST || DEFAULT_HOST,
 		rootDir: resolve(env.MCP_ROOT_DIR || process.cwd()),
 		authToken: env.MCP_AUTH_TOKEN || undefined,
+		publicUrl: env.MCP_PUBLIC_URL || undefined,
 		maxResponseBytes: coerceNumber(env.MCP_MAX_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES),
 		logLevel: env.LOG_LEVEL || DEFAULT_LOG_LEVEL,
 	};

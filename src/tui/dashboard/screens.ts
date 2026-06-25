@@ -23,7 +23,7 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Style } from "../style.ts";
 import type { DashboardStore } from "./store.ts";
-import { type ClientRow, channelDetailRows, channelRows, clientRows, type FieldRow } from "./view.ts";
+import { type ClientRow, channelDetailRows, channelRows, clientRows, type FieldRow, grantTypeLabel } from "./view.ts";
 
 /** One selectable list row: a `label` plus an optional right-column `description`. */
 export interface ListItem {
@@ -144,9 +144,9 @@ export function channelDetailSpec(
 export function clientItems(store: DashboardStore): ListItem[] {
 	const rows: ListItem[] = clientRows(store.oauthClients).map((c: ClientRow) => ({
 		label: c.label,
-		description: `${c.clientId} · ${c.createdAt}`,
+		description: `${c.clientId} · ${c.grantType} · ${c.createdAt}`,
 	}));
-	rows.push({ label: "＋  Issue new client…", description: "reveals the secret once" });
+	rows.push({ label: "＋  Issue new client…", description: "label · type · login (optional)" });
 	return rows;
 }
 
@@ -161,14 +161,20 @@ export function clientDetailSpec(
 	style: Style,
 ): { header: string[]; items: ListItem[] } {
 	const client = store.oauthClients.find((c) => c.clientId === clientId);
-	const fieldRows: FieldRow[] = client
-		? [
-				{ label: "client_id", value: client.clientId },
-				{ label: "label", value: client.label },
-				{ label: "created", value: client.createdAt },
-				{ label: "client_secret", value: "(shown once at issue — only the hash is kept)" },
-			]
-		: [];
+	const fieldRows: FieldRow[] = [];
+	if (client) {
+		fieldRows.push(
+			{ label: "client_id", value: client.clientId },
+			{ label: "label", value: client.label },
+			{ label: "type", value: grantTypeLabel(client.grantTypes) },
+			{ label: "created", value: client.createdAt },
+			{ label: "client_secret", value: "(shown once at issue — only the hash is kept)" },
+		);
+		if (client.username !== undefined) fieldRows.push({ label: "username", value: client.username });
+		if (client.redirectUris !== undefined && client.redirectUris.length > 0) {
+			fieldRows.push({ label: "redirect_uris", value: client.redirectUris.join(", ") });
+		}
+	}
 	const items: ListItem[] = [];
 	if (client) items.push({ label: "Remove", description: "delete this client" });
 	items.push({ label: "Back", description: "to clients" });

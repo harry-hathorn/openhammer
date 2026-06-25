@@ -40,7 +40,7 @@ describe("screens — menuItems", () => {
 	it("summaries reflect live store state", () => {
 		const s = storeWith([ch({ id: "a" }), ch({ id: "b" })]);
 		s.setStatus({ up: true, localUrl: null, publicUrl: null, token: null });
-		s.setOauthClients([{ clientId: "oh_1", label: "x", createdAt: "now" }]);
+		s.setOauthClients([{ clientId: "oh_1", label: "x", createdAt: "now", grantTypes: ["client_credentials"] }]);
 		const byLabel = Object.fromEntries(menuItems(s).map((i) => [i.label, i.description]));
 		expect(byLabel.Status).toBe("server up");
 		expect(byLabel.Channels).toBe("2 configured");
@@ -77,7 +77,7 @@ describe("screens — channelItems / channelDetailSpec", () => {
 describe("screens — clientItems / clientDetailSpec", () => {
 	it("clientItems lists clients then the issue row", () => {
 		const s = new DashboardStore();
-		s.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "t" }]);
+		s.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "t", grantTypes: ["client_credentials"] }]);
 		const items = clientItems(s);
 		expect(items[0]?.label).toBe("ci");
 		expect(items.at(-1)?.label).toMatch(/Issue new client/);
@@ -86,7 +86,7 @@ describe("screens — clientItems / clientDetailSpec", () => {
 	it("clientDetailSpec: Remove + Back; secret noted as once-only", () => {
 		const style = createStyle(false);
 		const s = new DashboardStore();
-		s.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "t" }]);
+		s.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "t", grantTypes: ["client_credentials"] }]);
 		const spec = clientDetailSpec(s, "oh_1", style);
 		expect(spec.items.map((i) => i.label)).toEqual(["Remove", "Back"]);
 		expect(spec.header.some((l) => l.includes("oh_1"))).toBe(true);
