@@ -26,12 +26,12 @@ import {
 	Input,
 	type SelectItem,
 	SelectList,
-	type SelectListTheme,
 	type Terminal,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { type BannerStream, printBanner } from "./banner.ts";
 import { runPrompt } from "./prompt-loop.ts";
+import { style } from "./style.ts";
 
 /** A selectable choice; the `SelectList` renders `label` (or `value`) and returns `value`. */
 export interface SelectOption {
@@ -77,21 +77,13 @@ export interface PromptIo {
 }
 
 /**
- * A minimal identity {@link SelectListTheme}. v1 ships no color/theme layer (no
- * chalk, no theme-manager — that's pi's interactive-mode concern), and pi-tui's
- * `SelectList` hardcodes its own selection marker (`→ ` highlighted vs `  `
- * otherwise) inside `render`, so the highlighted row is conveyed **without** any
- * theme color. Every fn is identity — the plain rendering 21a's passthrough test
- * theme anticipated. (Adding color later means supplying real fns here, not
- * touching the prompt logic.)
+ * The colored `SelectListTheme` for the wizard pickers — {@link style} (the raw-SGR
+ * color layer, no `chalk` dep). The selected row renders accent+bold; descriptions
+ * are muted; scroll info is dim. Identity fns when color is disabled (`NO_COLOR` /
+ * non-TTY), so the prompts render plain in CI/logs. (Was an identity theme before
+ * the spec-19 color polish landed; the prompt *logic* is unchanged — only the
+ * theme fns colorize.)
  */
-const selectListTheme: SelectListTheme = {
-	selectedPrefix: (text) => text,
-	selectedText: (text) => text,
-	description: (text) => text,
-	scrollInfo: (text) => text,
-	noMatch: (text) => text,
-};
 
 /**
  * A masked `Input` — spec 21b's "Input (masked for secret)". pi-tui's `Input`
@@ -145,18 +137,13 @@ export interface DefaultIoDeps {
  * (real terminal); tests pass `{ terminal: fake }`.
  */
 export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
-	const run = <T>(mount: (resolve: (value: T | null) => void) => Component): Promise<T | null> =>
-		runPrompt(mount, deps.terminal !== undefined ? { terminal: deps.terminal } : {});
+	// `message` is rendered as a header line ON THE ALT SCREEN (inside the modal), not
+	// written to stdout — so the prompt's question is visible inside the alt-screen
+	// prompt (writing it to stdout before `runPrompt` would hide it on the underlying
+	// screen, which is why a bare `Input` previously looked blank).
+	const run = <T>(mount: (resolve: (value: T | null) => void) => Component, message?: string): Promise<T | null> =>
+		runPrompt(mount, { header: message, ...(deps.terminal !== undefined ? { terminal: deps.terminal } : {}) });
 	const out: BannerStream = deps.stdout ?? process.stdout;
-
-	// pi-tui components render only themselves (a `SelectList` shows its items; an
-	// `Input` shows `> value`), so the prompt's `message`/label is written as a
-	// header line first. `TUI.start()` does not clear the screen — it renders in
-	// place — so the label persists above the component (the banner-before-TUI
-	// pattern), restoring the context clack's own message line provided.
-	const label = (message: string): void => {
-		out.write(`${message}\n`);
-	};
 
 	return {
 		async select(o) {
@@ -166,19 +153,17 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 				description: x.hint,
 			}));
 			const initialIndex = o.initialValue !== undefined ? items.findIndex((x) => x.value === o.initialValue) : -1;
-			label(o.message);
 			return run<string>((resolve) => {
-				const list = new SelectList(items, 10, selectListTheme);
+				const list = new SelectList(items, 10, style.selectListTheme);
 				if (initialIndex > 0) {
 					list.setSelectedIndex(initialIndex);
 				}
 				list.onSelect = (item) => resolve(item.value);
 				list.onCancel = () => resolve(null);
 				return list;
-			});
+			}, o.message);
 		},
 		async text(o) {
-			label(o.message);
 			return run<string>((resolve) => {
 				const input = new Input();
 				const seed = o.initialValue ?? o.defaultValue;
@@ -188,37 +173,36 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 				input.onSubmit = (value) => resolve(value);
 				input.onEscape = () => resolve(null);
 				return input;
-			});
+			}, o.message);
 		},
 		async password(o) {
-			label(o.message);
 			return run<string>((resolve) => {
 				const input = new MaskedInput();
 				input.onSubmit = (value) => resolve(value);
 				input.onEscape = () => resolve(null);
 				return input;
-			});
+			}, o.message);
 		},
 		async confirm(o) {
-			label(o.message);
 			const items: SelectItem[] = [
 				{ value: "yes", label: "Yes" },
 				{ value: "no", label: "No" },
 			];
 			const choice = await run<string>((resolve) => {
-				const list = new SelectList(items, items.length, selectListTheme);
+				const list = new SelectList(items, items.length, style.selectListTheme);
 				if (o.initialValue === false) {
 					list.setSelectedIndex(1); // default cursor to "No"
 				}
 				list.onSelect = (item) => resolve(item.value);
 				list.onCancel = () => resolve(null);
 				return list;
-			});
+			}, o.message);
 			return choice === null ? null : choice === "yes";
 		},
 		intro(title) {
-			// No clack `intro`/`outro` (spec 21) — the banner is the session header;
-			// `intro` just writes the title as a plain header line above the prompts.
+			// The banner is the session header; `intro` writes the title as a plain line
+			// above the prompts (used by the standalone CLI wizards; the dashboard passes
+			// a silent stream so it stays quiet).
 			if (title) {
 				out.write(`\n${title}\n`);
 			}

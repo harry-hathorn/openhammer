@@ -63,8 +63,14 @@ export interface DashboardSocketDeps {
 	path?: string;
 	/** Factory for the connection (tests inject a fake). Defaults to {@link connectStatusSocket}. */
 	connect?: (path: string) => SocketConnection;
-	/** Best-effort logger for a connect/stream error. Defaults to `console.warn`. */
+	/** Best-effort logger for a connect/stream error + each retry. Defaults to `console.warn`. */
 	warn?: (message: string) => void;
+	/** Delay between connect/reconnect attempts (the server creates the socket after starting
+	 * the tunnel — a startup race this retries past). Default 500ms. */
+	retryIntervalMs?: number;
+	/** Max connect/reconnect attempts before giving up (the feed then goes quiet). Default
+	 *  `Infinity` (retry for the dashboard's lifetime). `0` disables retry (single attempt). */
+	maxAttempts?: number;
 }
 
 /**
@@ -103,6 +109,11 @@ export function createSocketSubscriber(
 	const path = deps.path ?? statusSocketPath();
 	const connect = deps.connect ?? connectStatusSocket;
 	const warn = deps.warn ?? ((message: string) => console.warn(message));
+	/** Reconnect backoff. Default 500ms; the dashboard retries until the server creates the
+	 *  socket (the server boots ngrok before creating it — a startup race), so the live feed
+	 *  + channel-state (the tunnel URL) eventually arrive. `maxAttempts: 0` disables retry. */
+	const retryIntervalMs = deps.retryIntervalMs ?? 500;
+	const maxAttempts = deps.maxAttempts ?? Number.POSITIVE_INFINITY;
 
 	return (
 		onEvent: (event: RequestEvent) => void,
@@ -111,26 +122,23 @@ export function createSocketSubscriber(
 		let destroyed = false;
 		let buf = "";
 		let conn: SocketConnection | undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let attempts = 0;
 
-		/** Idempotent teardown: destroy the connection once, then ignore further events. */
+		/** Idempotent teardown: stop the retry timer + destroy the connection once. */
 		const teardown = (): void => {
 			if (destroyed) return;
 			destroyed = true;
+			if (timer) {
+				clearTimeout(timer);
+				timer = undefined;
+			}
 			conn?.destroy();
 			conn = undefined;
 		};
 
-		try {
-			conn = connect(path);
-		} catch (e) {
-			// Never connected — there is nothing to tear down. The dashboard shows its
-			// empty panels; 19e (server lifecycle) surfaces a real "server down" status.
-			warn(`dashboard status-socket client: cannot connect (${messageOf(e)}).`);
-			return () => {};
-		}
-
-		conn.onData((chunk) => {
-			if (destroyed) return;
+		/** Parse one NDJSON chunk into events + channel-state lines. */
+		const handleData = (chunk: Buffer): void => {
 			buf += chunk.toString("utf8");
 			// NDJSON: a chunk may split a line or carry many. Parse each complete line:
 			// a RequestEvent → onEvent; a channel-state line → onChannelState (19c-channel).
@@ -148,17 +156,63 @@ export function createSocketSubscriber(
 				if (state !== null && onChannelState !== undefined) onChannelState(state);
 				// blank/malformed lines are skipped — the feed never aborts
 			}
-		});
-		conn.onError((err) => {
-			warn(`dashboard status-socket client: ${messageOf(err)}.`);
-			teardown();
-		});
-		conn.onClose(() => {
-			// The server stopped (a clean end of stream). v1 does not auto-reconnect — the
-			// status panel (19e) shows "down" and the feed simply goes quiet.
-			teardown();
-		});
+		};
 
+		/**
+		 * A failed attempt: retry silently while the budget lasts, warn ONCE on give-up.
+		 * The retry is **silent** because every `warn` (`console.warn` → stderr) lands
+		 * between the dashboard's differential renders and shifts the cursor, corrupting
+		 * the screen (stacked frames). With the default `Infinity` budget the dashboard
+		 * never gives up, so it never warns — it just keeps retrying until the socket
+		 * appears (the server-creates-the-socket startup race).
+		 */
+		const failOrRetry = (reason: string): void => {
+			if (destroyed) return;
+			attempts += 1;
+			if (attempts > maxAttempts) {
+				warn(`dashboard status-socket client: ${reason}.`);
+				return; // budget exhausted — the feed goes quiet
+			}
+			timer = setTimeout(openConnection, retryIntervalMs);
+		};
+
+		/** Open (or reopen) the connection; on success wire it, on failure retry silently. */
+		const openConnection = (): void => {
+			timer = undefined;
+			if (destroyed) return;
+			let next: SocketConnection;
+			try {
+				next = connect(path);
+			} catch (e) {
+				// Never connected this attempt — retry (the socket may not exist yet: the
+				// server creates it after starting the tunnel). `maxAttempts: 0` gives up.
+				failOrRetry(`cannot connect (${messageOf(e)})`);
+				return;
+			}
+			attempts = 0; // connected — reset the retry budget for a future drop
+			buf = ""; // fresh stream
+			conn = next;
+			// A per-connection `live` flag: once this connection closes/errors, its late
+			// data callbacks are ignored (the reconnect uses a new connection + new flag).
+			let live = true;
+			const retire = (reason: string): void => {
+				if (!live) return;
+				live = false;
+				if (conn === next) {
+					next.destroy();
+					conn = undefined;
+				}
+				failOrRetry(reason);
+			};
+			next.onData((chunk) => {
+				if (destroyed || !live) return;
+				handleData(chunk);
+			});
+			next.onError((err) => retire(messageOf(err)));
+			next.onClose(() => retire("server closed the status socket"));
+		};
+
+		openConnection();
 		return teardown;
 	};
 }

@@ -1,14 +1,11 @@
-import type { Terminal } from "@earendil-works/pi-tui";
+import type { Component, Terminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { createDashboardRenderer, type FrameProducer } from "./render.ts";
+import { createDashboardRenderer } from "./render.ts";
 
 /**
- * A fake pi-tui `Terminal` — records writes + stores the input/resize callbacks
- * so the test drives the render loop without a real TTY (the `17b`/`17s`
- * fake-IO precedent). Implements the full `Terminal` interface honestly (no `as`
- * cast): the cursor/clear/title/progress ops are inert; what matters is `start`
- * (raw-mode entry), `write` (the rendered output), and the `send`/`resize`
- * drivers that simulate keys + resizing.
+ * A fake pi-tui `Terminal` — records writes + stores the input/resize callbacks so
+ * the test drives the render loop without a real TTY (the `17b`/`19a` fake-IO
+ * precedent). Implements the full `Terminal` interface honestly (no `as` cast).
  */
 class FakeTerminal implements Terminal {
 	columns = 80;
@@ -26,27 +23,18 @@ class FakeTerminal implements Terminal {
 		this.started = true;
 		this.stopped = false;
 	}
-
 	stop(): void {
-		// Mirror ProcessTerminal.stop(): detach the input + resize handlers so no keys
-		// arrive while suspended (the stdin "data" listener is removed in real stop()).
-		// start() re-attaches them, so keys work again after resume.
 		this.inputHandler = undefined;
 		this.resizeHandler = undefined;
 		this.stopped = true;
 		this.started = false;
 	}
-
 	drainInput(): Promise<void> {
 		return Promise.resolve();
 	}
-
 	write(data: string): void {
 		this.writes.push(data);
 	}
-
-	// Inert cursor/clear/title/progress ops — fewer params than the interface
-	// declares is fine (a DashboardRenderer only reads writes + drives start/send/resize).
 	moveBy(): void {}
 	hideCursor(): void {}
 	showCursor(): void {}
@@ -60,26 +48,35 @@ class FakeTerminal implements Terminal {
 	send(data: string): void {
 		this.inputHandler?.(data);
 	}
-
-	/** Simulate a terminal resize (and report the new size to the TUI). */
+	/** Simulate a terminal resize. */
 	resize(columns: number, rows: number): void {
 		this.columns = columns;
 		this.rows = rows;
 		this.resizeHandler?.();
 	}
-
-	/** All bytes written so far, joined (handy for substring asserts on rendered frames). */
+	/** All bytes written so far, joined. */
 	output(): string {
 		return this.writes.join("");
 	}
 }
 
-/**
- * Flush pi-tui's async render scheduling. A render is `process.nextTick` →
- * `scheduleRender` → `setTimeout(delay)`, and pi-tui coalesces to ≥16ms
- * (`MIN_RENDER_INTERVAL_MS`) — so wait past that throttle, then a few macrotask
- * turns, before asserting a frame has landed.
- */
+/** A stub root that records renders + inputs (the renderer mounts/forwards to it). */
+class StubRoot implements Component {
+	renders = 0;
+	lastWidth = 0;
+	readonly inputs: string[] = [];
+	handleInput(data: string): void {
+		this.inputs.push(data);
+	}
+	render(width: number): string[] {
+		this.renders += 1;
+		this.lastWidth = width;
+		return [`render#${this.renders}`];
+	}
+	invalidate(): void {}
+}
+
+/** Flush pi-tui's coalesced async render scheduling (≥16ms throttle + a few macrotasks). */
 async function flush(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 25));
 	for (let i = 0; i < 3; i++) {
@@ -88,237 +85,142 @@ async function flush(): Promise<void> {
 }
 
 describe("dashboard renderer — lifecycle", () => {
-	it("start() enters raw mode (terminal.start) and stop() restores it (terminal.stop)", () => {
+	it("start() enters raw mode; stop() restores it; stop() is idempotent", () => {
 		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => ["frame"]);
+		const r = createDashboardRenderer({ root: new StubRoot(), terminal: term, refreshIntervalMs: 0 });
+		r.start();
 		expect(term.started).toBe(true);
-		expect(term.stopped).toBe(false);
-
-		renderer.stop();
+		r.stop();
 		expect(term.stopped).toBe(true);
+		expect(() => r.stop()).not.toThrow(); // idempotent
 	});
 
-	it("stop() is idempotent — a second stop is a no-op", () => {
+	it("renders the mounted root on start", async () => {
 		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => ["frame"]);
-		renderer.stop();
-		expect(() => renderer.stop()).not.toThrow();
-		expect(term.stopped).toBe(true);
+		const root = new StubRoot();
+		const r = createDashboardRenderer({ root, terminal: term, refreshIntervalMs: 0 });
+		r.start();
+		await flush();
+		expect(root.renders).toBeGreaterThanOrEqual(1);
+		expect(term.output()).toContain("render#1");
+		r.stop();
 	});
 
-	it("stop() without start() is safe (no throw)", () => {
+	it("runs on the alternate screen (enter on start, exit on stop) so the banner is preserved", () => {
 		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		expect(() => renderer.stop()).not.toThrow();
+		const r = createDashboardRenderer({ root: new StubRoot(), terminal: term, refreshIntervalMs: 0 });
+		r.start();
+		expect(term.output()).toContain("\x1b[?1049h"); // entered the alt screen
+		r.stop();
+		expect(term.output()).toContain("\x1b[?1049l"); // exited → main screen (banner) restored
+	});
+
+	it("resume() force-clears + redraws (safe on the alt screen; recovers from a modal)", async () => {
+		const term = new FakeTerminal();
+		const root = new StubRoot();
+		const r = createDashboardRenderer({ root, terminal: term, refreshIntervalMs: 0 });
+		r.start();
+		await flush();
+		term.writes.length = 0;
+		r.suspend();
+		r.resume();
+		await flush();
+		expect(term.output()).toContain("\x1b[2J"); // force clear
+		r.stop();
 	});
 });
 
-describe("dashboard renderer — frame production", () => {
-	it("pulls the frame on start with the terminal width + height and draws it", async () => {
+describe("dashboard renderer — keys forwarded to the root", () => {
+	it("a key reaches root.handleInput and triggers a re-render", async () => {
 		const term = new FakeTerminal();
-		term.columns = 100;
-		term.rows = 30;
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		const calls: Array<{ w: number; h: number }> = [];
-		const produce: FrameProducer = (w, h) => {
-			calls.push({ w, h });
-			return ["line one", "line two"];
-		};
-
-		renderer.start(produce);
+		const root = new StubRoot();
+		const r = createDashboardRenderer({ root, terminal: term, refreshIntervalMs: 0 });
+		r.start();
 		await flush();
-
-		expect(calls.length).toBeGreaterThanOrEqual(1);
-		expect(calls[0]).toEqual({ w: 100, h: 30 });
-		// First render is a fullRender(false): lines are written joined by \r\n.
-		expect(term.output()).toContain("line one");
-		expect(term.output()).toContain("line two");
-		renderer.stop();
-	});
-
-	it("clear() forces a full screen clear + redraw", async () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => ["frame"]);
-		await flush();
-
-		term.writes.length = 0; // ignore the initial render
-		renderer.clear();
-		await flush();
-
-		// requestRender(true) → widthChanged → fullRender(clear=true) writes the clear sequence.
-		expect(term.output()).toContain("\x1b[2J");
-		renderer.stop();
-	});
-});
-
-describe("dashboard renderer — keys", () => {
-	it("onKey delivers raw input sequences (e.g. Ctrl+C as \\x03)", async () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		const seen: string[] = [];
-		renderer.onKey((data) => seen.push(data));
-		renderer.start(() => ["frame"]);
-		await flush();
-
-		term.send("\x03"); // Ctrl+C
-		term.send("q");
-
-		expect(seen).toEqual(["\x03", "q"]);
-		renderer.stop();
-	});
-
-	it("a key triggers a re-render (the frame producer is pulled again)", async () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		let pulls = 0;
-		renderer.start(() => {
-			pulls += 1;
-			return [`pull ${pulls}`];
-		});
-		await flush();
-		const afterStart = pulls;
+		const before = root.renders;
 
 		term.send("a");
 		await flush();
 
-		expect(pulls).toBeGreaterThan(afterStart);
-		renderer.stop();
+		expect(root.inputs).toContain("a");
+		expect(root.renders).toBeGreaterThan(before);
+		r.stop();
+	});
+});
+
+describe("dashboard renderer — suspend/resume (modals)", () => {
+	it("suspend() restores the terminal; resume() re-enters raw mode + re-renders", async () => {
+		const term = new FakeTerminal();
+		const root = new StubRoot();
+		const r = createDashboardRenderer({ root, terminal: term, refreshIntervalMs: 0 });
+		r.start();
+		await flush();
+		expect(term.stopped).toBe(false);
+
+		r.suspend();
+		expect(term.stopped).toBe(true);
+		const whileSuspended = root.renders;
+
+		r.resume();
+		await flush();
+		expect(term.stopped).toBe(false);
+		expect(root.renders).toBeGreaterThan(whileSuspended); // resume re-rendered
+		r.stop();
 	});
 
-	it("keys before onKey is registered are harmless (no throw, no handler)", async () => {
+	it("keys do not reach the root while suspended (no input handler)", async () => {
 		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => ["frame"]);
+		const root = new StubRoot();
+		const r = createDashboardRenderer({ root, terminal: term, refreshIntervalMs: 0 });
+		r.start();
 		await flush();
+		r.suspend();
+		await flush();
+		term.send("x"); // suspended → not delivered
+		expect(root.inputs).toEqual([]);
+		r.resume();
+		await flush();
+		term.send("y"); // resumed → delivered
+		expect(root.inputs).toEqual(["y"]);
+		r.stop();
+	});
 
-		expect(() => term.send("x")).not.toThrow();
-		renderer.stop();
+	it("stop() after suspend() is permanent; resume() after stop() is a no-op", () => {
+		const term = new FakeTerminal();
+		const r = createDashboardRenderer({ root: new StubRoot(), terminal: term, refreshIntervalMs: 0 });
+		r.start();
+		r.suspend();
+		expect(() => r.stop()).not.toThrow();
+		expect(term.stopped).toBe(true);
+		expect(() => r.resume()).not.toThrow();
+		expect(term.stopped).toBe(true);
+	});
+});
+
+describe("dashboard renderer — clear", () => {
+	it("clear() forces a full screen clear + redraw", async () => {
+		const term = new FakeTerminal();
+		const r = createDashboardRenderer({ root: new StubRoot(), terminal: term, refreshIntervalMs: 0 });
+		r.start();
+		await flush();
+		term.writes.length = 0;
+		r.clear();
+		await flush();
+		expect(term.output()).toContain("\x1b[2J");
+		r.stop();
 	});
 });
 
 describe("dashboard renderer — resize", () => {
 	it("resize re-renders at the new width", async () => {
 		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		const widths: number[] = [];
-		renderer.start((w) => {
-			widths.push(w);
-			return [`w=${w}`];
-		});
+		const root = new StubRoot();
+		const r = createDashboardRenderer({ root, terminal: term, refreshIntervalMs: 0 });
+		r.start();
 		await flush();
-
 		term.resize(120, 40);
 		await flush();
-
-		expect(widths).toContain(120);
-		renderer.stop();
-	});
-});
-
-describe("dashboard renderer — refresh cadence", () => {
-	it("a refresh interval pulls fresh frames without a key or resize", async () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 20 });
-		let pulls = 0;
-		renderer.start(() => {
-			pulls += 1;
-			return ["frame"];
-		});
-		await flush();
-		const afterStart = pulls;
-
-		// Wait long enough for at least one refresh tick (no key, no resize).
-		await new Promise((resolve) => setTimeout(resolve, 60));
-		await flush();
-
-		expect(pulls).toBeGreaterThan(afterStart);
-		renderer.stop();
-	});
-});
-
-describe("dashboard renderer — suspend/resume (19d modals)", () => {
-	it("suspend() restores the terminal (cooked mode); resume() re-enters raw mode", async () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => ["frame"]);
-		await flush();
-		expect(term.stopped).toBe(false);
-
-		renderer.suspend(); // tui.stop() → terminal.stop()
-		expect(term.stopped).toBe(true);
-
-		renderer.resume(); // tui.start() → terminal.start()
-		expect(term.stopped).toBe(false);
-		renderer.stop();
-	});
-
-	it("suspend is a no-op before start, idempotent, and resume is a no-op when not suspended", () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		expect(() => renderer.suspend()).not.toThrow(); // before start — no-op
-
-		renderer.start(() => ["frame"]);
-		renderer.suspend();
-		expect(() => renderer.suspend()).not.toThrow(); // double suspend — no-op
-		renderer.resume();
-		expect(() => renderer.resume()).not.toThrow(); // double resume — no-op
-		renderer.stop();
-	});
-
-	it("resume restarts the render loop (a fresh frame is pulled after resume)", async () => {
-		const term = new FakeTerminal();
-		let pulls = 0;
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => {
-			pulls += 1;
-			return ["frame"];
-		});
-		await flush();
-		const beforeSuspend = pulls;
-
-		renderer.suspend();
-		await flush();
-		const whileSuspended = pulls;
-		renderer.resume();
-		await flush();
-
-		expect(whileSuspended).toBe(beforeSuspend); // nothing rendered while suspended
-		expect(pulls).toBeGreaterThan(whileSuspended); // resume re-rendered
-		renderer.stop();
-	});
-
-	it("stop() after suspend() is permanent, and resume() after stop() is a no-op", async () => {
-		const term = new FakeTerminal();
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.start(() => ["frame"]);
-		await flush();
-		renderer.suspend();
-		expect(() => renderer.stop()).not.toThrow();
-		expect(term.stopped).toBe(true);
-		expect(() => renderer.resume()).not.toThrow(); // stopped → resume no-op
-		expect(term.stopped).toBe(true);
-	});
-
-	it("keys still work after a suspend/resume cycle (the input listener survives)", async () => {
-		const term = new FakeTerminal();
-		const seen: string[] = [];
-		const renderer = createDashboardRenderer({ terminal: term, refreshIntervalMs: 0 });
-		renderer.onKey((data) => seen.push(data));
-		renderer.start(() => ["frame"]);
-		await flush();
-
-		renderer.suspend();
-		await flush();
-		term.send("x"); // suspended → terminal has no input handler → not delivered
-		expect(seen).toEqual([]);
-
-		renderer.resume();
-		await flush();
-		term.send("a"); // resumed → input handler re-attached → delivered
-		expect(seen).toEqual(["a"]);
-		renderer.stop();
+		expect(root.lastWidth).toBe(120);
+		r.stop();
 	});
 });

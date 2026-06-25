@@ -26,7 +26,7 @@ import { CONFIG_SECTIONS } from "./config/sections.ts";
 import { loadSettings, type Settings, saveSettings, settingsPath } from "./config/settings.ts";
 import { loadConfig } from "./config.ts";
 import { type BannerStream, printBanner } from "./tui/banner.ts";
-import type { ServerStatusState } from "./tui/dashboard/panels.ts";
+import type { ServerStatusState } from "./tui/dashboard/store.ts";
 import { flagIo } from "./tui/prompts.ts";
 import { addChannel, CHANNEL_SELECT_PROMPT, type ProbeRunner, registryProviders } from "./tui/wizards/channel.ts";
 import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
@@ -192,7 +192,6 @@ const defaultBoot = async (): Promise<void> => {
  */
 const defaultDashboard = async (parsed: ParsedArgs): Promise<number> => {
 	const { runDashboard } = await import("./tui/dashboard.ts");
-	const { createDashboardRenderer } = await import("./tui/dashboard/render.ts");
 	const { createSocketSubscriber } = await import("./tui/dashboard/socket-client.ts");
 	const { createChannelProbe } = await import("./tui/dashboard/channel-probe.ts");
 	const { ensureServer, serverArgs } = await import("./tui/dashboard/server-control.ts");
@@ -206,17 +205,31 @@ const defaultDashboard = async (parsed: ParsedArgs): Promise<number> => {
 	}
 	const { localUrl, token, stop } = control.value;
 	// The active channel's public URL reaches the channels panel via the status-socket
-	// feed (19c-channel); the status panel's tunnel line is the local endpoint + token
-	// for now (a live tunnel URL in the status panel is a future refinement).
+	// feed (19c-channel); the status screen's tunnel line is the local endpoint + token
+	// for now (a live tunnel URL in the status screen is a future refinement).
 	const status: ServerStatusState = { up: true, localUrl, publicUrl: null, token };
 
+	// `doctor` runs CLI-side (`src/tui/` must not import `src/cli/`); the dashboard
+	// suspends its loop around this and shows the captured report. The report is the
+	// text `doctorCommand` writes to stdout, captured into a string.
+	const doctorRunner = async (): Promise<string> => {
+		let report = "";
+		const sink = {
+			write: (chunk: string | Uint8Array): boolean => {
+				report += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+				return true;
+			},
+		};
+		await doctorCommand({ stdout: sink });
+		return report;
+	};
+
 	await runDashboard({
-		renderer: createDashboardRenderer(),
 		settings,
 		status,
 		subscribe: createSocketSubscriber(),
 		probeChannels: createChannelProbe({ channels: settings.channels }),
-		doctorModal: () => doctorCommand({ stdout: process.stdout }),
+		doctorRunner,
 		onQuit: async () => {
 			const result = await stop();
 			if (!result.ok) process.stderr.write(`${result.error.message}\n`);
