@@ -28,7 +28,7 @@
 [![TypeScript: strict](https://img.shields.io/badge/TypeScript-strict-blue.svg)](./tsconfig.json)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-purple.svg)](https://modelcontextprotocol.io)
 
-> "OpenHammer allows you to serve a file system and shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows, like OpenClaw, Hermes, PI, OpenCode, Claude Code, etc. The OGs know that the best agents aren't heavily abstracted behind sdks like Crew AI, LangChain or N8N, but are simply an LLM iterating over a filesystem with bash. You'll be able to tunnel your local environment straight to any MCP client, so no need for a million connectors to share your code with an AI chat, and turns any streaming chat loop into a harness. Or, you could launch a web server for any AI to drive. A few simple tools with the right access make this possible. This allows you to use any MCP compatible client to control a computer. Once the base tools are done, I'll be adding all the tools needed for managing agents, from memories, skills, tools, sessions, all persisting, cross compatible and portable to any MCP client." — Harry Hathorn
+> "What better way to ``bash`` than with a hammer? OpenHammer allows you to serve a file system and shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows, like OpenClaw, Hermes, PI, OpenCode, Claude Code, etc. The OGs know that the best agents aren't heavily abstracted behind sdks like Crew AI, LangChain or N8N, but are simply an LLM iterating over a filesystem with bash. You'll be able to tunnel your local environment straight to any MCP client, so no need for a million connectors to share your code with an AI chat, and turns any streaming chat loop into a harness. Or, you could launch a web server for any AI to drive. A few simple tools with the right access make this possible. This allows you to use any MCP compatible client to control a computer. Once the base tools are done, I'll be adding all the tools needed for managing agents, from memories, skills, tools, sessions, all persisting, cross compatible and portable to any MCP client." — Harry Hathorn
 
 A **standalone MCP server with no LLM** that mints a per-instance bearer token and exposes 7 local
 shell & filesystem tools — `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` — to a remote agent
@@ -95,19 +95,40 @@ with the inspector: `npx @modelcontextprotocol/inspector` → POST `…/mcp` wit
 ## The `openhammer` CLI
 
 ```text
-openhammer                       Start the server (same as `openhammer start` / `npm start`)
-openhammer start [--channel ID]  Start, optionally resolving a persisted channel
-openhammer channel add           TUI wizard — configure an ingress channel (ngrok/cloudflare/static)
+openhammer                       The TUI control center (live dashboard) — in a terminal
+openhammer start [--channel ID]  Start the server headless (or resolve a persisted channel)
+openhammer channel add           Add an ingress channel (ngrok/cloudflare/static) — wizard or flags
 openhammer channel list          List configured channels
 openhammer channel use <id>      Set the default channel
 openhammer channel remove <id>   Remove a channel (and its stored credentials)
 openhammer config get            Show persisted settings
-openhammer config set [section]  Edit a settings section via the wizard (default: mcp)
+openhammer config set [section]  Edit a settings section (default: mcp) — wizard or flags
+openhammer auth add-client       Issue an OAuth client (id + secret shown once)
+openhammer auth list             List OAuth clients
+openhammer auth remove <id>      Remove an OAuth client
 openhammer doctor                Run health checks (config, channels, credentials, rg/fd)
 openhammer monitor               Stream live client + tool-call activity (Ctrl-C to stop)
 ```
 
 Interactive commands print the OpenHammer banner first.
+
+## TUI control center (dashboard)
+
+Run `openhammer` with no arguments (in a terminal) and you get a **navigable control center** — a
+full-screen, colored menu (built on pi-tui, like pi's own UI) instead of juggling commands. Move
+with `↑`/`↓`, open a section with `Enter`, go back with `Esc`/`←`, quit with `q`/`Ctrl-C`:
+
+- **Status** — server up/down, local + tunnel URL, bearer token
+- **Channels** — configured channels + their live state/URLs; drill into one to **use**/**remove** it, or **add** a channel via the wizard
+- **Clients & JWT** — registered OAuth clients (client id); **issue** a new one to get a `client_id` + `client_secret` (shown once — only the SHA-256 hash is kept)
+- **Monitor** — the live streaming feed of tool calls (who, which tool, duration, size)
+- **Settings** — allowed-client list + default channel; **edit** via the wizard
+- **Doctor** — run the diagnostics checks
+
+It's a **view over the running server** (subscribes to its status socket) and manages the server's
+lifecycle, so `openhammer` is the single entry that runs the server + the dashboard; quitting stops
+both (no orphan). For headless/container deploys, use `openhammer start`. (The same flows are
+available one-shot: `openhammer channel …`, `auth …`, `config …`, `doctor`, `monitor`.)
 
 ## Channels (how OpenHammer is reached)
 
@@ -149,7 +170,7 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
 
 - **Env (simplest):** `HOST=0.0.0.0 MCP_ROOT_DIR=/srv/web MCP_AUTH_TOKEN=… LOG_LEVEL=info node dist/main.js`. Env overrides the dotfile, so a server can run with **zero** `~/.openhammer` state. Point `MCP_ROOT_DIR` at the filesystem you want to serve to the agent.
 - **Provision the dotfile** for what env can't express (a persisted channel + its secret, an OAuth client pair): write `~/.openhammer/config.json` + `credentials.json` (`0600`) directly — bake into the image, mount a volume, or cloud-init; `node dist/main.js` reads them at boot. (Precedence: CLI flags > env > dotfile.)
-- **Non-interactive CLI** (scripted / CI — *planned, `20g`*): `openhammer channel add --provider ngrok --authtoken "$T"`, `openhammer config set mcp.allowedClients claude-code`, `openhammer auth add-client --label ci` — flag-driven, no wizard, validated. Until then, script those via env (`NGROK_AUTHTOKEN`, `MCP_ALLOWED_CLIENTS`) or by writing the dotfile JSON.
+- **Non-interactive CLI** (scripted / CI): `openhammer channel add --provider ngrok --authtoken "$T"`, `openhammer config set mcp.allowedClients claude-code`, `openhammer auth add-client --label ci` — flag-driven, no wizard, validated. (Or script via env — `NGROK_AUTHTOKEN`, `MCP_ALLOWED_CLIENTS` — or by writing the dotfile JSON.)
 
 ## Architecture
 

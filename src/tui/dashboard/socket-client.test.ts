@@ -78,9 +78,10 @@ function fakeConnection() {
 	};
 }
 
-/** A factory bound to a fake connection, returning the subscribe seam. */
+/** A factory bound to a fake connection, returning the subscribe seam. `maxAttempts: 0`
+ *  keeps the single-attempt semantics the parse/teardown tests assert (no retry timers). */
 function subscriberOver(conn: SocketConnection) {
-	return createSocketSubscriber({ connect: () => conn, warn: () => {} });
+	return createSocketSubscriber({ connect: () => conn, warn: () => {}, maxAttempts: 0 });
 }
 
 describe("createSocketSubscriber — NDJSON parsing", () => {
@@ -227,15 +228,19 @@ describe("createSocketSubscriber — teardown", () => {
 		unsub();
 	});
 
-	it("onError warns + tears down, never throws into onEvent", () => {
+	it("onError warns + retires the connection, never throws into onEvent", () => {
 		const warnings: string[] = [];
 		const fake = fakeConnection();
-		const subscribe = createSocketSubscriber({ connect: () => fake.conn, warn: (m) => warnings.push(m) });
+		const subscribe = createSocketSubscriber({
+			connect: () => fake.conn,
+			warn: (m) => warnings.push(m),
+			maxAttempts: 0,
+		});
 		const received: RequestEvent[] = [];
 		const unsub = subscribe((e) => received.push(e));
 
 		fake.emitError(new Error("ECONNRESET"));
-		fake.push(ndjson(event({ client: "a" }))); // ignored after the error teardown
+		fake.push(ndjson(event({ client: "a" }))); // ignored after the connection is retired
 		expect(received).toHaveLength(0);
 		expect(warnings[0]).toContain("ECONNRESET");
 		expect(fake.destroyed()).toBe(true);
@@ -251,6 +256,7 @@ describe("createSocketSubscriber — connection failures", () => {
 				throw new Error("ENOENT");
 			},
 			warn: (m) => warnings.push(m),
+			maxAttempts: 0,
 		});
 		const received: RequestEvent[] = [];
 		const unsub = subscribe((e) => received.push(e));
@@ -270,9 +276,79 @@ describe("createSocketSubscriber — connection failures", () => {
 				return fakeConnection().conn;
 			},
 			warn: () => {},
+			maxAttempts: 0,
 		});
 		subscribe(() => {})();
 		expect(seen).toBe("/tmp/oh-test.sock");
+	});
+});
+
+describe("createSocketSubscriber — retry/reconnect (the server-creates-the-socket race)", () => {
+	/** Await the macrotask queue so `retryIntervalMs: 0` retry timers fire. */
+	async function flush(): Promise<void> {
+		for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+	}
+
+	it("retries connect on ENOENT, then delivers once the socket appears", async () => {
+		const working = fakeConnection();
+		let calls = 0;
+		const subscribe = createSocketSubscriber({
+			connect: () => {
+				calls += 1;
+				if (calls < 3) throw new Error("ENOENT"); // first two attempts: socket not created yet
+				return working.conn; // third attempt: the server created it
+			},
+			warn: () => {},
+			retryIntervalMs: 0,
+			maxAttempts: 10,
+		});
+		const received: RequestEvent[] = [];
+		const unsub = subscribe((e) => received.push(e));
+
+		await flush();
+		expect(calls).toBe(3); // retried until it connected
+		working.push(ndjson(event({ client: "late" })));
+		expect(received.map((e) => e.client)).toEqual(["late"]);
+		unsub();
+	});
+
+	it("reconnects after the server closes the socket", async () => {
+		const first = fakeConnection();
+		const second = fakeConnection();
+		let calls = 0;
+		const subscribe = createSocketSubscriber({
+			connect: () => (calls++ === 0 ? first.conn : second.conn),
+			warn: () => {},
+			retryIntervalMs: 0,
+			maxAttempts: 5,
+		});
+		const received: RequestEvent[] = [];
+		const unsub = subscribe((e) => received.push(e));
+
+		first.push(ndjson(event({ client: "a" })));
+		first.emitClose(); // server dropped the connection
+		await flush();
+		expect(calls).toBe(2); // reconnected
+		second.push(ndjson(event({ client: "b" })));
+		expect(received.map((e) => e.client)).toEqual(["a", "b"]);
+		unsub();
+	});
+
+	it("gives up after maxAttempts (the feed goes quiet, no leaky timer)", async () => {
+		let calls = 0;
+		const subscribe = createSocketSubscriber({
+			connect: () => {
+				calls += 1;
+				throw new Error("ENOENT");
+			},
+			warn: () => {},
+			retryIntervalMs: 0,
+			maxAttempts: 3,
+		});
+		const unsub = subscribe(() => {});
+		await flush();
+		expect(calls).toBe(4); // 1 initial + 3 retries
+		unsub();
 	});
 });
 
