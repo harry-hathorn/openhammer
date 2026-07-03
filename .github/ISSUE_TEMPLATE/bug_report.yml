@@ -1,0 +1,44 @@
+name: Bug report
+description: Report something that is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! If this is a security issue,
+        please [report it privately](https://github.com/harry-hathorn/openhammer/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description, with steps to reproduce. Include expected vs. actual behavior.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenHammer version / commit
+      placeholder: "e.g. v0.0.83 or commit hash"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      placeholder: "e.g. 20.11.0"
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Paste any error output. Redact secrets first.
+      render: shell
