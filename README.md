@@ -43,7 +43,7 @@
 **OpenHammer is a server that turns any computer into a secure, MCP-controlled surface.** Run it on
 your laptop for a local agent, or **deploy it on a server — or a fleet — to give any authenticated
 MCP client controlled access to that machine's filesystem and shell** over a single HTTP endpoint.
-Point Claude Desktop, Claude Code, Cursor, the MCP Inspector, or your own client at `/mcp` with a
+Point Claude Desktop, Claude Code, Cursor, OpenCode, the MCP Inspector, or your own client (anything built on `@modelcontextprotocol/client`) at `/mcp` with a
 token, and that box becomes a bounded agent workspace. No per-app connectors, no SDK lock-in: one
 server per machine, any client, filesystem + shell as the surface — local-first, and at scale a
 fleet of safe compute surfaces for AI.
@@ -163,7 +163,7 @@ openhammer auth add-client                 # → pick "Authorization code (login
 > **Behind a tunnel, set `MCP_PUBLIC_URL`.** OAuth discovery advertises the issuer/endpoints from the
 > server's base URL. With a manual ngrok/cloudflare URL in front, export
 > `MCP_PUBLIC_URL=https://<your-tunnel>.app` so the metadata points at the public https URL (an
-> OpenHammer-managed ngrok/cloudflare channel auto-derives this). Then connect Claude web/Code to
+> OpenHammer-managed ngrok/cloudflare channel auto-derives this). Then connect Claude web and Claude Code to
 > `https://<your-tunnel>.app/mcp` — it discovers the AS, you log in once, and it reaches `/mcp`.
 
 > **Running the CLI:** installed from npm, the **`openhammer`** command is on your `PATH` (`npx openhammer`
