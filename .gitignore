@@ -7,3 +7,9 @@ coverage/
 
 # Claude Code local config (contains personal API tokens / model overrides)
 .claude/
+
+# Internal planning / agent working files — kept local, never published
+/specs/
+/PROMPT_*.md
+/IMPLEMENTATION_PLAN.md
+/loop.sh
