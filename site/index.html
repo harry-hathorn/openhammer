@@ -203,10 +203,8 @@ h1 .lit{color:var(--ithil);text-shadow:var(--glow-lg)}
 .hammer-art{
   position:relative;z-index:0;
   color:var(--ithil);
-  text-shadow:0 0 6px rgba(79,168,232,.15);
-  animation:
-    lightEase 3.6s cubic-bezier(.16,.84,.44,1) .4s forwards,
-    hammerBreathe 9s ease-in-out 4.2s infinite;
+  text-shadow:0 0 18px rgba(168,220,255,.5),0 0 55px rgba(79,168,232,.28);
+  animation:hammerBreathe 9s ease-in-out infinite;
 }
 /* the glyphs stay solid; only the light around them rises */
 @keyframes lightEase{
@@ -227,10 +225,8 @@ h1 .lit{color:var(--ithil);text-shadow:var(--glow-lg)}
     rgba(79,168,232,.09) 42%,
     rgba(79,168,232,.03) 62%,
     transparent 75%);
-  opacity:0;transform:scale(.82);
-  animation:
-    haloEase 3.6s cubic-bezier(.16,.84,.44,1) .4s forwards,
-    haloBreathe 9s ease-in-out 4.2s infinite;
+  opacity:1;transform:scale(1);
+  animation:haloBreathe 9s ease-in-out infinite;
 }
 @keyframes haloEase{
   from{opacity:0;transform:scale(.82)}
@@ -708,11 +704,16 @@ function addArt(text,cls){
   term.appendChild(cursor);
 }
 
-var SEQ=[
+/* The hammer is constant: the prompt + hammer render immediately on load so
+   the hammer rows are always present. Everything below animates in. */
+var IMMEDIATE=[
   function(){addLine('<span class="prompt">$</span> <span class="cmd">openhammer</span>');},
   function(){addLine('');},
   function(){addArt(HAMMER_ART,'hammer-art');},
-  function(){addLine('');},
+  function(){addLine('');}
+];
+
+var SEQ=[
   function(){addArt(BANNER_ART,'banner-art');},
   function(){addLine('');},
   function(){addLine('<span class="k">OpenHammer</span>');},
@@ -724,17 +725,21 @@ var SEQ=[
   function(){addLine('<span class="hint">↑↓/jk move · enter/l open · esc/h back · q quit</span>');}
  ]);
 
-var DELAYS=[700,150,2200,200,900,220,320,140,140, 160,140,140,140,140,140,140, 200,260];
+var DELAYS=[900,220,320,140,140, 160,140,140,140,140,140,140, 200,260];
 
 if(reduce){
+  IMMEDIATE.forEach(function(fn){fn()});
   SEQ.forEach(function(fn){fn()});
 }else{
+  IMMEDIATE.forEach(function(fn){fn()});
   var i=0;
-  (function step(){
-    SEQ[i]();
-    i++;
-    if(i<SEQ.length)setTimeout(step,DELAYS[i-1]||140);
-  })();
+  setTimeout(function(){
+    (function step(){
+      SEQ[i]();
+      i++;
+      if(i<SEQ.length)setTimeout(step,DELAYS[i-1]||140);
+    })();
+  },500);
 }
 </script>
 </body>

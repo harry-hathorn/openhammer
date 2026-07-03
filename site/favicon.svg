@@ -11,7 +11,7 @@
   </defs>
   <rect width="64" height="64" rx="14" fill="#06090F"/>
   <rect x="1.25" y="1.25" width="61.5" height="61.5" rx="12.75" fill="none" stroke="#2C5F8A" stroke-width="1.5"/>
-  <g filter="url(#g)">
+  <g filter="url(#g)" transform="rotate(180 32 32)">
     <rect x="11" y="15" width="42" height="14" rx="3" fill="url(#hd)"/>
     <rect x="28" y="29" width="8" height="22" rx="3" fill="#EAF2FA"/>
   </g>
