@@ -1,0 +1,16 @@
+{
+  "name": "OpenHammer",
+  "short_name": "OpenHammer",
+  "description": "Turn your computer into an MCP-controlled surface.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#06090F",
+  "theme_color": "#06090F",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "/favicon-32.png", "sizes": "32x32", "type": "image/png", "purpose": "any" },
+    { "src": "/favicon-16.png", "sizes": "16x16", "type": "image/png", "purpose": "any" }
+  ]
+}
