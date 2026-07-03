@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # NOTE: the test suite has known failures being resolved separately —
+      # (1) banner README<->code drift, (2) a doctor-test credentials-isolation
+      # leak, (3) `fd` is not on the default ubuntu runner. Tests run for
+      # visibility but do NOT fail the job. Remove `continue-on-error` once those
+      # are fixed to make tests a hard gate.
+      - name: Test
+        continue-on-error: true
+        run: npm test

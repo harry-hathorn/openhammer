@@ -130,7 +130,10 @@ function isRedirectUriAllowed(client: ClientRecord, redirectUri: string): boolea
 	}
 	try {
 		const url = new URL(redirectUri);
-		return url.protocol === "https:" || (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1"));
+		return (
+			url.protocol === "https:" ||
+			(url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1"))
+		);
 	} catch {
 		return false;
 	}
