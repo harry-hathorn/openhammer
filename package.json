@@ -35,7 +35,7 @@
 		"test:tunnel:ngrok": "bash scripts/test-tunnel-ngrok.sh"
 	},
 	"dependencies": {
-		"@fastify/cors": "^8.5.0",
+		"@fastify/cors": "^11.2.0",
 		"@fastify/formbody": "^7.4.0",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"fastify": "^4.29.1",
