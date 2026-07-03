@@ -369,7 +369,7 @@ h2{font-family:var(--disp);font-weight:700;font-size:clamp(26px,3vw,36px);letter
 .fw-list{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px 28px}
 @media(max-width:700px){.fw-list{grid-template-columns:1fr}}
 .fw-list div{font-size:14px;color:var(--moon)}
-.fw-list div::before{content:"⚒ ";color:var(--warn);font-size:12px}
+.fw-list div::before{content:"› ";color:var(--warn);font-size:12px}
 .fw-list div span{color:var(--mist)}
 
 /* community */
@@ -421,16 +421,17 @@ footer{border-top:1px solid var(--seam);padding:40px 0 52px;background:var(--sto
   <div class="wrap">
     <div class="hero-copy">
       <div class="eyebrow">MCP · filesystem + shell</div>
-      <h1>Turn your computer into an <span class="lit">MCP-controlled</span> surface.</h1>
-      <p class="lede">Run OpenHammer once and point any MCP client at a single HTTP endpoint. <b>Claude Desktop, Claude Code, Cursor, or something you built yourself.</b> Whatever connects gets read, write, search and shell on your machine. Local by default, tunneled to the world when you decide it should be.</p>
+      <h1>Turn any computer into an <span class="lit">MCP-controlled</span> surface.</h1>
+      <p class="lede">OpenHammer is a server that turns any computer into a secure, MCP-controlled surface. Run it on your laptop, or <b>deploy it on a server to give any authenticated MCP client controlled filesystem and shell access.</b> Claude Desktop, Claude Code, Cursor, or something you built — whatever connects gets read, write, search and shell, authenticated and scoped. Local-first, and at scale a fleet of bounded compute surfaces for AI.</p>
       <div class="install">
-        <code><span class="p">$</span> git clone https://github.com/harry-hathorn/openhammer && cd openhammer && npm i && npm run build && node dist/cli.js</code>
-        <button class="copy-btn" data-copy="git clone https://github.com/harry-hathorn/openhammer && cd openhammer && npm i && npm run build && node dist/cli.js">copy</button>
+        <code><span class="p">$</span> npx openhammer@latest</code>
+        <button class="copy-btn" data-copy="npx openhammer@latest">copy</button>
       </div>
       <div class="hero-meta">
         <span>MIT license</span>
         <span>Node 20+</span>
         <span>No LLM inside, bring your own client</span>
+        <span>Every connection authenticated</span>
       </div>
     </div>
 
@@ -444,7 +445,7 @@ footer{border-top:1px solid var(--seam);padding:40px 0 52px;background:var(--sto
   </div>
 </header>
 
-<div class="flow" role="img" aria-label="Diagram: an MCP client connects through an optional tunnel to OpenHammer on your computer">
+<div class="flow" role="img" aria-label="Diagram: an MCP client connects through an optional tunnel to OpenHammer running on a laptop or server">
   <div class="wrap">
     <div class="flow-in">
       <div class="node">
@@ -458,11 +459,11 @@ footer{border-top:1px solid var(--seam);padding:40px 0 52px;background:var(--sto
       </div>
       <div class="link-line"><span class="pulse late"></span></div>
       <div class="node lit">
-        <div class="t">your computer</div>
-        <div class="s">/mcp · auth gate · 8 tools</div>
+        <div class="t">any computer</div>
+        <div class="s">laptop · server · fleet</div>
       </div>
     </div>
-    <div class="flow-note">Speak the token and enter. Bounded by <em>MCP_ROOT_DIR</em> and size caps, authenticated on every connection.</div>
+    <div class="flow-note"><em>/mcp</em> gate, 8 tools, bounded by <em>MCP_ROOT_DIR</em> and size caps, authenticated on every connection. One on your laptop, or a fleet across your servers.</div>
   </div>
 </div>
 
@@ -491,15 +492,13 @@ footer{border-top:1px solid var(--seam);padding:40px 0 52px;background:var(--sto
   <div class="wrap">
     <div class="sec-head reveal">
       <div class="sec-eyebrow">Quick start</div>
-      <h2>From clone to connected client in three moves.</h2>
+      <h2>From install to connected client in three moves.</h2>
     </div>
     <div class="steps reveal">
       <div class="step">
         <div class="step-head"><span class="step-num">01</span><h3>Raise the hammer</h3></div>
-        <pre><span class="c"># build and boot the control center</span>
-npm install
-npm run build
-node dist/cli.js
+        <pre><span class="c"># boot the control center</span>
+npx openhammer@latest
 
 <span class="c"># first boot mints a bearer token into</span>
 <span class="c"># ~/.openhammer/credential.json (0600)</span></pre>
@@ -521,7 +520,7 @@ node dist/cli.js
         <p class="note">Works with Claude Code, Claude Desktop, Cursor, the MCP Inspector, anything that speaks Streamable HTTP.</p>
       </div>
       <div class="step">
-        <div class="step-head"><span class="step-num">03</span><h3>Go public (if you dare)</h3></div>
+        <div class="step-head"><span class="step-num">03</span><h3>Reach a remote client</h3></div>
         <pre><span class="c"># add a tunnel channel</span>
 openhammer channel add
   <span class="c"># ngrok / cloudflare / static</span>
@@ -571,10 +570,10 @@ export MCP_PUBLIC_URL=<span class="g">https://…</span></pre>
   <div class="wrap">
     <div class="forge-warning reveal">
       <div class="fw-in">
-        <div class="fw-glyph">⚠</div>
+        <div class="fw-glyph">!</div>
         <div>
-          <h3>It runs real shell as you. Respect the hammer.</h3>
-          <p>OpenHammer exposes a powerful surface on purpose. A connected client can do anything your OS user can, so treat the bearer token like a password to your machine.</p>
+          <h3>Real power, real guardrails.</h3>
+          <p>OpenHammer exposes a powerful surface on purpose — a connected client can do anything the host user can. So every door has a lock: every connection is authenticated, every tool is bounded, and a container is the sandbox. Treat the bearer token like a password to the machine.</p>
           <div class="fw-list">
             <div>Bound the workspace <span>: scope the file tools with MCP_ROOT_DIR</span></div>
             <div>Never tunnel without auth <span>: a public URL plus a weak token means internet shell access</span></div>

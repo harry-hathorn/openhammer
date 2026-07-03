@@ -36,13 +36,17 @@
 [![Node: ≥20](https://img.shields.io/badge/node-%E2%89%A520-green.svg)](https://nodejs.org)
 [![TypeScript: strict](https://img.shields.io/badge/TypeScript-strict-blue.svg)](./tsconfig.json)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-purple.svg)](https://modelcontextprotocol.io)
+[![npm](https://img.shields.io/npm/v/openhammer.svg)](https://www.npmjs.com/package/openhammer)
 
-**OpenHammer turns your computer into an MCP-controlled surface.** Run it once and point any
-MCP-compatible client — Claude Desktop, Claude Code, Cursor, the MCP Inspector, or your own — at a
-single HTTP endpoint, and that client can read, write, search, and run shell commands on your machine.
-Keep it on `127.0.0.1` for a local agent, or **tunnel it to a public URL** so any AI chat anywhere can
-drive your computer. No per-app connectors, no SDK lock-in: one server, any client, your whole
-filesystem + shell as the agent's workspace.
+**<https://openhammer.dev>** · [Discussions](https://github.com/harry-hathorn/openhammer/discussions) · [Issues](https://github.com/harry-hathorn/openhammer/issues)
+
+**OpenHammer is a server that turns any computer into a secure, MCP-controlled surface.** Run it on
+your laptop for a local agent, or **deploy it on a server — or a fleet — to give any authenticated
+MCP client controlled access to that machine's filesystem and shell** over a single HTTP endpoint.
+Point Claude Desktop, Claude Code, Cursor, the MCP Inspector, or your own client at `/mcp` with a
+token, and that box becomes a bounded agent workspace. No per-app connectors, no SDK lock-in: one
+server per machine, any client, filesystem + shell as the surface — local-first, and at scale a
+fleet of safe compute surfaces for AI.
 
 ```text
    any MCP client                (optional) tunnel              your computer
@@ -53,6 +57,11 @@ filesystem + shell as the agent's workspace.
  └─────────────────┘   tool    └───────────────────┘   └──────────────────────────────┘
                        results                         bounded by MCP_ROOT_DIR + size caps
 ```
+
+> **Secure by construction.** Every connection is authenticated — bearer token, OAuth
+> client-credentials, or auth-code + PKCE. Every tool is bounded: file tools are scoped to
+> `MCP_ROOT_DIR`, and all output is size-capped (`MAX_RESPONSE_BYTES`). Run it in a container and
+> the container *is* the sandbox. See [Security](#security).
 
 > "What better way to ``bash`` than with a hammer? OpenHammer allows you to serve a file system and
 > shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows,
@@ -69,13 +78,13 @@ filesystem + shell as the agent's workspace.
 > at OpenHammer's `/mcp` endpoint with the bearer token and it gets a bounded filesystem+shell surface
 > to drive.
 
-> **⚠️ It runs real shell + filesystem ops as you.** A connected client can do anything your OS user
+> **It runs real shell + filesystem ops as you.** A connected client can do anything your OS user
 > can. Bound it with `MCP_ROOT_DIR`, gate it with a bearer token / OAuth client, and for true isolation
 > **run it in a container** (mount only the target dir). See [Security](#security).
 
-> **Start here — the TUI is the entrance.** After `npm run build`, run **`node dist/cli.js`** (or
-> `npm link` once for the bare `openhammer` shortcut, or `npx tsx src/cli.ts` in development) with no
-> arguments: it boots the server and opens the dashboard in one. Everything below — channels, clients,
+> **Start here — the TUI is the entrance.** Run **`openhammer`** (or `npx openhammer`; from a source
+> checkout, `node dist/cli.js`) with no arguments: it boots the server and opens the dashboard in one.
+> Everything below — channels, clients,
 > settings, doctor, monitor — is reachable from that control center; the one-shot
 > `openhammer <command>` forms are the same flows, scriptable/headless.
 
@@ -101,9 +110,17 @@ filesystem + shell as the agent's workspace.
 ## Quick start
 
 ```bash
-npm install
-npm run build                 # builds dist/, including the `openhammer` CLI (dist/cli.js)
-npm start                     # run the server (node dist/main.js)
+npx openhammer@latest          # run it without installing
+# or
+npm install -g openhammer      # installs the `openhammer` command on your PATH, then: openhammer
+```
+
+From source (development):
+
+```bash
+git clone https://github.com/harry-hathorn/openhammer && cd openhammer
+npm install && npm run build   # builds dist/, including the `openhammer` CLI (dist/cli.js)
+node dist/cli.js               # boot the TUI control center
 ```
 
 On first boot OpenHammer mints a bearer token to `~/.openhammer/credentials.json` (`0600`) and prints the
@@ -149,10 +166,10 @@ openhammer auth add-client                 # → pick "Authorization code (login
 > OpenHammer-managed ngrok/cloudflare channel auto-derives this). Then connect Claude web/Code to
 > `https://<your-tunnel>.app/mcp` — it discovers the AS, you log in once, and it reaches `/mcp`.
 
-> **Running the CLI:** after `npm run build`, invoke it as **`node dist/cli.js …`** — npm does *not* link
-> a package's own bin into `node_modules/.bin`, so `./node_modules/.bin/openhammer` won't exist. For the
-> bare `openhammer …` shortcut, run **`npm link`** once (puts it on your `PATH`); during development
-> without building, use **`npx tsx src/cli.ts …`**.
+> **Running the CLI:** installed from npm, the **`openhammer`** command is on your `PATH` (`npx openhammer`
+> works too). From a source checkout npm doesn't link a package's own bin, so use **`node dist/cli.js …`**
+> after `npm run build`, **`npm link`** once for the bare `openhammer …` shortcut, or **`npx tsx src/cli.ts …`**
+> during development without building.
 
 ## The `openhammer` CLI
 
@@ -307,6 +324,14 @@ src/{tools,mcp,auth,tunnel/providers,config,tui/wizards,cli,diagnostics,observab
 test/{e2e-hermetic,fixtures,compose}   Dockerfile · docker-compose.yml
 docs/{coding-standards,agent-harness-design}.md
 ```
+
+## Community
+
+- **[openhammer.dev](https://openhammer.dev)** — the project home page.
+- **[GitHub Discussions](https://github.com/harry-hathorn/openhammer/discussions)** — Q&A, ideas, and show-and-tell. The best place to ask questions.
+- **[GitHub Issues](https://github.com/harry-hathorn/openhammer/issues)** — bugs and feature requests.
+- Contributing — see [`CONTRIBUTING.md`](./CONTRIBUTING.md); vulnerability reports see [`SECURITY.md`](./SECURITY.md).
+- Star the [repo](https://github.com/harry-hathorn/openhammer) if it's useful.
 
 ## License
 

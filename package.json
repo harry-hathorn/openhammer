@@ -1,12 +1,12 @@
 {
 	"name": "openhammer",
-	"version": "0.1.0",
-	"description": "Standalone MCP server (no LLM) exposing local shell/filesystem tools to a remote agent over Streamable HTTP.",
+	"version": "1.0.0",
+	"description": "Standalone MCP server (no LLM) exposing shell + filesystem tools to a remote agent over Streamable HTTP. Run it on a laptop or deploy it on a server to give any authenticated MCP client controlled computer access.",
 	"type": "module",
 	"main": "dist/main.js",
 	"license": "MIT",
 	"author": "Harry Hathorn (https://github.com/harry-hathorn)",
-	"homepage": "https://github.com/harry-hathorn/openhammer#readme",
+	"homepage": "https://openhammer.dev",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/harry-hathorn/openhammer.git"
@@ -20,8 +20,29 @@
 	"engines": {
 		"node": ">=20"
 	},
+	"files": [
+		"dist"
+	],
+	"keywords": [
+		"mcp",
+		"model-context-protocol",
+		"claude",
+		"claude-code",
+		"cursor",
+		"agent",
+		"cli",
+		"shell",
+		"filesystem",
+		"remote-control",
+		"tunnel",
+		"ai"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
 		"build": "tsc && { chmod +x dist/cli.js 2>/dev/null || true; }",
+		"prepublishOnly": "npm run build",
 		"start": "node dist/main.js",
 		"dev": "NODE_ENV=development tsx watch src/main.ts",
 		"test": "vitest run --passWithNoTests",
