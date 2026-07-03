@@ -5,6 +5,15 @@
 	"type": "module",
 	"main": "dist/main.js",
 	"license": "MIT",
+	"author": "Harry Hathorn (https://github.com/harry-hathorn)",
+	"homepage": "https://github.com/harry-hathorn/openhammer#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/harry-hathorn/openhammer.git"
+	},
+	"bugs": {
+		"url": "https://github.com/harry-hathorn/openhammer/issues"
+	},
 	"bin": {
 		"openhammer": "dist/cli.js"
 	},
