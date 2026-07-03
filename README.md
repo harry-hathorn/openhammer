@@ -37,25 +37,46 @@
 [![TypeScript: strict](https://img.shields.io/badge/TypeScript-strict-blue.svg)](./tsconfig.json)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-purple.svg)](https://modelcontextprotocol.io)
 
-> "What better way to ``bash`` than with a hammer? OpenHammer allows you to serve a file system and shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows, like OpenClaw, Hermes, PI, OpenCode, Claude Code, etc. The OGs know that the best agents aren't heavily abstracted behind sdks like Crew AI, LangChain or N8N, but are simply an LLM iterating over a filesystem with bash. You'll be able to tunnel your local environment straight to any MCP client, so no need for a million connectors to share your code with an AI chat, and turns any streaming chat loop into a harness. Or, you could launch a web server for any AI to drive. A few simple tools with the right access make this possible. This allows you to use any MCP compatible client to control a computer. Once the base tools are done, I'll be adding all the tools needed for managing agents, from memories, skills, tools, sessions, all persisting, cross compatible and portable to any MCP client." — Harry Hathorn
+**OpenHammer turns your computer into an MCP-controlled surface.** Run it once and point any
+MCP-compatible client — Claude Desktop, Claude Code, Cursor, the MCP Inspector, or your own — at a
+single HTTP endpoint, and that client can read, write, search, and run shell commands on your machine.
+Keep it on `127.0.0.1` for a local agent, or **tunnel it to a public URL** so any AI chat anywhere can
+drive your computer. No per-app connectors, no SDK lock-in: one server, any client, your whole
+filesystem + shell as the agent's workspace.
 
-A **standalone MCP server with no LLM** that exposes 7 local shell & filesystem tools — `read`,
-`bash`, `edit`, `write`, `grep`, `find`, `ls` — to a remote agent over Fastify + stateless Streamable
-HTTP, rooted at `MCP_ROOT_DIR`. **The entrance is the TUI**: run `openhammer` (no args) for a
-full-screen control center that runs the server, manages **channels** (ngrok / cloudflared / a static
-URL), issues **OAuth clients**, and streams live tool activity. Authenticate any MCP client three ways
-— a raw **bearer token**, an OAuth **client-credentials** pair, or a full **authorization-code + PKCE**
-login (Claude web & Claude Code connect natively through a tunnel).
+```text
+   any MCP client                (optional) tunnel              your computer
+ ┌─────────────────┐   https   ┌───────────────────┐   ┌──────────────────────────────┐
+ │ Claude Desktop  │ ────────▶ │ ngrok / cloudflare│ ─▶│ OpenHammer  /mcp  (auth gate)│
+ │ Claude Code     │           │  …or 127.0.0.1    │   │   ↓ read bash edit write     │
+ │ Cursor / custom │ ◀──────── │                    │ ◀│     grep find ls             │
+ └─────────────────┘   tool    └───────────────────┘   └──────────────────────────────┘
+                       results                         bounded by MCP_ROOT_DIR + size caps
+```
+
+> "What better way to ``bash`` than with a hammer? OpenHammer allows you to serve a file system and
+> shell over MCP. The same way all the best harnesses use the file system to drive agentic workflows,
+> like OpenClaw, Hermes, PI, OpenCode, Claude Code, etc. The OGs know that the best agents aren't
+> heavily abstracted behind sdks like Crew AI, LangChain or N8N, but are simply an LLM iterating over
+> a filesystem with bash. You'll be able to tunnel your local environment straight to any MCP client,
+> so no need for a million connectors to share your code with an AI chat, and turns any streaming chat
+> loop into a harness. Or, you could launch a web server for any AI to drive. A few simple tools with
+> the right access make this possible. This allows you to use any MCP compatible client to control a
+> computer." — Harry Hathorn
 
 > **No LLM, by design.** OpenHammer only *executes* tools. The intelligence — the agent loop, model
 > calls, and compaction — lives in the **MCP client** (your LLM provider, e.g. Claude Code). Point it
-> at OpenHammer's `/mcp` endpoint with the bearer token and it gets a safe, bounded filesystem+shell
-> surface to drive.
+> at OpenHammer's `/mcp` endpoint with the bearer token and it gets a bounded filesystem+shell surface
+> to drive.
+
+> **⚠️ It runs real shell + filesystem ops as you.** A connected client can do anything your OS user
+> can. Bound it with `MCP_ROOT_DIR`, gate it with a bearer token / OAuth client, and for true isolation
+> **run it in a container** (mount only the target dir). See [Security](#security).
 
 > **Start here — the TUI is the entrance.** After `npm run build`, run **`node dist/cli.js`** (or
 > `npm link` once for the bare `openhammer` shortcut, or `npx tsx src/cli.ts` in development) with no
-> arguments: it boots the server and opens the dashboard in one. Everything below — channels,
-> clients, settings, doctor, monitor — is reachable from that control center; the one-shot
+> arguments: it boots the server and opens the dashboard in one. Everything below — channels, clients,
+> settings, doctor, monitor — is reachable from that control center; the one-shot
 > `openhammer <command>` forms are the same flows, scriptable/headless.
 
 ---
@@ -85,7 +106,7 @@ npm run build                 # builds dist/, including the `openhammer` CLI (di
 npm start                     # run the server (node dist/main.js)
 ```
 
-On first boot OpenHammer mints a bearer token to `~/.openhammer/credential.json` (`0600`) and prints the
+On first boot OpenHammer mints a bearer token to `~/.openhammer/credentials.json` (`0600`) and prints the
 URL, the token (once), and a ready-to-paste MCP client config block:
 
 ```json
@@ -104,15 +125,20 @@ Point your MCP client (Claude Code, Cursor, the MCP Inspector, …) at that URL 
 with the inspector: `npx @modelcontextprotocol/inspector` → POST `…/mcp` with the bearer → `initialize`
 → `tools/list` (expect 8 tools: `guide` + the 7 capability tools) → call each.
 
-### OAuth clients (Claude web / Claude Code)
+### Connect any client — three auth paths
 
-Clients that can't set a raw `Authorization: Bearer` header connect via OAuth. OpenHammer ships a full
-Authorization Server — the **client-credentials** grant (machine clients) **and** the
-**authorization-code + PKCE** flow with dynamic registration (`/register`), which is what Claude web
-and Claude Code use. For an auth-code client you also need a login for `/oauth/authorize`:
+A connected MCP client is an agent with shell+filesystem access, so every path is authenticated.
+OpenHammer's `/mcp` gate accepts, in fall-through order:
+
+- **Raw bearer token** — any client that can set an `Authorization: Bearer` header (simplest; the
+  token is minted on first boot, or set via `MCP_AUTH_TOKEN`).
+- **OAuth client-credentials** — a `client_id` / `client_secret` pair for machine clients
+  (`POST /oauth/token`).
+- **OAuth authorization-code + PKCE** — the full login flow Claude web and Claude Code use, with
+  dynamic registration (`/register`) and an operator login at `/oauth/authorize`.
 
 ```bash
-openhammer auth set-login                  # the username + password Claude will prompt for
+openhammer auth set-login                  # the username + password the /authorize login prompts for
 openhammer auth add-client                 # → pick "Authorization code (login)"; paste its client_id into Claude Code
 # (Claude web registers its own client at /register and just needs the login above)
 ```
@@ -152,8 +178,9 @@ Interactive commands print the OpenHammer banner first.
 ## TUI control center (dashboard)
 
 Run `openhammer` with no arguments (in a terminal) and you get a **navigable control center** — a
-full-screen, colored menu (built on pi-tui, like pi's own UI) instead of juggling commands. Move
-with `↑`/`↓`, open a section with `Enter`, go back with `Esc`/`←`, quit with `q`/`Ctrl-C`:
+full-screen, colored menu (built on [`@earendil-works/pi-tui`](https://www.npmjs.com/package/@earendil-works/pi-tui))
+instead of juggling commands. Move with `↑`/`↓`, open a section with `Enter`, go back with `Esc`/`←`,
+quit with `q`/`Ctrl-C`:
 
 - **Status** — server up/down, local + tunnel URL, bearer token
 - **Channels** — configured channels + their live state/URLs; drill into one to **use**/**remove** it, or **add** a channel via the wizard
@@ -167,10 +194,11 @@ lifecycle, so `openhammer` is the single entry that runs the server + the dashbo
 both (no orphan). For headless/container deploys, use `openhammer start`. (The same flows are
 available one-shot: `openhammer channel …`, `auth …`, `config …`, `doctor`, `monitor`.)
 
-## Channels (how OpenHammer is reached)
+## Channels (how a client reaches you)
 
-A **channel** is how a remote agent reaches the server. Add one with `openhammer channel add` and it is
-persisted to `~/.openhammer/config.json` (secrets go to `~/.openhammer/credentials.json`, `0600`).
+A **channel** is how a remote MCP client reaches the server. Add one with `openhammer channel add`
+and it is persisted to `~/.openhammer/config.json` (secrets go to `~/.openhammer/credentials.json`,
+`0600`).
 
 | Channel | Mode | Needs | How the URL is obtained |
 |---|---|---|---|
@@ -208,7 +236,23 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
 
 - **Env (simplest):** `HOST=0.0.0.0 MCP_ROOT_DIR=/srv/web MCP_AUTH_TOKEN=… LOG_LEVEL=info node dist/main.js`. Env overrides the dotfile, so a server can run with **zero** `~/.openhammer` state. Point `MCP_ROOT_DIR` at the filesystem you want to serve to the agent.
 - **Provision the dotfile** for what env can't express (a persisted channel + its secret, an OAuth client pair): write `~/.openhammer/config.json` + `credentials.json` (`0600`) directly — bake into the image, mount a volume, or cloud-init; `node dist/main.js` reads them at boot. (Precedence: CLI flags > env > dotfile.)
-- **Non-interactive CLI** (scripted / CI): `openhammer channel add --provider ngrok --authtoken "$T"`, `openhammer config set mcp.allowedClients claude-code`, `openhammer auth add-client --label ci` — flag-driven, no wizard, validated. (Or script via env — `NGROK_AUTHTOKEN`, `MCP_ALLOWED_CLIENTS` — or by writing the dotfile JSON.)
+- **Non-interactive CLI** (scripted / CI): `openhammer channel add --provider ngrok --authtoken "$T"`, `openhammer config set mcp.allowedClients claude-code`, `openhammer auth add-client --label ci` — flag-driven, no wizard, validated.
+
+## Security
+
+OpenHammer deliberately exposes a powerful surface — a connected client can run shell and touch the
+filesystem **as the OS user running the server**. Treat the bearer token / OAuth client secret like a
+password to your machine:
+
+- **Bound the workspace.** Set `MCP_ROOT_DIR` to the directory you want the file tools scoped to.
+  `read`/`write`/`edit`/`find`/`ls`/`grep` resolve under it — but **`bash` is not jailed** and reaches
+  anything the OS user can.
+- **Authenticate every connection.** Use the minted bearer, an OAuth client, or both. Secrets are
+  stored `0600`; OAuth client secrets are kept only as a SHA-256 hash.
+- **Run it in a container for isolation.** The container *is* the sandbox — mount only the target
+  directory, set `MCP_ROOT_DIR`, and the blast radius is the container, not your host.
+- **Don't tunnel without auth.** A public `ngrok`/`cloudflare` URL without a strong token gives the
+  internet shell access to your machine.
 
 ## Architecture
 
@@ -216,7 +260,7 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
   no `sessionIdGenerator` (the SDK's stateless mode).
 - **Three auth paths.** The `/mcp` gate accepts, in fall-through order: the per-instance **opaque
   bearer** (constant-time compared; `MCP_AUTH_TOKEN` overrides) **or** an AS-issued HS256 JWT. The
-  Authorization Server (spec 20) mints those JWTs via three grants — **client-credentials**
+  Authorization Server mints those JWTs via three grants — **client-credentials**
   (`POST /oauth/token` with `client_id`/`client_secret`), **authorization-code + PKCE**
   (`GET/POST /oauth/authorize` username/password login → `POST /oauth/token`), and **refresh_token** —
   plus RFC 7591 **dynamic registration** (`POST /register`), all advertised via RFC 8414/9728 metadata.
@@ -228,9 +272,6 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
   one file + one registry line.
 - **Live monitoring.** A non-blocking recorder streams client + tool-call activity over a local-only
   Unix socket (`~/.openhammer/openhammer.sock`, `0600`); `openhammer monitor` tails it.
-- **Not hard-jailed.** Tool paths resolve under `MCP_ROOT_DIR` via `resolveToCwd`, but `bash` reaches
-  anything the OS user can. **For isolation, run OpenHammer in a container** (mount only the target dir,
-  set `MCP_ROOT_DIR`); the container *is* the sandbox.
 - **Result error model.** Tool `execute → Promise<Result<ToolOk, Error>>`; expected failures return
   `err(new Error(msg))`, never throw. The MCP `CallTool` handler is the single narrowing point, with a
   universal size backstop.
@@ -238,7 +279,7 @@ No TUI required — a server deploy (Docker / systemd / k8s) is configured via *
 ## Testing
 
 Deterministic, no LLM — the "real client" is the MCP SDK `Client` driven by a script that asserts on
-`callTool` text. Five tiers build on each other (see `specs/15` + `specs/16`):
+`callTool` text. Five tiers build on each other:
 
 - **Hermetic trio** (`npm test`): Tier-0 units → Tier-1 in-process MCP E2E → Tier-2 boot + CLI E2E.
 - **Containerized** (on-demand): `npm run test:compose`, `npm run test:compose:real`,
@@ -248,23 +289,24 @@ Deterministic, no LLM — the "real client" is the MCP SDK `Client` driven by a 
 
 ## Development
 
-This repo ships from an **autonomous build loop** (`loop.sh` + `PROMPT_build.md`): one checkbox in
-`IMPLEMENTATION_PLAN.md` = one iteration = one commit, fresh context each time, validated by the trio
-(`npm test` / `npm run typecheck` / `npm run lint`), Conventional Commits, tagged per iteration.
+```bash
+npm install
+npm run build        # tsc → dist/
+npm run typecheck    # tsc --noEmit over src + tests
+npm run lint         # biome check
+npm run format       # biome format --write
+npm test             # vitest unit + in-process E2E suite
+```
 
-- Standards: `AGENTS.md` (high-signal) → `docs/coding-standards.md` (detail).
-- Source of truth: `specs/01`–`specs/21` (+ `99`, the future agent-harness roadmap, out of scope for v1).
+Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`). Coding standards live in
+[`AGENTS.md`](./AGENTS.md) (high-signal) and [`docs/coding-standards.md`](./docs/coding-standards.md)
+(detail). CI runs lint + typecheck + build on every PR; see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ```text
 src/{tools,mcp,auth,tunnel/providers,config,tui/wizards,cli,diagnostics,observability}
-test/{e2e-hermetic,fixtures,compose}  Dockerfile · docker-compose.yml · loop.sh
-specs/01–21 + 99   docs/{coding-standards,agent-harness-design}.md
+test/{e2e-hermetic,fixtures,compose}   Dockerfile · docker-compose.yml
+docs/{coding-standards,agent-harness-design}.md
 ```
-
-## Status
-
-Greenfield, built incrementally by the loop from the specs. Porting references: tool logic ← pi's
-`core/tools/`; terminal/TUI/session model ← pi (`packages/coding-agent/src/cli`, `packages/agent/src/harness`).
 
 ## License
 
