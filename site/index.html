@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenHammer: turn your computer into an MCP-controlled surface</title>
+<title>OpenHammer: turn any computer into an MCP-controlled surface</title>
 <meta name="description" content="OpenHammer serves your filesystem and shell over MCP. One HTTP endpoint, any MCP client. Claude Desktop, Claude Code, Cursor, OpenCode, or your own.">
 <meta name="author" content="Harry Hathorn">
 <meta name="robots" content="index,follow,max-image-preview:large">
@@ -14,21 +14,21 @@
 <!-- Open Graph -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="OpenHammer">
-<meta property="og:title" content="OpenHammer — turn your computer into an MCP-controlled surface">
+<meta property="og:title" content="OpenHammer: turn any computer into an MCP-controlled surface">
 <meta property="og:description" content="OpenHammer serves your filesystem and shell over MCP. One HTTP endpoint, any MCP client. Claude Desktop, Claude Code, Cursor, OpenCode, or your own.">
 <meta property="og:url" content="https://openhammer.dev/">
 <meta property="og:image" content="https://openhammer.dev/og.png">
-<meta property="og:image:alt" content="OpenHammer — turn your computer into an MCP-controlled surface.">
+<meta property="og:image:alt" content="OpenHammer: turn any computer into an MCP-controlled surface.">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:locale" content="en_US">
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="OpenHammer — turn your computer into an MCP-controlled surface">
+<meta name="twitter:title" content="OpenHammer: turn any computer into an MCP-controlled surface">
 <meta name="twitter:description" content="OpenHammer serves your filesystem and shell over MCP. One HTTP endpoint, any MCP client.">
 <meta name="twitter:image" content="https://openhammer.dev/og.png">
-<meta name="twitter:image:alt" content="OpenHammer — turn your computer into an MCP-controlled surface.">
+<meta name="twitter:image:alt" content="OpenHammer: turn any computer into an MCP-controlled surface.">
 
 <!-- icons + manifest -->
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any">
@@ -40,7 +40,7 @@
 
 <!-- structured data -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"OpenHammer","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows","url":"https://openhammer.dev/","downloadUrl":"https://github.com/harry-hathorn/openhammer","description":"OpenHammer serves your filesystem and shell over MCP over a single HTTP endpoint. Bring any MCP client — Claude Desktop, Claude Code, Cursor, OpenCode, or your own.","license":"https://github.com/harry-hathorn/openhammer/blob/main/LICENSE","programmingLanguage":"TypeScript","softwareVersion":"1.0.0","author":{"@type":"Person","name":"Harry Hathorn","url":"https://github.com/harry-hathorn"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"OpenHammer","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows","url":"https://openhammer.dev/","downloadUrl":"https://github.com/harry-hathorn/openhammer","description":"OpenHammer serves your filesystem and shell over MCP over a single HTTP endpoint. Bring any MCP client: Claude Desktop, Claude Code, Cursor, OpenCode, or your own.","license":"https://github.com/harry-hathorn/openhammer/blob/main/LICENSE","programmingLanguage":"TypeScript","softwareVersion":"1.0.0","author":{"@type":"Person","name":"Harry Hathorn","url":"https://github.com/harry-hathorn"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
 </script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -422,7 +422,7 @@ footer{border-top:1px solid var(--seam);padding:40px 0 52px;background:var(--sto
     <div class="hero-copy">
       <div class="eyebrow">MCP · filesystem + shell</div>
       <h1>Turn any computer into an <span class="lit">MCP-controlled</span> surface.</h1>
-      <p class="lede">OpenHammer is a server that turns any computer into a secure, MCP-controlled surface. Run it on your laptop, or <b>deploy it on a server to give any authenticated MCP client controlled filesystem and shell access.</b> Claude Desktop, Claude Code, Cursor, OpenCode, or your own client built on the MCP SDK — whatever connects gets read, write, search and shell, authenticated and scoped. Local-first, and at scale a fleet of bounded compute surfaces for AI.</p>
+      <p class="lede">OpenHammer is a server that turns any computer into a secure, MCP-controlled surface. Run it on your laptop, or <b>deploy it on a server to give any authenticated MCP client controlled filesystem and shell access.</b> Connect Claude Desktop, Claude Code, Cursor, OpenCode, or your own client built on the MCP SDK. Whatever you connect gets read, write, search, and shell, all authenticated and scoped to a workspace. Local-first, and at scale it's a fleet of safe compute surfaces for AI.</p>
       <div class="install">
         <code><span class="p">$</span> npx openhammer@latest</code>
         <button class="copy-btn" data-copy="npx openhammer@latest">copy</button>
@@ -517,7 +517,7 @@ npx openhammer@latest
     }
   }
 }</pre>
-        <p class="note">Any Streamable-HTTP MCP client works — Claude Desktop, Claude Code, Cursor, OpenCode, the MCP Inspector, or one you build with the @modelcontextprotocol/client SDK.</p>
+        <p class="note">Any Streamable-HTTP MCP client works: Claude Desktop, Claude Code, Cursor, OpenCode, the MCP Inspector, or one you build with the @modelcontextprotocol/client SDK.</p>
       </div>
       <div class="step">
         <div class="step-head"><span class="step-num">03</span><h3>Reach a remote client</h3></div>
@@ -573,7 +573,7 @@ export MCP_PUBLIC_URL=<span class="g">https://…</span></pre>
         <div class="fw-glyph">!</div>
         <div>
           <h3>Real power, real guardrails.</h3>
-          <p>OpenHammer exposes a powerful surface on purpose — a connected client can do anything the host user can. So every door has a lock: every connection is authenticated, every tool is bounded, and a container is the sandbox. Treat the bearer token like a password to the machine.</p>
+          <p>OpenHammer exposes a powerful surface on purpose. A connected client can do anything the host user can, so every door has a lock: every connection is authenticated, every tool is bounded, and a container is the sandbox. Treat the bearer token like a password to the machine.</p>
           <div class="fw-list">
             <div>Bound the workspace <span>: scope the file tools with MCP_ROOT_DIR</span></div>
             <div>Never tunnel without auth <span>: a public URL plus a weak token means internet shell access</span></div>
