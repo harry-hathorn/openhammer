@@ -24,6 +24,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # Clean-room smoke test of the publishable artifact: pack the tarball,
+      # install it into an empty dir (exactly what `npx` does), then import the
+      # CLI entry, which pulls the full runtime dependency graph (fastify, jose,
+      # the MCP SDK, and pi-tui). If a runtime dep is missing from `dependencies`
+      # (the 1.0.0 bug: pi-tui was dev-only), this fails with ERR_MODULE_NOT_FOUND
+      # and blocks the publish before a broken package reaches npm. The CLI's
+      # auto-run guard keeps the bare import side-effect-free (no server boot).
+      - name: Smoke-test publishable tarball
+        run: |
+          npm pack
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/openhammer-*.tgz
+          node --input-type=module -e "await import('openhammer/dist/cli.js'); console.log('smoke: runtime imports resolved')"
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -5,6 +5,14 @@ All notable changes to OpenHammer are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-07-04
+
+### Fixed
+- Fixed a packaging bug that made the published 1.0.0 crash on launch with `ERR_MODULE_NOT_FOUND: @earendil-works/pi-tui`. The TUI runtime dependency was misclassified as dev-only, so it was omitted from the installed package; it is now declared as a runtime dependency. `npx openhammer@latest` now starts.
+
+### Changed
+- The npm publish job now runs a clean-room smoke test against the packed tarball (pack, install into an empty dir, then import the CLI entry, which pulls the full runtime dependency graph). A missing runtime dependency now blocks the release instead of shipping a broken artifact.
+
 ## [1.0.0] - 2026-07-03
 
 First stable release. OpenHammer is a server that turns any computer into a secure, MCP-controlled
