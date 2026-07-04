@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-	createNgrokProvider,
-	type NgrokForwardConfig,
-	type NgrokListener,
-} from "./ngrok.ts";
+import { createNgrokProvider, type NgrokForwardConfig, type NgrokListener } from "./ngrok.ts";
 
 /**
  * A deterministic stand-in for an SDK `Listener`. `urlValue` is what `url()` returns;

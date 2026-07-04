@@ -299,7 +299,10 @@ describe("ensureServer — restart", () => {
 		if (!result.ok) return;
 		const restartResult = await result.value.restart();
 		expect(restartResult.ok).toBe(true);
-		expect(spawn.seen.map((s) => s.args)).toEqual([["--channel", "abc"], ["--channel", "abc"]]);
+		expect(spawn.seen.map((s) => s.args)).toEqual([
+			["--channel", "abc"],
+			["--channel", "abc"],
+		]);
 	});
 
 	it("refuses to restart a server it attached to (does not own)", async () => {

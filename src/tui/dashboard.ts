@@ -28,20 +28,28 @@
  * in the operator's shell rather than corrupting the dashboard screen.
  */
 import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
-import { type ClientInfo, type IssuedClient, hasOperatorLogin, issueClient, listClients, removeClient, setOperatorLogin } from "../auth/oauth/clients.ts";
+import {
+	type ClientInfo,
+	hasOperatorLogin,
+	type IssuedClient,
+	issueClient,
+	listClients,
+	removeClient,
+	setOperatorLogin,
+} from "../auth/oauth/clients.ts";
 import { credentialsPath } from "../config/credentials.ts";
 import { type Settings, saveSettings, settingsPath } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
-import { err, ok, type Result } from "../tools/result.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
+import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { BannerStream } from "./banner.ts";
 import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
 import { type DashboardActions, DashboardRoot } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
-import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { runSpinner } from "./prompt-loop.ts";
+import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
 import { setSection } from "./wizards/section.ts";
@@ -267,8 +275,11 @@ function buildActions(
 		if (!restart) return;
 		store.setStatus({ ...store.status, publicUrl: null });
 		await withModal(() =>
-			runSpinner("Restarting server to apply the channel…", () => restart(), (r) =>
-				r.ok ? "server restarted" : `restart failed: ${r.error.message}`),
+			runSpinner(
+				"Restarting server to apply the channel…",
+				() => restart(),
+				(r) => (r.ok ? "server restarted" : `restart failed: ${r.error.message}`),
+			),
 		);
 	};
 

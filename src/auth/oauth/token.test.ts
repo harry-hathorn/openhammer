@@ -98,7 +98,13 @@ function pkcePair(): { verifier: string; challenge: string } {
 /** Seed an authorization-code client with an optional per-client login + a registered redirect_uri. */
 function seedAuthCodeClient(
 	credPath: string,
-	opts: { username?: string; password?: string; redirectUri?: string; label?: string; tokenEndpointAuthMethod?: string } = {},
+	opts: {
+		username?: string;
+		password?: string;
+		redirectUri?: string;
+		label?: string;
+		tokenEndpointAuthMethod?: string;
+	} = {},
 ): IssuedClient {
 	const r = issueClient(
 		opts.label ?? "web",
@@ -107,7 +113,9 @@ function seedAuthCodeClient(
 			redirectUris: [opts.redirectUri ?? CLAUDE_REDIRECT],
 			...(opts.username !== undefined ? { username: opts.username } : {}),
 			...(opts.password !== undefined ? { password: opts.password } : {}),
-			...(opts.tokenEndpointAuthMethod !== undefined ? { tokenEndpointAuthMethod: opts.tokenEndpointAuthMethod } : {}),
+			...(opts.tokenEndpointAuthMethod !== undefined
+				? { tokenEndpointAuthMethod: opts.tokenEndpointAuthMethod }
+				: {}),
 		},
 		credPath,
 	);
