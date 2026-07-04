@@ -7,11 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] - 2026-07-04
 
-### Changed
-- The `ngrok` channel is now driven by the native `@ngrok/ngrok` SDK (an in-process agent) instead of the `ngrok` system CLI. The agent ships as an npm dependency with per-platform binaries (Linux x64/arm64/armhf, glibc and musl, plus macOS, Windows, FreeBSD, Android), so the operator no longer installs or pins a separate binary: `npx openhammer` brings it. The public URL comes straight from `forward()` — no spawned process, no `:4040` inspector polling, no stdout scraping. A connect timeout bounds the SDK's QUIC-default transport so a blocked network degrades to localhost-only instead of hanging boot.
-
 ### Added
-- `@ngrok/ngrok` as a runtime dependency. `ngrok` is now a zero-binary channel: an authtoken is the only configuration, and `isAvailable` reports whether one is set rather than whether a binary is on `PATH`.
+- **Dynamic Client Registration for the authorization-code flow (RFC 7591).** `/register` now reads the client's `token_endpoint_auth_method` and `grant_types` and mints a `client_secret` only for confidential (`client_secret_post`) clients; public clients (`none` — the MCP norm: Claude, Cursor) get a `client_id` and no secret. The operator never provisions a client id or secret — the client registers itself.
+- **Operator login, in the dashboard.** The login that authorizes connecting MCP clients at `/authorize` can now be set from the **Clients & login** screen ("Set operator login…"), not just the `auth set-login` CLI. Its state shows in the screen header and the menu summary.
+- **Deferred dynamic registration.** A dynamically-registered client is held in memory and persisted only when the operator's login succeeds — failed or abandoned registrations leave no "ghost" client in the registry.
+- `@ngrok/ngrok` as a runtime dependency, so the `ngrok` channel needs no separately-installed binary — an authtoken is the only configuration.
+
+### Changed
+- The `ngrok` channel is now driven by the native `@ngrok/ngrok` SDK (an in-process agent) instead of the `ngrok` system CLI. The agent ships as an npm dependency with per-platform binaries (Linux x64/arm64/armhf, glibc and musl, plus macOS, Windows, FreeBSD, Android), so the operator no longer installs or pins a separate binary: `npx openhammer` brings it. The public URL comes straight from `forward()` — no spawned process, no `:4040` inspector polling, no stdout scraping. A connect timeout bounds the SDK's HTTP/2 control session so a blocked network degrades to localhost-only instead of hanging boot.
+- **Authorization-code clients are public by default.** The interactive `add-client` wizard is machine (`client_credentials`) only; login (authorization-code) clients connect dynamically and authenticate against the operator login. The `--type authorization_code` flag remains as an escape hatch.
+- **`/oauth/token` now requires + verifies a confidential client's secret** (omitting it is rejected, not bypassed); public clients authenticate with PKCE alone. `client_credentials` rejects public clients.
+- The `/oauth/authorize` login page is restyled to match the marketing site (the "Durin-door" look): `--night`/`--ithil` palette, Bricolage / IBM Plex / JetBrains Mono, rune-mark header, glowing card.
+- Adding, switching, or removing the default channel now restarts the owned server child so the new tunnel raises live — no manual quit-and-relaunch.
+
+### Fixed
+- **1.0.0 launch crash.** `npx openhammer@latest` failed with `ERR_MODULE_NOT_FOUND: Cannot find package '@earendil-works/pi-tui'`: the package was a devDependency but `dist/` imports it on the default CLI path. It is now a runtime `dependency`, and `release.yml` runs a clean-room `npm pack` → install → import smoke gate so a missing runtime dep blocks publish.
+- A `/oauth/authorize` request that no login can authenticate now renders a clear "No login configured" notice instead of looping on "Invalid username or password".
 
 ## [1.0.1] - 2026-07-04
 
