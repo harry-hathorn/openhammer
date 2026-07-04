@@ -58,11 +58,18 @@ export const MENU_SECTIONS = ["status", "channels", "clients", "monitor", "setti
 const SECTION_LABELS: Record<(typeof MENU_SECTIONS)[number], string> = {
 	status: "Status",
 	channels: "Channels",
-	clients: "Clients & JWT",
+	clients: "Clients & login",
 	monitor: "Monitor",
 	settings: "Settings",
 	doctor: "Doctor",
 };
+
+/**
+ * The Clients-screen "set operator login" row label (routed by exact match in the root — no
+ * glyph, so it is portable and unambiguous alongside the `＋` issue row). Exported so the root
+ * and {@link clientItems} share the single source.
+ */
+export const SET_LOGIN_LABEL = "Set operator login…";
 
 /** A short live summary of a slice, for the menu's right column (e.g. "2 configured"). */
 function summarizeSection(section: (typeof MENU_SECTIONS)[number], store: DashboardStore): string {
@@ -74,6 +81,9 @@ function summarizeSection(section: (typeof MENU_SECTIONS)[number], store: Dashbo
 			return n === 0 ? "none configured" : n === 1 ? "1 configured" : `${n} configured`;
 		}
 		case "clients": {
+			// The login gate is the urgent signal — surface an unset login at the menu level
+			// (it's why login clients can't connect); otherwise show the client count.
+			if (!store.loginConfigured) return "login NOT set";
 			const n = store.oauthClients.length;
 			return n === 0 ? "none issued" : n === 1 ? "1 client" : `${n} clients`;
 		}
@@ -142,11 +152,19 @@ export function channelDetailSpec(
  * description = client id prefix + created), then a trailing "issue" row. Pure.
  */
 export function clientItems(store: DashboardStore): ListItem[] {
-	const rows: ListItem[] = clientRows(store.oauthClients).map((c: ClientRow) => ({
-		label: c.label,
-		description: `${c.clientId} · ${c.grantType} · ${c.createdAt}`,
-	}));
-	rows.push({ label: "＋  Issue new client…", description: "label · type · login (optional)" });
+	const rows: ListItem[] = [
+		{
+			label: SET_LOGIN_LABEL,
+			description: store.loginConfigured
+				? "change the operator username + password"
+				: "set the login that authorizes connecting MCP clients",
+		},
+		...clientRows(store.oauthClients).map((c: ClientRow) => ({
+			label: c.label,
+			description: `${c.clientId} · ${c.grantType} · ${c.createdAt}`,
+		})),
+	];
+	rows.push({ label: "＋  Issue new client…", description: "machine client — label + secret" });
 	return rows;
 }
 

@@ -76,7 +76,7 @@ export interface ServerChild {
 	stderr?: { on(event: "data", listener: (chunk: Buffer) => void): unknown } | null;
 }
 
-/** A started server handle: its endpoint + how to tear it down. */
+/** A started server handle: its endpoint + how to tear it down (and re-launch it). */
 export interface ServerControl {
 	/** Did THIS control spawn the server (`true`) or attach to one already up (`false`)? */
 	ownsServer: boolean;
@@ -92,6 +92,20 @@ export interface ServerControl {
 	 * throws, on an already-gone pid).
 	 */
 	stop(): Promise<Result<void, Error>>;
+	/**
+	 * Apply a config change that only a fresh boot picks up — chiefly a new
+	 * `defaultChannel` set from the dashboard (the running child resolved its
+	 * channel once, at boot). Stops the current child (freeing the port), re-spawns
+	 * with the same args/env (a launch-time `--channel` is preserved), and waits for
+	 * `/health`. The dashboard's status-socket subscriber reconnects on its own (it
+	 * retries forever), so the new boot's channel-state — the live tunnel URL —
+	 * arrives without any re-subscribe wiring. `err` if this control attached (the
+	 * dashboard did not start the server, so it cannot restart it) or the re-spawn
+	 * failed to become ready (the server is then down; the dashboard surfaces it).
+	 * No-op-safe to call after `stop` (returns the spawn result of a child nothing
+	 * else will own — but callers should not).
+	 */
+	restart(): Promise<Result<void, Error>>;
 }
 
 /** Injection seams for {@link ensureServer} (the `11a`/`13`/`17b`–`19d` precedent). */
@@ -232,39 +246,25 @@ function killChild(child: ServerChild): void {
 }
 
 /**
- * Ensure the OpenHammer server is reachable at `config`'s port, spawning it as a
- * child if it isn't. Returns a {@link ServerControl} on success (owning the child
- * when it spawned one, or attaching when one was already up) or `err` for an
- * expected failure (missing entry, early child exit, ready-timeout) — never throws.
- *
- * The control's `stop()` tears a spawned child down (SIGTERM → SIGKILL backstop,
- * idempotent) and is a no-op when attached. A process `exit` safety net reaps a
- * still-live child if the dashboard exits abnormally, so no server orphans.
+ * Spawn the server as an **owned** child and wait for `/health`. Returns the
+ * idempotent `stop()` (SIGTERM → SIGKILL backstop, removes the process-`exit`
+ * safety net) on success, or `err` for an expected failure (missing entry, early
+ * child exit, ready-timeout) — never throws. Pure lifecycle — the attach path
+ * (server already up) lives in {@link ensureServer}; this is the shared spawn
+ * primitive both the initial launch and a {@link ServerControl.restart} re-spawn
+ * call, so a restart runs the exact same code path as the first boot.
  */
-export async function ensureServer(
-	config: Config = loadConfig(),
-	deps: ServerControlDeps = {},
-): Promise<Result<ServerControl, Error>> {
-	const base = `http://${config.host}:${config.port}`;
-	const healthUrl = `${base}/health`;
-	const localUrl = `${base}/mcp`;
-
-	const probeHealth = deps.probeHealth ?? defaultProbeHealth;
-	const token = await resolveToken(config, deps);
-
-	// Already up? Attach — never spawn a second server (spec 19 line 18).
-	if (await probeHealth(healthUrl)) {
-		return ok({ ownsServer: false, localUrl, token, stop: async () => ok(undefined) });
-	}
-
-	// Spawn the server child.
+async function launchServer(
+	deps: ServerControlDeps,
+	healthUrl: string,
+	args: string[],
+	env: NodeJS.ProcessEnv,
+): Promise<Result<{ stop: () => Promise<Result<void, Error>> }, Error>> {
 	const mainPath = deps.mainPath ?? defaultMainPath();
 	const exists = deps.exists ?? existsSync;
 	if (!exists(mainPath)) {
 		return err(new Error(`server entry not found: ${mainPath} (run \`npm run build\`)`));
 	}
-	const args = deps.args ?? [];
-	const env = deps.env ?? process.env;
 	const spawnChild = deps.spawn ?? ((mp: string, sp: string[]) => defaultSpawn(mp, sp, env));
 	const child = spawnChild(mainPath, args);
 
@@ -282,6 +282,7 @@ export async function ensureServer(
 	const readyIntervalMs = deps.readyIntervalMs ?? DEFAULT_READY_INTERVAL_MS;
 	const stopGraceMs = deps.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
 
+	const probeHealth = deps.probeHealth ?? defaultProbeHealth;
 	const ready = await waitForReady(child, healthUrl, probeHealth, () => stderrBuf, readyTimeoutMs, readyIntervalMs);
 	if (!ready.ok) {
 		// The child failed to become ready — reap it + drop the safety net.
@@ -300,5 +301,72 @@ export async function ensureServer(
 		if (!exited) killChild(child); // SIGKILL backstop for a child that ignores SIGTERM
 		return ok(undefined);
 	};
-	return ok({ ownsServer: true, localUrl, token, stop });
+	return ok({ stop });
+}
+
+/**
+ * Ensure the OpenHammer server is reachable at `config`'s port, spawning it as a
+ * child if it isn't. Returns a {@link ServerControl} on success (owning the child
+ * when it spawned one, or attaching when one was already up) or `err` for an
+ * expected failure (missing entry, early child exit, ready-timeout) — never throws.
+ *
+ * The control's `stop()` tears a spawned child down (SIGTERM → SIGKILL backstop,
+ * idempotent) and is a no-op when attached. `restart()` (owned only) stops the
+ * current child and re-spawns so a fresh boot picks up a config change the running
+ * child cannot — chiefly a new `defaultChannel` set from the dashboard. A process
+ * `exit` safety net reaps a still-live child if the dashboard exits abnormally, so
+ * no server orphans; `restart` swaps the child the net + `stop` close over, so the
+ * next `stop`/`onQuit` always tears down the *current* child (no orphan on restart).
+ */
+export async function ensureServer(
+	config: Config = loadConfig(),
+	deps: ServerControlDeps = {},
+): Promise<Result<ServerControl, Error>> {
+	const base = `http://${config.host}:${config.port}`;
+	const healthUrl = `${base}/health`;
+	const localUrl = `${base}/mcp`;
+
+	const probeHealth = deps.probeHealth ?? defaultProbeHealth;
+	const token = await resolveToken(config, deps);
+	const args = deps.args ?? [];
+	const env = deps.env ?? process.env;
+
+	// Already up? Attach — never spawn a second server (spec 19 line 18). An attached
+	// server is not owned, so `restart()` refuses (the dashboard did not start it).
+	if (await probeHealth(healthUrl)) {
+		return ok({
+			ownsServer: false,
+			localUrl,
+			token,
+			stop: async () => ok(undefined),
+			restart: async () => err(new Error("cannot restart a server the dashboard did not start")),
+		});
+	}
+
+	const first = await launchServer(deps, healthUrl, args, env);
+	if (!first.ok) return first;
+
+	// Mutable holder so `stop` and `restart` always act on the CURRENT child: a
+	// `restart()` swaps `launched` for a fresh spawn, and the next `stop()`/`onQuit`
+	// tears the new one down (no orphan, no double-kill). `localUrl`/`token` are
+	// stable across a restart (same port + credential file), so they are not re-read.
+	const state: { launched: { stop: () => Promise<Result<void, Error>> } } = { launched: first.value };
+	return ok({
+		ownsServer: true,
+		localUrl,
+		token,
+		stop: () => state.launched.stop(),
+		restart: async () => {
+			// Stop the running child first (SIGTERM → port freed), then re-spawn with
+			// the same args/env (a launch-time `--channel` is preserved) and wait for
+			// ready. The dashboard's status-socket subscriber reconnects on its own
+			// (it retries forever), so the new boot's channel-state arrives unaided.
+			const stopped = await state.launched.stop();
+			if (!stopped.ok) return stopped;
+			const next = await launchServer(deps, healthUrl, args, env);
+			if (!next.ok) return next; // re-spawn failed — the server is now down
+			state.launched = next.value;
+			return ok(undefined);
+		},
+	});
 }

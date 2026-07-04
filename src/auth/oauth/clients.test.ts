@@ -7,6 +7,7 @@ import { credentialsPath, getCredentials, setCredentials } from "../../config/cr
 import { err, ok } from "../../tools/result.ts";
 import {
 	type ClientInfo,
+	commitClient,
 	ensureJwtSecret,
 	findClient,
 	GRANT_AUTHORIZATION_CODE,
@@ -18,9 +19,13 @@ import {
 	newClientId,
 	newClientSecret,
 	peekJwtSecret,
+	prunePendingClients,
 	removeClient,
+	resetPendingClients,
 	resolveJwtSecret,
 	setOperatorLogin,
+	TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST,
+	TOKEN_ENDPOINT_AUTH_NONE,
 	verifyClientLogin,
 	verifyOperatorLogin,
 	verifySecret,
@@ -101,17 +106,44 @@ describe("issueClient", () => {
 	});
 	afterEach(() => rmUnder(path));
 
-	it("issues a client with a plaintext secret + `oh_` id", () => {
+	it("issues a confidential client (default) with a plaintext secret + `oh_` id", () => {
+		// No opts → client_credentials → confidential → a secret is minted.
 		const result = issueClient("ci", {}, path);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.value.clientId.startsWith("oh_")).toBe(true);
-		expect(result.value.plaintextSecret.length).toBeGreaterThan(0);
+		expect(result.value.plaintextSecret).toBeDefined();
+		expect(result.value.plaintextSecret!.length).toBeGreaterThan(0);
+		const record = findClient(result.value.clientId, path);
+		expect(record?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST);
+	});
+
+	it("issues a public client (authorization_code) with NO secret", () => {
+		const result = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE] }, path);
+		if (!result.ok) throw new Error("expected ok");
+		expect(result.value.plaintextSecret).toBeUndefined();
+		const record = findClient(result.value.clientId, path);
+		expect(record?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_NONE);
+		expect(record?.secretHash).toBeUndefined();
+	});
+
+	it("honors an explicit tokenEndpointAuthMethod over the grant-type inference", () => {
+		// grantTypes would infer public, but an explicit client_secret_post wins → secret minted.
+		const result = issueClient(
+			"web-conf",
+			{ grantTypes: [GRANT_AUTHORIZATION_CODE], tokenEndpointAuthMethod: TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST },
+			path,
+		);
+		if (!result.ok) throw new Error("expected ok");
+		expect(result.value.plaintextSecret).toBeDefined();
+		expect(findClient(result.value.clientId, path)?.secretHash).toBeDefined();
 	});
 
 	it("persists the hash (findable) but never the plaintext", () => {
 		const result = issueClient("ci", {}, path);
 		if (!result.ok) throw new Error("expected ok");
+		const secret = result.value.plaintextSecret;
+		if (secret === undefined) throw new Error("confidential client must mint a secret");
 
 		const record = findClient(result.value.clientId, path);
 		expect(record).toBeDefined();
@@ -119,9 +151,9 @@ describe("issueClient", () => {
 		expect(record.label).toBe("ci");
 		expect(record.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 		// The stored hash verifies the plaintext…
-		expect(verifySecret(result.value.plaintextSecret, record.secretHash)).toBe(true);
+		expect(verifySecret(secret, record.secretHash!)).toBe(true);
 		// …but the plaintext never appears in the file.
-		expect(readFileSync(path, "utf-8")).not.toContain(result.value.plaintextSecret);
+		expect(readFileSync(path, "utf-8")).not.toContain(secret);
 	});
 
 	it("returns err when the cred dir is unwritable", () => {
@@ -153,8 +185,81 @@ describe("findClient", () => {
 	it("verifies the issued secret round-trip", () => {
 		const issued = issueClient("ci", {}, path);
 		if (!issued.ok) throw new Error("expected ok");
+		const secret = issued.value.plaintextSecret;
+		if (secret === undefined) throw new Error("confidential client must mint a secret");
 		const record = findClient(issued.value.clientId, path);
-		expect(record && verifySecret(issued.value.plaintextSecret, record.secretHash)).toBe(true);
+		expect(record && verifySecret(secret, record.secretHash!)).toBe(true);
+	});
+
+	it("round-trips a public client (no secretHash) through persistence", () => {
+		// A public client has no secretHash; it must survive a write + re-read unchanged
+		// (the storage type guard no longer requires secretHash).
+		const issued = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE] }, path);
+		if (!issued.ok) throw new Error("expected ok");
+		const id = issued.value.clientId;
+		expect(issued.value.plaintextSecret).toBeUndefined();
+		const reloaded = findClient(id, path);
+		expect(reloaded?.secretHash).toBeUndefined();
+		expect(reloaded?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_NONE);
+		expect(reloaded?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+		// And listClients surfaces it (with the method, no secret material).
+		const listed = listClients(path).find((c) => c.clientId === id);
+		expect(listed?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_NONE);
+	});
+});
+
+describe("pending clients (dynamic registration)", () => {
+	let path: string;
+
+	beforeEach(() => {
+		path = tempCredPath();
+		resetPendingClients();
+	});
+	afterEach(() => {
+		rmUnder(path);
+		resetPendingClients();
+	});
+
+	it("issueClient(stage) holds the client in pending — findClient sees it, listClients does not", () => {
+		const r = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE], stage: true }, path);
+		if (!r.ok) throw new Error("expected ok");
+		const id = r.value.clientId;
+		// findClient resolves it (so /authorize + /token complete the dance).
+		expect(findClient(id, path)?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+		// But it is NOT persisted — listClients (the dashboard list) excludes it. No ghost client.
+		expect(listClients(path).find((c) => c.clientId === id)).toBeUndefined();
+		// And nothing was written to disk for it (staging never touches the cred file).
+		expect(existsSync(path)).toBe(false);
+	});
+
+	it("commitClient promotes a pending client to the persisted registry on a successful login", () => {
+		const r = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE], stage: true }, path);
+		if (!r.ok) throw new Error("expected ok");
+		const id = r.value.clientId;
+		expect(listClients(path)).toHaveLength(0);
+		expect(commitClient(id, path)).toBe(true);
+		// Now it is persisted + listed.
+		expect(listClients(path).map((c) => c.clientId)).toContain(id);
+		expect(findClient(id, path)?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+	});
+
+	it("commitClient is a no-op (false) for an already-committed or unknown client", () => {
+		expect(commitClient("oh_never", path)).toBe(false);
+		const r = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE], stage: true }, path);
+		if (!r.ok) throw new Error("expected ok");
+		expect(commitClient(r.value.clientId, path)).toBe(true);
+		// A second commit finds nothing pending → false (idempotent).
+		expect(commitClient(r.value.clientId, path)).toBe(false);
+	});
+
+	it("prunePendingClients drops a pending client once its TTL elapses", () => {
+		const r = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE], stage: true }, path);
+		if (!r.ok) throw new Error("expected ok");
+		const id = r.value.clientId;
+		expect(findClient(id, path)).toBeDefined();
+		// Fast-forward past the 10-minute TTL.
+		prunePendingClients(Date.now() + 11 * 60 * 1000);
+		expect(findClient(id, path)).toBeUndefined();
 	});
 });
 
@@ -361,6 +466,17 @@ describe("resilience", () => {
 		setCredentials("__openhammer_oauth__", { clients: JSON.stringify({ oh_legacy: legacy }) }, path);
 		const record = findClient("oh_legacy", path);
 		expect(record?.grantTypes).toEqual([GRANT_CLIENT_CREDENTIALS]);
+		// A legacy record with a stored secretHash is inferred confidential.
+		expect(record?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST);
+	});
+
+	it("infers a legacy record without a secretHash as public", () => {
+		// A pre-public-client record with no secret at all → public (none).
+		const legacy = { label: "public-old", createdAt: "2024-01-01T00:00:00.000Z", grantTypes: ["authorization_code"] };
+		setCredentials("__openhammer_oauth__", { clients: JSON.stringify({ oh_pub: legacy }) }, path);
+		const record = findClient("oh_pub", path);
+		expect(record?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_NONE);
+		expect(record?.secretHash).toBeUndefined();
 	});
 });
 
@@ -391,9 +507,12 @@ describe("authorization-code clients + login", () => {
 			path,
 		);
 		if (!issued.ok) throw new Error("expected ok");
+		expect(issued.value.plaintextSecret).toBeUndefined(); // auth-code client → public → no secret
 		const record = findClient(issued.value.clientId, path);
 		expect(record?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
 		expect(record?.redirectUris).toEqual(["https://claude.ai/api/mcp/auth_callback"]);
+		expect(record?.tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_NONE);
+		expect(record?.secretHash).toBeUndefined();
 		expect(record?.username).toBe("operator");
 		expect(record?.passwordHash).toBe(hashSecret("s3cret"));
 		// The plaintext password is never persisted.
@@ -422,11 +541,12 @@ describe("authorization-code clients + login", () => {
 		expect(verifyClientLogin(record, "anyone", "anything")).toBe(false);
 	});
 
-	it("listClients surfaces grantTypes + username (never any hash)", () => {
+	it("listClients surfaces grantTypes + tokenEndpointAuthMethod + username (never any hash)", () => {
 		issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE], username: "op", password: "pw" }, path);
 		const list = listClients(path);
 		expect(list.length).toBe(1);
 		expect(list[0].grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+		expect(list[0].tokenEndpointAuthMethod).toBe(TOKEN_ENDPOINT_AUTH_NONE);
 		expect(list[0].username).toBe("op");
 		expect("passwordHash" in list[0]).toBe(false);
 	});

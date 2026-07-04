@@ -234,3 +234,114 @@ describe("ensureServer", () => {
 		expect(child.signals).toContain("SIGKILL"); // backstop after the grace period
 	});
 });
+
+/** A spawn fake that returns a fresh child per call (records each), so a `restart`
+ * re-spawn is observable as a second `seen` entry + a second distinct child. */
+function spawnSeq(...children: FakeChild[]): ((mainPath: string, args: string[]) => ServerChild) & {
+	seen: Array<{ mainPath: string; args: string[] }>;
+} {
+	const seen: Array<{ mainPath: string; args: string[] }> = [];
+	const fn = (mainPath: string, args: string[]): ServerChild => {
+		seen.push({ mainPath, args });
+		return children[seen.length - 1] ?? children[children.length - 1];
+	};
+	return Object.assign(fn, { seen });
+}
+
+describe("ensureServer — restart", () => {
+	it("stops the running child and re-spawns a fresh one; stop() then tears down the new child", async () => {
+		const first = new FakeChild();
+		const second = new FakeChild();
+		const spawn = spawnSeq(first, second);
+		let probeCalls = 0;
+		const result = await ensureServer(config(4242), {
+			probeHealth: async () => {
+				probeCalls += 1;
+				return probeCalls > 1; // attach-check down, then ready-up for each spawn
+			},
+			spawn,
+			exists: () => true,
+			token: "tok",
+			readyIntervalMs: 1,
+		});
+		if (!result.ok) return;
+		expect(spawn.seen).toHaveLength(1);
+
+		const restartResult = await result.value.restart();
+		expect(restartResult.ok).toBe(true);
+		expect(spawn.seen).toHaveLength(2); // re-spawned
+		expect(first.signals).toContain("SIGTERM"); // the old child was stopped
+		expect(first.killed).toBe(true);
+
+		// stop() now acts on the NEW child (the mutable holder swapped) — the old one
+		// is not re-killed, the new one is.
+		const stopResult = await result.value.stop();
+		expect(stopResult.ok).toBe(true);
+		expect(second.signals).toContain("SIGTERM");
+		expect(second.killed).toBe(true);
+	});
+
+	it("preserves the launch args across a restart (a --channel is forwarded again)", async () => {
+		const first = new FakeChild();
+		const second = new FakeChild();
+		const spawn = spawnSeq(first, second);
+		let probeCalls = 0;
+		const result = await ensureServer(config(), {
+			probeHealth: async () => {
+				probeCalls += 1;
+				return probeCalls > 1;
+			},
+			spawn,
+			exists: () => true,
+			args: ["--channel", "abc"],
+			readyIntervalMs: 1,
+		});
+		if (!result.ok) return;
+		const restartResult = await result.value.restart();
+		expect(restartResult.ok).toBe(true);
+		expect(spawn.seen.map((s) => s.args)).toEqual([
+			["--channel", "abc"],
+			["--channel", "abc"],
+		]);
+	});
+
+	it("refuses to restart a server it attached to (does not own)", async () => {
+		const child = new FakeChild();
+		const spawn = spawnOf(child);
+		const result = await ensureServer(config(), {
+			probeHealth: async () => true, // already up → attach
+			spawn,
+		});
+		if (!result.ok) return;
+		expect(result.value.ownsServer).toBe(false);
+		const restartResult = await result.value.restart();
+		expect(restartResult.ok).toBe(false);
+		if (restartResult.ok) return;
+		expect(restartResult.error.message).toContain("did not start");
+		expect(spawn.seen).toEqual([]); // never spawned
+	});
+
+	it("returns err + reaps the re-spawn when it fails to become ready (server then down)", async () => {
+		const first = new FakeChild();
+		const second = new FakeChild();
+		const spawn = spawnSeq(first, second);
+		let probeCalls = 0;
+		const result = await ensureServer(config(), {
+			probeHealth: async () => {
+				probeCalls += 1;
+				return probeCalls === 2; // only the FIRST spawn's ready poll is up
+			},
+			spawn,
+			exists: () => true,
+			token: "tok",
+			readyTimeoutMs: 40,
+			readyIntervalMs: 5,
+		});
+		if (!result.ok) return;
+		const restartResult = await result.value.restart();
+		expect(restartResult.ok).toBe(false);
+		if (restartResult.ok) return;
+		expect(restartResult.error.message).toContain("did not become ready");
+		expect(second.killed).toBe(true); // the failed re-spawn is reaped
+	});
+});

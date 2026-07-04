@@ -2,9 +2,10 @@
  * OAuth client registry + jwtSecret mint (spec 20b).
  *
  * The client-credentials AS (spec 20) needs two persisted secrets: the OAuth
- * **client registry** (`id → { secretHash, label, createdAt }`) and one symmetric
- * **jwtSecret** that signs + verifies the HS256 access tokens (spec 20a). Both
- * persist to `~/.openhammer/credentials.json` (`0600`) — the spec-17e secrets store.
+ * **client registry** (`id → { label, createdAt, grantTypes, tokenEndpointAuthMethod,
+ * secretHash? }`) and one symmetric **jwtSecret** that signs + verifies the HS256
+ * access tokens (spec 20a). Both persist to `~/.openhammer/credentials.json`
+ * (`0600`) — the spec-17e secrets store.
  *
  * **Coexistence with channel secrets (the load-bearing constraint).**
  * `credentials.json` is a flat `Record<credId, Record<string,string>>` (channel
@@ -57,16 +58,37 @@ export const GRANT_CLIENT_CREDENTIALS = "client_credentials";
 /** OAuth grant type: authorization code + PKCE (browser login → code → token). */
 export const GRANT_AUTHORIZATION_CODE = "authorization_code";
 
+/**
+ * Token-endpoint auth method (RFC 9700) — how a client authenticates at `/oauth/token`.
+ * Combined with the grant type this decides whether a client is **public** (no secret —
+ * PKCE + the `/authorize` login are the authentication) or **confidential** (a minted
+ * `client_secret`, validated when sent). Dynamic registration (`/register`) reads the
+ * client's choice; the client-type picker infers it.
+ */
+export const TOKEN_ENDPOINT_AUTH_NONE = "none";
+export const TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST = "client_secret_post";
+
 /** Prefix on every OAuth client id (so a client id is never a channel UUID). */
 const CLIENT_ID_PREFIX = "oh_";
 
-/** One registered client — only the **hashes** are stored (plaintexts are shown once). */
+/**
+ * One registered client — only the **hashes** are stored (plaintexts are shown once).
+ *
+ * A client is **confidential** when {@link tokenEndpointAuthMethod} is `client_secret_post`
+ * (it then carries a {@link secretHash}); **public** when `"none"` (no secret — PKCE + the
+ * `/authorize` login authenticate it, RFC 9700). Dynamic registration + the client-type
+ * picker set the method; the field is always populated in memory ({@link normalizeRecord}
+ * infers it for legacy records), so callers can branch on it without a separate lookup.
+ */
 export interface ClientRecord {
-	secretHash: string;
 	label: string;
 	createdAt: string;
 	/** OAuth grants this client may use — `client_credentials` and/or `authorization_code`. */
 	grantTypes: string[];
+	/** Token-endpoint auth method — `none` (public) or `client_secret_post` (confidential). */
+	tokenEndpointAuthMethod: string;
+	/** Present only for confidential clients (`client_secret_post`). Absent for public clients. */
+	secretHash?: string;
 	/** Registered redirect URIs (authorization-code clients). */
 	redirectUris?: string[];
 	/** Per-client login identity (authorization-code clients with their own login). */
@@ -82,17 +104,19 @@ export interface ClientInfo {
 	createdAt: string;
 	/** OAuth grants this client may use. */
 	grantTypes: string[];
+	/** Token-endpoint auth method — `none` (public) or `client_secret_post` (confidential). */
+	tokenEndpointAuthMethod?: string;
 	/** Per-client login identity when set (never any hash). */
 	username?: string;
 	/** Registered redirect URIs (authorization-code clients). */
 	redirectUris?: string[];
 }
 
-/** A freshly issued client — the plaintext secret is returned ONCE. */
+/** A freshly issued client — the plaintext secret is returned ONCE (absent for public clients). */
 export interface IssuedClient {
 	clientId: string;
-	/** Plaintext secret — shown once at issue; only the hash is persisted. */
-	plaintextSecret: string;
+	/** Plaintext secret — shown once at issue; only the hash is persisted. `undefined` for public clients. */
+	plaintextSecret?: string;
 }
 
 /** The persisted registry shape (id → record), serialized into the `clients` bag key. */
@@ -140,12 +164,16 @@ function isStringArray(v: unknown): v is string[] {
  * The on-disk shape of one client: `grantTypes` may be absent on legacy records
  * (issued before the authorization-code grant existed) — {@link normalizeRecord}
  * fills the `client_credentials` default so a v1 client keeps working unchanged.
+ * `secretHash`/`tokenEndpointAuthMethod` may both be absent on legacy records issued
+ * before public clients existed; {@link normalizeRecord} infers the method so every
+ * in-memory {@link ClientRecord} carries one.
  */
 interface StoredClientRecord {
-	secretHash: string;
 	label: string;
 	createdAt: string;
 	grantTypes?: string[];
+	tokenEndpointAuthMethod?: string;
+	secretHash?: string;
 	redirectUris?: string[];
 	username?: string;
 	passwordHash?: string;
@@ -157,10 +185,11 @@ type StoredRegistry = Record<string, StoredClientRecord>;
 /** Type guard for one stored client record (hand-narrowed; no `as`). */
 function isStoredClientRecord(v: unknown): v is StoredClientRecord {
 	if (typeof v !== "object" || v === null) return false;
-	if (!("secretHash" in v) || typeof v.secretHash !== "string") return false;
 	if (!("label" in v) || typeof v.label !== "string") return false;
 	if (!("createdAt" in v) || typeof v.createdAt !== "string") return false;
 	if ("grantTypes" in v && !isStringArray(v.grantTypes)) return false;
+	if ("tokenEndpointAuthMethod" in v && typeof v.tokenEndpointAuthMethod !== "string") return false;
+	if ("secretHash" in v && typeof v.secretHash !== "string") return false;
 	if ("redirectUris" in v && !isStringArray(v.redirectUris)) return false;
 	if ("username" in v && typeof v.username !== "string") return false;
 	if ("passwordHash" in v && typeof v.passwordHash !== "string") return false;
@@ -176,16 +205,22 @@ function isStoredRegistry(v: unknown): v is StoredRegistry {
 /**
  * Normalize a stored record into a {@link ClientRecord}: legacy records with no
  * `grantTypes` default to `["client_credentials"]` (the v1 behavior), so an existing
- * client keeps working after the upgrade. Optional fields are dropped when empty so
- * the re-written registry stays minimal.
+ * client keeps working after the upgrade. The token-endpoint auth method is inferred
+ * for legacy records (a stored `secretHash` ⇒ confidential `client_secret_post`;
+ * none ⇒ public `none`) so every in-memory record carries one. Optional fields are
+ * dropped when empty so the re-written registry stays minimal.
  */
 function normalizeRecord(rec: StoredClientRecord): ClientRecord {
+	const grantTypes = rec.grantTypes && rec.grantTypes.length > 0 ? [...rec.grantTypes] : [GRANT_CLIENT_CREDENTIALS];
 	const record: ClientRecord = {
-		secretHash: rec.secretHash,
 		label: rec.label,
 		createdAt: rec.createdAt,
-		grantTypes: rec.grantTypes && rec.grantTypes.length > 0 ? [...rec.grantTypes] : [GRANT_CLIENT_CREDENTIALS],
+		grantTypes,
+		tokenEndpointAuthMethod:
+			rec.tokenEndpointAuthMethod ??
+			(rec.secretHash !== undefined ? TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST : TOKEN_ENDPOINT_AUTH_NONE),
 	};
+	if (rec.secretHash !== undefined) record.secretHash = rec.secretHash;
 	if (rec.redirectUris && rec.redirectUris.length > 0) record.redirectUris = [...rec.redirectUris];
 	if (typeof rec.username === "string" && rec.username !== "") record.username = rec.username;
 	if (typeof rec.passwordHash === "string" && rec.passwordHash !== "") record.passwordHash = rec.passwordHash;
@@ -240,8 +275,75 @@ function toError(e: unknown): Error {
 	return e instanceof Error ? e : new Error(String(e));
 }
 
+// ── Pending (dynamically-registered, not-yet-authorized) clients ───────────────
+
+/**
+ * How long a dynamically-registered client stays "pending" (registered but not yet
+ * authorized by a login). Mirrors the auth-code lifetime — a client whose registration is
+ * never followed by a login evaporates, so the client re-registers cleanly on next connect
+ * (no accumulating ghost records).
+ */
+const PENDING_CLIENT_TTL_MS = 10 * 60 * 1000;
+
+interface PendingClient {
+	record: ClientRecord;
+	expiresAt: number;
+}
+
+/**
+ * In-memory pending clients: registered via `/register` ({@link issueClient} `stage:true`)
+ * but not yet authorized by an `/authorize` login. Single-instance, like the auth-code stores
+ * in `auth-code.ts`. **Not persisted** — never surfaced by {@link listClients} (so the
+ * dashboard shows no "ghost" clients from abandoned registrations); {@link findClient}
+ * resolves them so the OAuth dance completes; {@link commitClient} promotes a pending client
+ * to the persisted registry on a successful login.
+ */
+const pendingClients = new Map<string, PendingClient>();
+
+/** Drop expired pending clients (best-effort hygiene; returns the count removed). */
+export function prunePendingClients(now: number = Date.now()): number {
+	let removed = 0;
+	for (const [id, pending] of pendingClients) {
+		if (pending.expiresAt < now) {
+			pendingClients.delete(id);
+			removed++;
+		}
+	}
+	return removed;
+}
+
+/** Reset the pending store (test/operational hygiene — mirrors `resetAuthCodeStores`). */
+export function resetPendingClients(): void {
+	pendingClients.clear();
+}
+
+/**
+ * Promote a pending (dynamically-registered, not-yet-authorized) client to the persisted
+ * registry. Called when the `/authorize` login succeeds, so a client record is created ONLY
+ * when the operator has authenticated the registration — abandoned registrations never reach
+ * disk. Best-effort: a write failure leaves the client pending ({@link findClient} still
+ * resolves it for the in-flight exchange) and returns `false`. Returns `false` when the id is
+ * not pending (already committed, or never staged).
+ */
+export function commitClient(clientId: string, path: string = credentialsPath()): boolean {
+	const pending = pendingClients.get(clientId);
+	if (pending === undefined) return false;
+	const state = readState(path);
+	state.clients[clientId] = pending.record;
+	try {
+		writeState(state, path);
+	} catch {
+		return false; // leave pending — findClient still resolves it for the in-flight exchange
+	}
+	pendingClients.delete(clientId);
+	return true;
+}
+
 /** Look up a client by id. `undefined` when absent — used by `/oauth/token`. */
 export function findClient(clientId: string, path: string = credentialsPath()): ClientRecord | undefined {
+	prunePendingClients();
+	const pending = pendingClients.get(clientId);
+	if (pending !== undefined) return pending.record;
 	const clients = readState(path).clients;
 	return Object.hasOwn(clients, clientId) ? clients[clientId] : undefined;
 }
@@ -251,7 +353,13 @@ export function listClients(path: string = credentialsPath()): ClientInfo[] {
 	const clients = readState(path).clients;
 	return Object.entries(clients)
 		.map(([clientId, r]) => {
-			const info: ClientInfo = { clientId, label: r.label, createdAt: r.createdAt, grantTypes: r.grantTypes };
+			const info: ClientInfo = {
+				clientId,
+				label: r.label,
+				createdAt: r.createdAt,
+				grantTypes: r.grantTypes,
+				tokenEndpointAuthMethod: r.tokenEndpointAuthMethod,
+			};
 			if (r.username !== undefined) info.username = r.username;
 			if (r.redirectUris !== undefined) info.redirectUris = r.redirectUris;
 			return info;
@@ -269,35 +377,70 @@ export interface IssueClientOptions {
 	username?: string;
 	/** Plaintext per-client login password — hashed before store; never persisted. */
 	password?: string;
+	/**
+	 * Token-endpoint auth method: `"none"` (public — no secret; PKCE + the `/authorize`
+	 * login authenticate) or `"client_secret_post"` (confidential — mints a `client_secret`
+	 * whose hash is stored). `undefined` → inferred from {@link grantTypes}
+	 * (`client_credentials` ⇒ confidential, else public) so legacy callers keep working.
+	 * Defaulting to public (not the RFC's `client_secret_basic`) is deliberate: this server
+	 * only advertises `none`/`client_secret_post` and MCP clients are public-by-default.
+	 */
+	tokenEndpointAuthMethod?: string;
+	/**
+	 * Hold the new client in the in-memory **pending** store instead of persisting it — for
+	 * Dynamic Client Registration (`/register`), so a dynamically-registered client is only
+	 * persisted once the operator authorizes it at `/authorize` ({@link commitClient}). Manual
+	 * `add-client` omits this (persists immediately — operator-intentional). Default `false`.
+	 */
+	stage?: boolean;
 }
 
 /**
- * Issue a new client: mint id + plaintext secret, persist the hash, and return the
- * plaintext **once** (it is never stored). `opts` selects the grant type(s) and, for
- * authorization-code clients, the redirect URIs + optional per-client login. A
- * username without a password is stored without a `passwordHash` (so it cannot log
- * in); the wizard enforces both together. `err` only on a write failure (the
- * throwing persistence boundary wrapped into the Result spine).
+ * Issue a new client: mint id, persist only the hashes, and return the plaintext secret
+ * **once** (it is never stored). A **confidential** client (`client_secret_post`) gets a
+ * minted `client_secret`; a **public** client (`none`) gets none — PKCE + the `/authorize`
+ * login authenticate it. `opts` selects the grant type(s) + auth method, and for
+ * authorization-code clients the redirect URIs + optional per-client login. A username
+ * without a password is stored without a `passwordHash` (so it cannot log in); the wizard
+ * enforces both together. `err` only on a write failure (the throwing persistence boundary
+ * wrapped into the Result spine).
  */
 export function issueClient(
 	label: string,
 	opts: IssueClientOptions = {},
 	path: string = credentialsPath(),
 ): Result<IssuedClient, Error> {
-	const state = readState(path);
 	const clientId = newClientId();
-	const plaintextSecret = newClientSecret();
+	const grantTypes = opts.grantTypes && opts.grantTypes.length > 0 ? [...opts.grantTypes] : [GRANT_CLIENT_CREDENTIALS];
+	const tokenEndpointAuthMethod =
+		opts.tokenEndpointAuthMethod ??
+		// Infer for callers that don't say: client_credentials has no PKCE/redirect step to
+		// substitute for a secret, so it is confidential; authorization_code is public.
+		(grantTypes.includes(GRANT_CLIENT_CREDENTIALS)
+			? TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST
+			: TOKEN_ENDPOINT_AUTH_NONE);
+	const confidential = tokenEndpointAuthMethod === TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST;
+	const plaintextSecret = confidential ? newClientSecret() : undefined;
 	const record: ClientRecord = {
-		secretHash: hashSecret(plaintextSecret),
 		label,
 		createdAt: new Date().toISOString(),
-		grantTypes: opts.grantTypes && opts.grantTypes.length > 0 ? [...opts.grantTypes] : [GRANT_CLIENT_CREDENTIALS],
+		grantTypes,
+		tokenEndpointAuthMethod,
 	};
+	if (confidential && plaintextSecret !== undefined) record.secretHash = hashSecret(plaintextSecret);
 	if (opts.redirectUris && opts.redirectUris.length > 0) record.redirectUris = [...opts.redirectUris];
 	if (typeof opts.username === "string" && opts.username.trim() !== "") {
 		record.username = opts.username.trim();
 		if (typeof opts.password === "string" && opts.password !== "") record.passwordHash = hashSecret(opts.password);
 	}
+	if (opts.stage === true) {
+		// Dynamic registration: hold the record in memory, NOT persisted. It is invisible to
+		// listClients (no ghost client in the dashboard) but findClient resolves it so the OAuth
+		// dance completes; commitClient promotes it to disk on a successful /authorize login.
+		pendingClients.set(clientId, { record, expiresAt: Date.now() + PENDING_CLIENT_TTL_MS });
+		return ok({ clientId, plaintextSecret });
+	}
+	const state = readState(path);
 	state.clients[clientId] = record;
 	try {
 		writeState(state, path);

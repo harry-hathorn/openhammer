@@ -174,8 +174,8 @@ export function createBinaryCheck(
 
 /**
  * The per-channel check. A **live** channel's provider must be `isAvailable`
- * (its binary present on PATH — `cloudflared` for cloudflare, `ngrok` for ngrok;
- * a future live provider may instead gate on a secret); a **static** channel's
+ * (its gate satisfied — a binary on PATH for `cloudflared`, or a secret for `ngrok`,
+ * whose in-process `@ngrok/ngrok` SDK needs no binary); a **static** channel's
  * declared endpoint must be `probe`-reachable. The full options bag merges the
  * entry's non-secret `options` with its secrets (`getCredentials`) so a
  * secret-gated `isAvailable` (or a `probe`) sees its values.
@@ -202,7 +202,7 @@ export function createChannelCheck(
 					? { status: "pass", message: `channel ${entry.id} (${entry.kind}): ready` }
 					: {
 							status: "warn",
-							message: `channel ${entry.id} (${entry.kind}): not available (missing binary or secret)`,
+							message: `channel ${entry.id} (${entry.kind}): not available (missing credentials or binary)`,
 						};
 			}
 			// static → probe the operator's declared endpoint (no `start` to run).

@@ -54,6 +54,10 @@ describe("DashboardStore — mutators", () => {
 		s.setOauthClients(clients);
 		expect(s.oauthClients).toBe(clients);
 
+		expect(s.loginConfigured).toBe(false); // defaults unset
+		s.setLoginConfigured(true);
+		expect(s.loginConfigured).toBe(true);
+
 		const ch: ChannelEntry = { id: "c1", kind: "ngrok", mode: "live", options: {} };
 		s.setSettings(settingsWith([ch]));
 		expect(s.channels).toEqual([ch]);

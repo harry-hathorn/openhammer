@@ -88,6 +88,8 @@ export class DashboardStore {
 	readonly channelState: Record<string, ChannelLiveState> = {};
 	/** Registered OAuth clients snapshot (id + label + createdAt; no secrets). */
 	oauthClients: ClientInfo[] = [];
+	/** Whether the global operator login is configured (the `/authorize` gate for login clients). */
+	loginConfigured = false;
 
 	/** The connected-client reducer (call counts + last-seen), reused from monitor. */
 	private readonly monitor: MonitorState;
@@ -141,6 +143,11 @@ export class DashboardStore {
 	/** Snapshot the registered OAuth clients (on Clients-screen open / after issue or remove). */
 	setOauthClients(clients: ClientInfo[]): void {
 		this.oauthClients = clients;
+	}
+
+	/** Update the operator-login-configured flag (after `set-login` or on construction). */
+	setLoginConfigured(value: boolean): void {
+		this.loginConfigured = value;
 	}
 
 	/**

@@ -119,6 +119,13 @@ describe("formatSecretReveal", () => {
 		expect(text).toContain("Issued OAuth client.");
 		expect(text).not.toContain('client "');
 	});
+
+	it("renders a public client (no secret) without a client_secret line", () => {
+		const text = formatSecretReveal({ clientId: "oh_pub" }, "web");
+		expect(text).toContain("client_id:     oh_pub");
+		expect(text).not.toContain("client_secret:");
+		expect(text).toContain("Public client");
+	});
 });
 
 describe("formatClientList", () => {
@@ -410,32 +417,28 @@ describe("authCommand — routing", () => {
 	});
 });
 
-describe("authCommand — add-client (authorization code)", () => {
-	it("issues an auth-code client with redirect URIs + a per-client login (interactive)", async () => {
+describe("authCommand — add-client (interactive is machine-only)", () => {
+	it("issues a machine client interactively; the authorization-code type is not offered", async () => {
 		const { path, cleanup } = tempCredPath();
 		try {
-			const prompt = fakeFullIo({
-				texts: ["web", "https://claude.ai/api/mcp/auth_callback", "op"],
-				selects: ["authorization_code"],
-				passwords: ["pw"],
-			});
+			// A queued `authorization_code` select is never consumed — the interactive wizard is
+			// label-only (login clients connect dynamically + authenticate via the operator login).
+			const prompt = fakeFullIo({ texts: ["bot"], selects: ["authorization_code"] });
 			const { io, out } = recordingIo();
 			const code = await authCommand("add-client", [], io, { io: prompt, credPath: path });
 			expect(code).toBe(0);
 
 			const listed = listClients(path);
 			expect(listed).toHaveLength(1);
-			expect(listed[0]?.grantTypes).toEqual(["authorization_code"]);
-			expect(listed[0]?.username).toBe("op");
-			expect(listed[0]?.redirectUris).toEqual(["https://claude.ai/api/mcp/auth_callback"]);
-			// The interactive path always reveals the secret once.
+			expect(listed[0]?.grantTypes).toEqual(["client_credentials"]);
+			// A machine client is confidential — a secret is minted + revealed once.
 			expect(out()).toContain("client_secret:");
 		} finally {
 			cleanup();
 		}
 	});
 
-	it("`--type authorization_code` issues an auth-code client non-interactively", async () => {
+	it("`--type authorization_code` still issues an auth-code client (the flag escape hatch)", async () => {
 		const { path, cleanup } = tempCredPath();
 		try {
 			const { io } = recordingIo();

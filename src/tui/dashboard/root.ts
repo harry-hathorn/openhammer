@@ -40,6 +40,7 @@ import {
 	renderFieldRows,
 	renderList,
 	type ScreenSpec,
+	SET_LOGIN_LABEL,
 	settingsItems,
 	titleLine,
 } from "./screens.ts";
@@ -79,6 +80,8 @@ export interface DashboardActions {
 	useChannel(id: string): Promise<Result<Settings, Error> | null>;
 	/** `auth remove <id>`. */
 	removeClient(id: string): Promise<Result<void, Error> | null>;
+	/** `auth set-login` — set the operator login (the `/authorize` gate for login clients). */
+	setLogin(): Promise<Result<void, Error> | null>;
 	/** `doctor`. Returns the report text ("" if it could not run). */
 	runDoctor(): Promise<string>;
 	/** Quit the dashboard (stops the render loop; `runDashboard`'s `onQuit` stops the server). */
@@ -99,7 +102,8 @@ export interface DashboardRootDeps {
 /** The one-time secret reveal held until the user leaves the Clients screen. */
 interface SecretReveal {
 	clientId: string;
-	plaintext: string;
+	/** Present only for a confidential client (public clients mint no secret). */
+	plaintext?: string;
 }
 
 /**
@@ -204,10 +208,18 @@ export class DashboardRoot implements Component {
 		}
 	}
 
-	/** The Clients-screen header: the one-time secret reveal (if any) above the list. */
+	/**
+	 * The Clients-screen header: the operator-login status (the gate login clients authenticate
+	 * against — always visible so an unset login is obvious), then the one-time secret reveal
+	 * for a freshly issued machine client (if any).
+	 */
 	private clientsHeader(): string[] {
-		if (this.reveal === null) return [];
-		return secretRevealRows(this.reveal.clientId, this.reveal.plaintext);
+		const login = this.store.loginConfigured
+			? this.style.accent("operator login: set")
+			: this.style.warning("operator login: NOT SET — login clients cannot connect");
+		const lines = ["", login, ""];
+		if (this.reveal !== null) lines.push(...secretRevealRows(this.reveal.clientId, this.reveal.plaintext));
+		return lines;
 	}
 
 	/** Render the active screen: banner + title + header pinned at the TOP, the focused
@@ -357,6 +369,12 @@ export class DashboardRoot implements Component {
 			return;
 		}
 		if (section === "clients") {
+			if (label === SET_LOGIN_LABEL) {
+				const result = await this.actions.setLogin();
+				if (result === null) return; // cancelled — silent
+				this.flashMessage = result.ok ? "Operator login set." : result.error.message;
+				return;
+			}
 			if (label.startsWith(ISSUE_CLIENT_MARKER)) {
 				const result = await this.actions.issueClient();
 				if (result?.ok) {
@@ -367,7 +385,9 @@ export class DashboardRoot implements Component {
 				}
 				return;
 			}
-			const row = clientRows(this.store.oauthClients)[this.focus];
+			// A client row. The list is [Set-login, ...clients, Issue] — the Set-login row is
+			// always first, so the focused client's index into clientRows is `focus - 1`.
+			const row = clientRows(this.store.oauthClients)[this.focus - 1];
 			if (row) {
 				this.reveal = null;
 				this.screen = { kind: "client-detail", id: row.clientId };

@@ -28,17 +28,27 @@
  * in the operator's shell rather than corrupting the dashboard screen.
  */
 import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
-import { type ClientInfo, type IssuedClient, issueClient, listClients, removeClient } from "../auth/oauth/clients.ts";
+import {
+	type ClientInfo,
+	hasOperatorLogin,
+	type IssuedClient,
+	issueClient,
+	listClients,
+	removeClient,
+	setOperatorLogin,
+} from "../auth/oauth/clients.ts";
 import { credentialsPath } from "../config/credentials.ts";
 import { type Settings, saveSettings, settingsPath } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
+import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { BannerStream } from "./banner.ts";
 import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
 import { type DashboardActions, DashboardRoot } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
+import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
@@ -94,6 +104,16 @@ export interface DashboardDeps {
 	persist?: (settings: Settings) => void;
 	/** Shutdown hook (19e stops the server child). Best-effort — a throw is logged, not fatal. */
 	onQuit?: () => void | Promise<void>;
+	/**
+	 * Restart the server child so a fresh boot picks up a config change the running
+	 * child resolved once at boot — chiefly a new `defaultChannel` set from the
+	 * dashboard (so adding a channel launches it live, no manual relaunch). The CLI
+	 * layer wires this to {@link ServerControl.restart}; the dashboard calls it only
+	 * when a mutation changes `defaultChannel` (a non-default add does not drop the
+	 * active tunnel). Omit for a hermetic dashboard with no server (tests) — the
+	 * actions then persist the change but skip the restart.
+	 */
+	restartServer?: () => Promise<Result<void, Error>>;
 }
 
 /**
@@ -118,6 +138,7 @@ export async function runDashboard(deps: DashboardDeps): Promise<void> {
 		}
 	}
 	store.setOauthClients(listClientsSafe(credPath));
+	store.setLoginConfigured(hasOperatorLogin(credPath));
 
 	const persist =
 		deps.persist ??
@@ -237,13 +258,40 @@ function buildActions(
 		}
 	};
 
+	/**
+	 * Restart the server when a mutation changed `defaultChannel`, so the fresh boot
+	 * raises/lowers the active channel live — adding the first channel launches it,
+	 * switching default switches the tunnel, removing the active channel falls back
+	 * to localhost-only. A non-default add/remove leaves `defaultChannel` unchanged,
+	 * so the active tunnel is NOT dropped for an unrelated change. The stale tunnel
+	 * URL is cleared for the restart window; the new boot's channel-state restores it
+	 * (the status-socket subscriber reconnects on its own). No-op when no
+	 * `restartServer` is wired (hermetic dashboard / no server) — the change still
+	 * persists. The spinner runs inside `withModal` so the operator sees the restart.
+	 */
+	const restartIfDefaultChanged = async (before: Settings, after: Settings): Promise<void> => {
+		if (before.defaultChannel === after.defaultChannel) return;
+		const restart = deps.restartServer;
+		if (!restart) return;
+		store.setStatus({ ...store.status, publicUrl: null });
+		await withModal(() =>
+			runSpinner(
+				"Restarting server to apply the channel…",
+				() => restart(),
+				(r) => (r.ok ? "server restarted" : `restart failed: ${r.error.message}`),
+			),
+		);
+	};
+
 	const addChannelAction: DashboardActions["addChannel"] =
 		overrides.addChannel ??
 		(async () => {
-			const result = await withModal(() => addChannel(store.settings, { io, stream: silentStream }));
+			const before = store.settings;
+			const result = await withModal(() => addChannel(before, { io, stream: silentStream }));
 			if (result?.ok) {
 				persist(result.value);
 				store.setSettings(result.value);
+				await restartIfDefaultChanged(before, result.value);
 			}
 			return result;
 		});
@@ -251,10 +299,12 @@ function buildActions(
 	const editSettingsAction: DashboardActions["editSettings"] =
 		overrides.editSettings ??
 		(async () => {
-			const result = await withModal(() => setSection(store.settings, { io, stream: silentStream }));
+			const before = store.settings;
+			const result = await withModal(() => setSection(before, { io, stream: silentStream }));
 			if (result?.ok) {
 				persist(result.value);
 				store.setSettings(result.value);
+				await restartIfDefaultChanged(before, result.value);
 			}
 			return result;
 		});
@@ -262,9 +312,10 @@ function buildActions(
 	const issueClientAction: DashboardActions["issueClient"] =
 		overrides.issueClient ??
 		(async () => {
-			// The full add-client sequence (label → type →, for auth-code, redirect URIs
-			// + optional login) runs on the dashboard's shared terminal (clean stdin
-			// handoff — no second terminal). The issue itself is a sync domain call.
+			// The add-client prompt (a label) runs on the dashboard's shared terminal (clean
+			// stdin handoff — no second terminal). The wizard issues a machine
+			// (client_credentials) client; login clients are not created manually. The issue
+			// itself is a sync domain call.
 			ctx.renderer?.suspend();
 			let config: Awaited<ReturnType<typeof collectClientConfig>>;
 			try {
@@ -281,10 +332,12 @@ function buildActions(
 	const removeChannelAction: DashboardActions["removeChannel"] =
 		overrides.removeChannel ??
 		(async (id: string) => {
-			const result = removeChannelOp(store.settings, id);
+			const before = store.settings;
+			const result = removeChannelOp(before, id);
 			if (result.ok) {
 				persist(result.value);
 				store.setSettings(result.value);
+				await restartIfDefaultChanged(before, result.value);
 			}
 			return result;
 		});
@@ -292,10 +345,12 @@ function buildActions(
 	const useChannelAction: DashboardActions["useChannel"] =
 		overrides.useChannel ??
 		(async (id: string) => {
-			const result = setDefaultChannel(store.settings, id);
+			const before = store.settings;
+			const result = setDefaultChannel(before, id);
 			if (result.ok) {
 				persist(result.value);
 				store.setSettings(result.value);
+				await restartIfDefaultChanged(before, result.value);
 			}
 			return result;
 		});
@@ -313,6 +368,34 @@ function buildActions(
 		return withModal(() => runner());
 	};
 
+	// `setLogin` mirrors the CLI `auth set-login`: prompt username + password, call
+	// `setOperatorLogin`, and refresh `store.loginConfigured` so the Clients screen reflects
+	// it next frame. This is the gate login (authorization-code) clients authenticate against
+	// at `/authorize` — surfacing it in the dashboard (it was CLI-only) is the root-cause fix
+	// for "I added an auth-code client but Claude's login failed."
+	const setLoginAction: DashboardActions["setLogin"] =
+		overrides.setLogin ??
+		(async () => {
+			const creds = await withModal(async () => {
+				const username = await io.text({ message: "Operator username" });
+				if (username === null) return null;
+				const password = await io.password({ message: "Operator password" });
+				if (password === null) return null;
+				return { username, password };
+			});
+			if (creds === null) return null; // cancelled — silent
+			if (creds.username.trim() === "" || creds.password === "") {
+				return err(new Error("Username and password are required"));
+			}
+			try {
+				setOperatorLogin(creds.username.trim(), creds.password, credPath);
+			} catch (e) {
+				return err(e instanceof Error ? e : new Error(String(e)));
+			}
+			store.setLoginConfigured(true);
+			return ok(undefined);
+		});
+
 	// `quit` is assigned by runDashboard (it owns the lifecycle/`onQuit`); a placeholder
 	// here satisfies the interface so the root can be constructed before that wiring.
 	const actions: DashboardActions = {
@@ -322,6 +405,7 @@ function buildActions(
 		removeChannel: removeChannelAction,
 		useChannel: useChannelAction,
 		removeClient: removeClientAction,
+		setLogin: setLoginAction,
 		runDoctor: runDoctorAction,
 		quit: () => {},
 	};

@@ -214,39 +214,98 @@ export function buildLoginForm(p: LoginFormParams): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenHammer — Sign In</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#06090F">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
-    .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 100%; max-width: 360px; }
-    h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; color: #f0f6fc; }
-    .subtitle { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
-    .subtitle strong { color: #58a6ff; }
-    label { display: block; font-size: 12px; font-weight: 500; color: #8b949e; margin-bottom: 6px; }
-    input[type=text], input[type=password] { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px; color: #c9d1d9; font-size: 14px; outline: none; margin-bottom: 14px; }
-    input:focus { border-color: #58a6ff; box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2); }
-    button { width: 100%; background: #238636; border: none; border-radius: 6px; padding: 10px; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
-    button:hover { background: #2ea043; }
-    .error { color: #f85149; font-size: 13px; margin-bottom: 12px; }
+    :root{
+      --night:#06090F; --stone:#0D131D; --stone-2:#121A26; --seam:#1E2A3A;
+      --moon:#EAF2FA; --mist:#8DA0B6; --ithil:#A8DCFF; --ithil-deep:#4FA8E8; --ithil-dim:#2C5F8A;
+      --warn:#FFB454; --warn-deep:#B3651F;
+      --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+      --sans:'IBM Plex Sans',system-ui,sans-serif;
+      --disp:'Bricolage Grotesque',var(--sans);
+      --glow-sm:0 0 6px rgba(168,220,255,.85),0 0 18px rgba(79,168,232,.45);
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:var(--sans); color:var(--moon); background:var(--night);
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      padding:32px 20px; position:relative; overflow:hidden;
+    }
+    body::before{
+      content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+      background:
+        radial-gradient(720px 380px at 50% -10%, rgba(79,168,232,.16), transparent 62%),
+        radial-gradient(420px 260px at 50% 120%, rgba(79,168,232,.06), transparent 65%);
+    }
+    .card{
+      position:relative; z-index:1; width:100%; max-width:380px;
+      background:var(--stone); border:1px solid var(--ithil-dim);
+      padding:34px 32px 30px;
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,.5),
+        0 0 22px rgba(79,168,232,.20),
+        0 0 70px rgba(79,168,232,.10),
+        0 30px 60px -30px rgba(0,0,0,.8);
+      animation:breathe 6s ease-in-out infinite;
+    }
+    @keyframes breathe{
+      0%,100%{box-shadow:0 0 0 1px rgba(0,0,0,.5),0 0 22px rgba(79,168,232,.20),0 0 70px rgba(79,168,232,.10),0 30px 60px -30px rgba(0,0,0,.8)}
+      50%{box-shadow:0 0 0 1px rgba(0,0,0,.5),0 0 30px rgba(79,168,232,.32),0 0 95px rgba(79,168,232,.16),0 30px 60px -30px rgba(0,0,0,.8)}
+    }
+    .brand{display:flex; align-items:center; gap:12px; margin-bottom:22px}
+    .rune-mark{
+      font-family:var(--mono); font-size:13px; letter-spacing:.35em;
+      color:var(--ithil); text-shadow:var(--glow-sm);
+      border:1px solid var(--ithil-dim); padding:5px 8px 5px 13px; background:var(--stone-2);
+    }
+    .brand b{font-family:var(--disp); font-weight:800; font-size:17px; letter-spacing:.04em; color:var(--moon)}
+    .subtitle{font-size:14px; color:var(--mist); line-height:1.5; margin-bottom:22px}
+    .subtitle strong{color:var(--ithil); font-weight:600; text-shadow:var(--glow-sm)}
+    .error{
+      font-family:var(--mono); font-size:12.5px; color:var(--warn);
+      border-left:2px solid var(--warn-deep); background:rgba(255,180,84,.06);
+      padding:8px 12px; margin-bottom:18px;
+    }
+    label{display:block; font-family:var(--mono); font-size:11.5px; letter-spacing:.08em; color:var(--mist); margin-bottom:7px}
+    input[type=text],input[type=password]{
+      width:100%; background:var(--night); border:1px solid var(--seam);
+      padding:11px 13px; color:var(--moon); font-family:var(--mono); font-size:13.5px;
+      outline:none; margin-bottom:18px; transition:border-color .15s, box-shadow .15s;
+    }
+    input:focus{border-color:var(--ithil-deep); box-shadow:0 0 0 3px rgba(79,168,232,.18)}
+    button{
+      width:100%; font-family:var(--mono); font-size:13px; letter-spacing:.06em;
+      color:var(--ithil); background:var(--stone-2); border:1px solid var(--ithil-dim);
+      padding:11px; cursor:pointer; transition:border-color .15s, box-shadow .15s, text-shadow .15s;
+    }
+    button:hover{border-color:var(--ithil-deep); box-shadow:0 0 14px rgba(79,168,232,.3); text-shadow:var(--glow-sm)}
+    .foot{margin-top:20px; text-align:center; font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; color:var(--ithil-dim)}
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>OpenHammer</h1>
+  <form class="card" method="POST" action="/oauth/authorize">
+    <div class="brand">
+      <span class="rune-mark">ᚦᛟᚱᛞᚱᛟ</span>
+      <b>OPENHAMMER</b>
+    </div>
     <p class="subtitle">Sign in to grant access to <strong>${escapeHtml(p.clientName)}</strong></p>
     ${p.errorHtml}
-    <form method="POST" action="/oauth/authorize">
-      <input type="hidden" name="client_id" value="${escapeHtml(p.clientId)}">
-      <input type="hidden" name="redirect_uri" value="${escapeHtml(p.redirectUri)}">
-      <input type="hidden" name="state" value="${escapeHtml(p.state)}">
-      <input type="hidden" name="code_challenge" value="${escapeHtml(p.codeChallenge)}">
-      <input type="hidden" name="code_challenge_method" value="S256">
-      <label for="username">Username</label>
-      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" autocomplete="current-password" required>
-      <button type="submit">Sign In</button>
-    </form>
-  </div>
+    <input type="hidden" name="client_id" value="${escapeHtml(p.clientId)}">
+    <input type="hidden" name="redirect_uri" value="${escapeHtml(p.redirectUri)}">
+    <input type="hidden" name="state" value="${escapeHtml(p.state)}">
+    <input type="hidden" name="code_challenge" value="${escapeHtml(p.codeChallenge)}">
+    <input type="hidden" name="code_challenge_method" value="S256">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit">Sign In</button>
+    <p class="foot">EVERY CONNECTION AUTHENTICATED</p>
+  </form>
 </body>
 </html>`;
 }
