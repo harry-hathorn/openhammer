@@ -8,7 +8,13 @@
  * (`src/tui/` must not import `src/cli/`). The CLI also rebuilds this config from
  * flags on its non-interactive path (spec 20g) via {@link clientConfigFromFlags}.
  */
-import { GRANT_AUTHORIZATION_CODE, GRANT_CLIENT_CREDENTIALS, type IssueClientOptions } from "../auth/oauth/clients.ts";
+import {
+	GRANT_AUTHORIZATION_CODE,
+	GRANT_CLIENT_CREDENTIALS,
+	type IssueClientOptions,
+	TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST,
+	TOKEN_ENDPOINT_AUTH_NONE,
+} from "../auth/oauth/clients.ts";
 import type { PromptIo } from "./prompts.ts";
 
 /** The collected client config — the plaintext password is hashed by `issueClient`. */
@@ -23,9 +29,20 @@ export interface ClientConfig {
 	password?: string;
 }
 
-/** Convert a {@link ClientConfig} into the {@link IssueClientOptions} `issueClient` reads. */
+/**
+ * Convert a {@link ClientConfig} into the {@link IssueClientOptions} `issueClient` reads.
+ * The client-type choice decides the token-endpoint auth method: a machine
+ * (`client_credentials`) client is **confidential** (no browser redirect/PKCE to stand in
+ * for a secret), an authorization-code client is **public** (PKCE + the `/authorize` login
+ * authenticate it). This intentionally forecloses a "confidential authorization-code
+ * client" (a server-side web app) — not the MCP use case; such a client registers directly
+ * via `/register` with `token_endpoint_auth_method: "client_secret_post"`.
+ */
 export function toIssueOptions(config: ClientConfig): IssueClientOptions {
-	const opts: IssueClientOptions = { grantTypes: config.grantTypes };
+	const tokenEndpointAuthMethod = config.grantTypes.includes(GRANT_CLIENT_CREDENTIALS)
+		? TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST
+		: TOKEN_ENDPOINT_AUTH_NONE;
+	const opts: IssueClientOptions = { grantTypes: config.grantTypes, tokenEndpointAuthMethod };
 	if (config.redirectUris !== undefined) opts.redirectUris = config.redirectUris;
 	if (config.username !== undefined) opts.username = config.username;
 	if (config.password !== undefined) opts.password = config.password;
@@ -79,47 +96,18 @@ export function clientConfigFromFlags(flags: ClientConfigFlags): ClientConfig {
 }
 
 /**
- * Prompt the client config step by step via `io`. Resolves to the config, or `null`
- * the moment any prompt is cancelled. For an authorization-code client, collects the
- * redirect URIs + an optional per-client login (username + password); a blank
- * username means the client authenticates against the global operator login instead.
+ * Prompt the client config step by step via `io`. Resolves to the config, or `null` the
+ * moment the prompt is cancelled.
+ *
+ * The interactive wizard issues a **machine** (`client_credentials`) client — the kind with a
+ * `client_secret` a script or service presents at `/oauth/token`. Login (`authorization_code`)
+ * clients are **not** created manually: an MCP client (Claude, Cursor) registers dynamically
+ * via `/register` and the operator authorizes it at `/authorize` with the operator login (set
+ * from the dashboard or `auth set-login`). The CLI `--type authorization_code` flag still
+ * offers the manual escape hatch for a non-DCR client via {@link clientConfigFromFlags}.
  */
 export async function collectClientConfig(io: PromptIo): Promise<ClientConfig | null> {
 	const label = await io.text({ message: "Label (optional, press Enter to skip)" });
 	if (label === null) return null;
-
-	const typeChoice = await io.select({
-		message: CLIENT_TYPE_PROMPT,
-		options: [...CLIENT_TYPE_OPTIONS],
-		initialValue: GRANT_CLIENT_CREDENTIALS,
-	});
-	if (typeChoice === null) return null;
-
-	const config: ClientConfig = {
-		label,
-		grantTypes: typeChoice === GRANT_AUTHORIZATION_CODE ? [GRANT_AUTHORIZATION_CODE] : [GRANT_CLIENT_CREDENTIALS],
-	};
-
-	if (typeChoice === GRANT_AUTHORIZATION_CODE) {
-		const redirectUrisRaw = await io.text({
-			message: "Redirect URIs (comma or newline separated)",
-			placeholder: "e.g. https://claude.ai/api/mcp/auth_callback",
-		});
-		if (redirectUrisRaw === null) return null;
-		const redirectUris = parseRedirectUris(redirectUrisRaw);
-		if (redirectUris.length > 0) config.redirectUris = redirectUris;
-
-		const username = await io.text({
-			message: "Login username (optional — leave blank to use the global operator login)",
-		});
-		if (username === null) return null;
-		if (username.trim() !== "") {
-			config.username = username.trim();
-			const password = await io.password({ message: "Login password" });
-			if (password === null) return null;
-			if (password !== "") config.password = password;
-		}
-	}
-
-	return config;
+	return { label, grantTypes: [GRANT_CLIENT_CREDENTIALS] };
 }

@@ -59,10 +59,14 @@ import {
 } from "./auth-code.ts";
 import {
 	type ClientRecord,
+	commitClient,
 	findClient,
 	GRANT_AUTHORIZATION_CODE,
+	hasOperatorLogin,
 	issueClient,
 	resolveJwtSecret,
+	TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST,
+	TOKEN_ENDPOINT_AUTH_NONE,
 	verifyClientLogin,
 	verifyOperatorLogin,
 	verifySecret,
@@ -71,6 +75,35 @@ import { signAccessToken } from "./jwt.ts";
 
 /** Access-token lifetime in seconds (~1h; revocation is the TTL — spec 20). */
 export const ACCESS_TOKEN_TTL_SEC = 3600;
+
+/**
+ * Shown at `/oauth/authorize` when no login could authenticate the request — the client has
+ * no per-client login AND no global operator login is configured. Rendering the login form
+ * would only loop on "Invalid username or password"; this surfaces the misconfiguration so
+ * the operator knows to run `openhammer auth set-login` (or set one from the dashboard).
+ */
+const NO_LOGIN_NOTICE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenHammer — no login configured</title>
+  <style>
+    body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:#06090F;color:#EAF2FA;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}
+    .card{max-width:440px;text-align:center}
+    h1{color:#A8DCFF;font-family:'Bricolage Grotesque',sans-serif;font-size:22px;margin-bottom:14px}
+    p{color:#8DA0B6;line-height:1.6;margin-bottom:18px}
+    pre{background:#0D131D;border:1px solid #1E2A3A;padding:14px;color:#A8DCFF;overflow-x:auto;text-align:left}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>No login configured</h1>
+    <p>OpenHammer has no operator login set, so this authorization can't be approved. Set one from the dashboard, or run:</p>
+    <pre>openhammer auth set-login</pre>
+  </div>
+</body>
+</html>`;
 
 /**
  * The JWT issuer + audience derived from the server's reachable base URL. `iss`
@@ -219,6 +252,14 @@ export async function registerOauthRoutes(fastify: FastifyInstance, opts: OauthR
 				.code(400)
 				.send({ error: "invalid_request", error_description: "redirect_uri not registered for this client" });
 		}
+		// No way to authenticate this request: the client has no per-client login AND no global
+		// operator login is configured. Rendering the form would only loop on "Invalid username
+		// or password" — surface the misconfiguration instead (the operator sets a login first).
+		const perClientLogin = client.username !== undefined && client.passwordHash !== undefined;
+		if (!perClientLogin && !hasOperatorLogin(credPath)) {
+			reply.type("text/html");
+			return reply.send(NO_LOGIN_NOTICE_HTML);
+		}
 		const errorHtml = errorParam !== "" ? `<p class="error">${escapeHtml(decodeURIComponent(errorParam))}</p>` : "";
 		reply.type("text/html");
 		return reply.send(
@@ -265,6 +306,11 @@ export async function registerOauthRoutes(fastify: FastifyInstance, opts: OauthR
 			});
 			return reply.redirect(`/oauth/authorize?${params.toString()}`);
 		}
+		// A successful login authorizes a dynamically-registered client — promote it from the
+		// in-memory pending store to the persisted registry now (best-effort; it stays pending
+		// if the write fails, still resolvable for the in-flight exchange). Manual clients and
+		// already-committed clients are a no-op (commitClient returns false — ignored here).
+		commitClient(clientId, credPath);
 		const code = generateCode({ clientId, redirectUri, codeChallenge, username });
 		const redirectParams = new URLSearchParams({ code });
 		if (state !== "") redirectParams.set("state", state);
@@ -288,10 +334,14 @@ export async function registerOauthRoutes(fastify: FastifyInstance, opts: OauthR
 		}
 	});
 
-	// POST /register — RFC 7591 dynamic client registration. Creates an
-	// authorization_code client (Claude web registers itself here). Public; the
-	// /authorize login still gates access, so a registered client can do nothing
-	// without valid operator credentials.
+	// POST /register — RFC 7591 dynamic client registration. The client POSTs its
+	// metadata (client_name, redirect_uris, grant_types, token_endpoint_auth_method);
+	// the server mints a fresh client_id and, ONLY for a confidential client
+	// (`token_endpoint_auth_method: "client_secret_post"`), a client_secret. Public
+	// clients (`"none"` — the MCP norm: Claude, Cursor) get no secret and authenticate
+	// with PKCE + the `/authorize` login. Registration is open (RFC 7591); the login
+	// still gates access, so a registered client can do nothing without valid operator
+	// credentials.
 	fastify.post("/register", async (req, reply) => {
 		const body = isRecord(req.body) ? req.body : {};
 		const clientName =
@@ -301,20 +351,48 @@ export async function registerOauthRoutes(fastify: FastifyInstance, opts: OauthR
 		const redirectUris = Array.isArray(body.redirect_uris)
 			? body.redirect_uris.filter((u): u is string => typeof u === "string")
 			: [];
-		const result = issueClient(clientName, { grantTypes: [GRANT_AUTHORIZATION_CODE], redirectUris }, credPath);
+		const grantTypes =
+			Array.isArray(body.grant_types) && body.grant_types.every((g): g is string => typeof g === "string")
+				? body.grant_types
+				: [GRANT_AUTHORIZATION_CODE];
+		// Default `"none"` (public): this server advertises only `none`/`client_secret_post`
+		// and MCP clients are public-by-default — NOT the RFC's `client_secret_basic` default.
+		const tokenEndpointAuthMethod =
+			typeof body.token_endpoint_auth_method === "string"
+				? body.token_endpoint_auth_method
+				: TOKEN_ENDPOINT_AUTH_NONE;
+		if (
+			tokenEndpointAuthMethod !== TOKEN_ENDPOINT_AUTH_NONE &&
+			tokenEndpointAuthMethod !== TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST
+		) {
+			return reply
+				.code(400)
+				.send({ error: "invalid_client_metadata", error_description: "Unsupported token_endpoint_auth_method" });
+		}
+		const result = issueClient(
+			clientName,
+			{ grantTypes, redirectUris, tokenEndpointAuthMethod, stage: true },
+			credPath,
+		);
 		if (!result.ok) {
 			return reply.code(500).send({ error: "server_error", error_description: "client registration failed" });
 		}
-		return reply.code(201).send({
+		// A `client_secret` is returned ONLY for a confidential client (RFC 7591 §3.2.1);
+		// `client_secret_expires_at` (0 = never expires) rides along with it.
+		const confidential = tokenEndpointAuthMethod === TOKEN_ENDPOINT_AUTH_CLIENT_SECRET_POST;
+		const registration: Record<string, unknown> = {
 			client_id: result.value.clientId,
-			client_secret: result.value.plaintextSecret,
 			client_id_issued_at: Math.floor(Date.now() / 1000),
-			client_secret_expires_at: 0,
 			client_name: clientName,
-			grant_types: [GRANT_AUTHORIZATION_CODE],
+			grant_types: grantTypes,
 			redirect_uris: redirectUris,
-			token_endpoint_auth_method: "none",
-		});
+			token_endpoint_auth_method: tokenEndpointAuthMethod,
+		};
+		if (confidential) {
+			registration.client_secret = result.value.plaintextSecret;
+			registration.client_secret_expires_at = 0;
+		}
+		return reply.code(201).send(registration);
 	});
 
 	// Grant handlers — inner functions close over `credPath`/`env`/`issuer`/`audience`.
@@ -324,8 +402,9 @@ export async function registerOauthRoutes(fastify: FastifyInstance, opts: OauthR
 		const clientId = str(body.client_id);
 		const clientSecret = str(body.client_secret);
 		const client = clientId !== "" ? findClient(clientId, credPath) : undefined;
-		// No matching client, or a wrong/missing secret → RFC 6749 `invalid_client` (401).
-		if (client === undefined || !verifySecret(clientSecret, client.secretHash)) {
+		// No matching client, a public client (no secretHash — client_credentials has no
+		// PKCE/redirect step to substitute for one), or a wrong/missing secret → 401.
+		if (client === undefined || client.secretHash === undefined || !verifySecret(clientSecret, client.secretHash)) {
 			return reply.code(401).send({ error: "invalid_client" });
 		}
 		const jwtSecret = resolveJwtSecret(env, credPath);
@@ -348,12 +427,20 @@ export async function registerOauthRoutes(fastify: FastifyInstance, opts: OauthR
 		const clientId = str(body.client_id);
 		const redirectUri = str(body.redirect_uri);
 		const codeVerifier = str(body.code_verifier);
+		const clientSecret = str(body.client_secret);
 		if (code === "" || clientId === "" || redirectUri === "" || codeVerifier === "") {
 			return reply.code(400).send({ error: "invalid_request", error_description: "Missing required parameters" });
 		}
 		const client = findClient(clientId, credPath);
 		if (client === undefined || !client.grantTypes.includes(GRANT_AUTHORIZATION_CODE)) {
 			return reply.code(400).send({ error: "invalid_client", error_description: "Client not authorized" });
+		}
+		// A **confidential** client (has a stored `secretHash`) MUST present its client_secret;
+		// a **public** client (no `secretHash`) authenticates with PKCE alone. Keying off the
+		// *client* — not whether the request happened to include a secret — means omitting the
+		// field cannot bypass validation for a confidential client (401, RFC 6749 §5.2).
+		if (client.secretHash !== undefined && (clientSecret === "" || !verifySecret(clientSecret, client.secretHash))) {
+			return reply.code(401).send({ error: "invalid_client" });
 		}
 		const consumed = consumeCode(code, clientId, codeVerifier);
 		if (consumed === null) {

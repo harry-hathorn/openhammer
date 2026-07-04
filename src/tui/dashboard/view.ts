@@ -149,16 +149,19 @@ export function clientRows(clients: ClientInfo[]): ClientRow[] {
  * dashboard stays free of the CLI layer (`src/tui/` must not import `src/cli/`).
  * Pure.
  */
-export function secretRevealRows(clientId: string, plaintextSecret: string): string[] {
-	return [
-		`Issued OAuth client.`,
-		"",
-		`  client_id:     ${clientId}`,
-		`  client_secret: ${plaintextSecret}`,
-		"",
-		"Store the secret now — it will NOT be shown again.",
-		"(Only a SHA-256 hash is kept in ~/.openhammer/credentials.json.)",
-	];
+export function secretRevealRows(clientId: string, plaintextSecret?: string): string[] {
+	const rows = ["Issued OAuth client.", "", `  client_id:     ${clientId}`];
+	if (plaintextSecret !== undefined) {
+		rows.push(
+			`  client_secret: ${plaintextSecret}`,
+			"",
+			"Store the secret now — it will NOT be shown again.",
+			"(Only a SHA-256 hash is kept in ~/.openhammer/credentials.json.)",
+		);
+	} else {
+		rows.push("", "Public client — no secret; authenticates with PKCE + the /authorize login.");
+	}
+	return rows;
 }
 
 /**

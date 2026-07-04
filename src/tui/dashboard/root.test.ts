@@ -47,6 +47,10 @@ function fakeActions(log: string[]): DashboardActions {
 			log.push(`removeClient:${id}`);
 			return ok(undefined) as Result<void, Error>;
 		},
+		setLogin: async () => {
+			log.push("setLogin");
+			return ok(undefined) as Result<void, Error>;
+		},
 		runDoctor: async () => {
 			log.push("runDoctor");
 			return "doctor-report-line";
@@ -155,6 +159,19 @@ describe("DashboardRoot — channel detail actions", () => {
 });
 
 describe("DashboardRoot — clients screen", () => {
+	it("the Set-login row runs setLogin", async () => {
+		const log: string[] = [];
+		const root = rooted(log);
+		// menu -> Clients (index 2)
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		// clients focus 0 = "Set operator login…" -> activate
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toContain("setLogin");
+	});
+
 	it("issue row runs issueClient and shows the one-time secret reveal", async () => {
 		const log: string[] = [];
 		const root = rooted(log);
@@ -163,7 +180,8 @@ describe("DashboardRoot — clients screen", () => {
 		root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "clients" });
-		// clients: [client, issue] -> focus the issue row (1)
+		// clients: [Set-login, client, issue] -> focus the issue row (2)
+		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		await flushActions();
@@ -178,8 +196,9 @@ describe("DashboardRoot — clients screen", () => {
 		const root = rooted(log);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // clients
-		root.handleInput(ENTER); // focus 0 = client -> detail
+		root.handleInput(ENTER); // clients (focus 0 = Set-login)
+		root.handleInput(DOWN); // -> focus 1 = client
+		root.handleInput(ENTER); // client -> detail
 		expect(root.screen).toEqual({ kind: "client-detail", id: "oh_1" });
 		root.handleInput(ENTER); // focus 0 = Remove
 		await flushActions();

@@ -203,7 +203,7 @@ const defaultDashboard = async (parsed: ParsedArgs): Promise<number> => {
 		process.stderr.write(`${control.error.message}\n`);
 		return 1;
 	}
-	const { localUrl, token, stop } = control.value;
+	const { localUrl, token, stop, restart } = control.value;
 	// The active channel's public URL reaches the channels panel via the status-socket
 	// feed (19c-channel); the status screen's tunnel line is the local endpoint + token
 	// for now (a live tunnel URL in the status screen is a future refinement).
@@ -230,6 +230,10 @@ const defaultDashboard = async (parsed: ParsedArgs): Promise<number> => {
 		subscribe: createSocketSubscriber(),
 		probeChannels: createChannelProbe({ channels: settings.channels }),
 		doctorRunner,
+		// Live-apply: a channel mutation that changes `defaultChannel` (adding the
+		// first channel, switching default) restarts the owned server child so the
+		// fresh boot raises the new channel — no manual quit-and-relaunch.
+		restartServer: () => restart(),
 		onQuit: async () => {
 			const result = await stop();
 			if (!result.ok) process.stderr.write(`${result.error.message}\n`);

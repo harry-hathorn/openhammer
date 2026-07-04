@@ -12,6 +12,7 @@ import {
 	menuItems,
 	renderFieldRows,
 	renderList,
+	SET_LOGIN_LABEL,
 	settingsItems,
 } from "./screens.ts";
 import { DashboardStore } from "./store.ts";
@@ -41,11 +42,20 @@ describe("screens — menuItems", () => {
 		const s = storeWith([ch({ id: "a" }), ch({ id: "b" })]);
 		s.setStatus({ up: true, localUrl: null, publicUrl: null, token: null });
 		s.setOauthClients([{ clientId: "oh_1", label: "x", createdAt: "now", grantTypes: ["client_credentials"] }]);
+		s.setLoginConfigured(true);
 		const byLabel = Object.fromEntries(menuItems(s).map((i) => [i.label, i.description]));
 		expect(byLabel.Status).toBe("server up");
 		expect(byLabel.Channels).toBe("2 configured");
-		expect(byLabel["Clients & JWT"]).toBe("1 client");
+		expect(byLabel["Clients & login"]).toBe("1 client");
 		expect(byLabel.Monitor).toBe("quiet");
+	});
+
+	it("clients summary surfaces an unset login at the menu level", () => {
+		const s = new DashboardStore();
+		s.setOauthClients([{ clientId: "oh_1", label: "x", createdAt: "now", grantTypes: ["client_credentials"] }]);
+		// loginConfigured defaults false → the urgent "login NOT set" overrides the count.
+		const byLabel = Object.fromEntries(menuItems(s).map((i) => [i.label, i.description]));
+		expect(byLabel["Clients & login"]).toBe("login NOT set");
 	});
 });
 
@@ -75,11 +85,12 @@ describe("screens — channelItems / channelDetailSpec", () => {
 });
 
 describe("screens — clientItems / clientDetailSpec", () => {
-	it("clientItems lists clients then the issue row", () => {
+	it("clientItems lists Set-login, then clients, then the issue row", () => {
 		const s = new DashboardStore();
 		s.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "t", grantTypes: ["client_credentials"] }]);
 		const items = clientItems(s);
-		expect(items[0]?.label).toBe("ci");
+		expect(items[0]?.label).toBe(SET_LOGIN_LABEL);
+		expect(items[1]?.label).toBe("ci");
 		expect(items.at(-1)?.label).toMatch(/Issue new client/);
 	});
 

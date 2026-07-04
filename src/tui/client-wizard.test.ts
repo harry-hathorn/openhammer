@@ -68,43 +68,18 @@ describe("clientConfigFromFlags", () => {
 });
 
 describe("collectClientConfig", () => {
-	it("collects a client-credentials client from label + type", async () => {
-		const cfg = await collectClientConfig(fakeIo({ texts: ["bot"], selects: ["client_credentials"] }));
+	it("collects a machine (client_credentials) client from a label", async () => {
+		const cfg = await collectClientConfig(fakeIo({ texts: ["bot"] }));
 		expect(cfg).toEqual({ label: "bot", grantTypes: [GRANT_CLIENT_CREDENTIALS] });
-	});
-
-	it("collects an auth-code client with redirect URIs + per-client login", async () => {
-		const cfg = await collectClientConfig(
-			fakeIo({ texts: ["web", "https://cb", "op"], selects: ["authorization_code"], passwords: ["pw"] }),
-		);
-		expect(cfg).toEqual({
-			label: "web",
-			grantTypes: [GRANT_AUTHORIZATION_CODE],
-			redirectUris: ["https://cb"],
-			username: "op",
-			password: "pw",
-		});
-	});
-
-	it("auth-code with a blank username skips the per-client login (global fallback)", async () => {
-		const cfg = await collectClientConfig(
-			fakeIo({ texts: ["web", "https://cb", ""], selects: ["authorization_code"] }),
-		);
-		expect(cfg?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
-		expect(cfg?.redirectUris).toEqual(["https://cb"]);
-		expect(cfg?.username).toBeUndefined();
-		expect(cfg?.password).toBeUndefined();
 	});
 
 	it("returns null when the label prompt is cancelled", async () => {
 		expect(await collectClientConfig(fakeIo({ texts: [null] }))).toBeNull();
 	});
 
-	it("returns null when the type picker is cancelled", async () => {
-		expect(await collectClientConfig(fakeIo({ texts: ["bot"], selects: [null] }))).toBeNull();
-	});
-
-	it("returns null when an auth-code redirect-uri prompt is cancelled", async () => {
-		expect(await collectClientConfig(fakeIo({ texts: ["web", null], selects: ["authorization_code"] }))).toBeNull();
+	it("does not offer the authorization-code type interactively (login clients connect dynamically)", async () => {
+		// The interactive wizard is machine-only; a queued `selects` answer is never consumed.
+		const cfg = await collectClientConfig(fakeIo({ texts: ["bot"], selects: ["authorization_code"] }));
+		expect(cfg?.grantTypes).toEqual([GRANT_CLIENT_CREDENTIALS]);
 	});
 });

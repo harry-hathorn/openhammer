@@ -1,96 +1,92 @@
 /**
- * The ngrok channel provider (spec 17i, **revised in 17u**) — a **live** channel
- * driven by the **`ngrok` system CLI**, not the `@ngrok/ngrok` SDK.
+ * The ngrok channel provider (spec 17i, **re-revised in 17w**) — a **live** channel
+ * driven by the **`@ngrok/ngrok` SDK** (an in-process napi agent), not the system CLI.
  *
- * The SDK's bundled core defaults to QUIC/UDP, which hangs on the dev network, and
- * its JS API exposes no transport knob to flip it; the system CLI works locally and
- * its local inspector API (`http://127.0.0.1:4040/api/tunnels`) returns the public
- * URL as JSON — so the provider reads the URL programmatically with **no
- * stdout-scraping**. Tradeoff: the operator needs the `ngrok` binary on PATH
- * (presence-checked, graceful `null` when absent — the same model `cloudflared` uses).
+ * Going native reverses the 17u CLI switch. The agent ships as an npm dependency —
+ * `@ngrok/ngrok` plus a per-platform `optionalDependencies` napi package
+ * (`linux-x64-gnu`, `linux-arm64-gnu`/`-musl`, `linux-arm-gnueabihf` for a 32-bit Pi,
+ * `darwin-*`, `win32-*`) — so the operator never installs, pins, or checksums a
+ * binary: `npx openhammer` brings it. `forward({ addr, authtoken })` resolves straight
+ * to the public HTTPS URL an MCP client points at — no spawned process, no `:4040`
+ * inspector polling, no stdout scraping. The trade-off flipped: in 17u the CLI won
+ * because the SDK hung; in 17w the SDK wins because "no external binary" is the goal
+ * and the hang is now bounded (below).
  *
- * The provider declares one **secret field** (`authtoken`) the channel-add wizard
- * collects and `setCredentials` persists. `isAvailable` is the cheap
- * `isToolAvailable("ngrok")` binary check — availability = "the CLI is installed",
- * full stop (the same presence-check as cloudflare); the authtoken is a
- * `start`/`probe` concern, validated then. `start` spawns `ngrok http <port>` with
- * the authtoken passed to the child as `NGROK_AUTHTOKEN` env (not a CLI arg — a
- * secret must never appear in a `ps` listing), polls the inspector API for
- * `tunnels[].public_url`, and lifts it into a {@link ChannelHandle} whose `stop`
- * kills the spawned process on shutdown. `start` resolves `null` for every failure
- * (no authtoken, absent binary, no URL in time, child death) — the unchanged
- * graceful-absent posture from spec 13, never a throw, so boot continues
- * localhost-only. `probe` is the wizard-time validation: spawn + URL + a short
- * `fetch(/health)` round-trip that surfaces a bad authtoken as `err` (where `start`
- * would silently fall back) before the channel is persisted.
+ * **The 17u hang, bounded not solved.** The SDK's bundled core still defaults to
+ * QUIC/UDP and its JS API (1.7.0 `.d.ts`) still exposes no transport knob, so on a
+ * network that blocks QUIC `forward()` can stall. The provider no longer lets that
+ * stall the process: `forward()` is raced against a `timeoutMs` deadline, so a hang
+ * degrades to a graceful `null` (localhost-only) instead of freezing boot. `start`
+ * and `probe` never throw — the unchanged graceful-absent posture from spec 13. (The
+ * empirical "does it still hang on the target network?" check is a deployment gate,
+ * not a code property; the timeout is the defense that holds either way.)
  *
- * **Testability:** {@link createNgrokProvider} takes injectable `isAvailable`/`spawn`/
- * `fetch` deps + `inspectorUrl`/`timeoutMs`/`pollIntervalMs`/`probePort` knobs
- * (mirroring the `ensureToken`/`startTunnel`/`createCloudflareProvider` injection-arg
- * precedents) so the unit tests exercise start/probe hermetically. The spawn fake
- * runs a real `node -e` subprocess (real `.kill()`/`exitCode` plumbing, like
- * `cloudflare.test.ts`'s `fakeCloudflared`) while the public URL comes from an
- * injected fake `fetch` — the `:4040` model means the URL is HTTP, not stderr, so a
- * fake subprocess can't synthesize it; the inspector response is the seam. The
- * production export {@link ngrokProvider} passes nothing and uses the real CLI +
- * global `fetch`. The provider is registered in `src/tunnel/index.ts` (the "one
- * registry line" a new channel adds).
+ * **Teardown.** The SDK's documented per-listener teardown is `listener.close()`; the
+ * module-level `disconnect()` (close all listeners) sweeps the session and is the fix
+ * for ngrok's free-tier "1 simultaneous session" limit, so a kill/restart cycle never
+ * wedges on a lingering session. `stop` does both, best-effort and idempotent, and
+ * retains the listener reference so the JS handle is not GC'd before close.
  *
- * **Deviation recorded (17u):**
- * - `isAvailable` dropped its authtoken gate and is now binary-presence only
- *   (`isToolAvailable("ngrok")`), matching the revised spec 17i ("same presence-check
- *   as cloudflare"). The authtoken is validated at `start`/`probe` time — a missing
- *   authtoken resolves `null` from `start` (graceful-absent) and `err` from `probe`
- *   (surfaced) — so doctor's live-channel check reports "ngrok ready" iff the CLI is
- *   installed. (doctor's per-channel comment was updated to match: both live kinds
- *   are now binary-presence.)
- * - The authtoken rides as `NGROK_AUTHTOKEN` env on the spawned child (not a
- *   `--authtoken` arg) so it never shows in a process listing. The default spawn
- *   merges it onto `process.env`, so an env-set `NGROK_AUTHTOKEN` (the boot override,
- *   17q) and a wizard-persisted secret (from `credentials.json`) both reach the CLI
- *   through the single `options.authtoken` seam.
- * - The poll bails the instant the child exits (`exitCode`/`signalCode` set) rather
- *   than spinning to the timeout — a bad authtoken makes `ngrok` exit at once.
- *   `child.kill()` on an already-exited child returns `false` without throwing
- *   (verified), so the null-path teardown needs no `try`/`catch`.
- * - Like the SDK version, the pi-tui `Loader` spinner is **not** imported here (it is a
- *   devDependency; the prod server calls `start`) — the spinner is a caller/wizard concern (17k).
+ * **Lazy import.** `import("@ngrok/ngrok")` lives inside `start`/`probe`, never at
+ * module load, so importing this module (and therefore the registry build at
+ * `index.ts`) never touches the napi binary. `npx openhammer` imports cleanly even
+ * where the platform package is absent (the `#21` smoke gate); a failed import simply
+ * surfaces as `null` from `start`, like any other miss.
+ *
+ * **Availability.** There is no binary to presence-check, so `isAvailable` is
+ * "authtoken present" (the only field, the only gate) — not an `isToolAvailable`
+ * PATH probe. `doctor` therefore reports an unconfigured ngrok channel as "missing
+ * credentials," not "missing binary." The authtoken is collected by the channel-add
+ * wizard and persisted by `setCredentials`; it is passed to `forward` here, never as
+ * a CLI arg or env that a process listing could leak (it is an in-process call).
+ *
+ * **Testability.** {@link createNgrokProvider} takes injectable `forward`/`disconnect`
+ * seams plus `probePort`/`timeoutMs` knobs (mirroring the
+ * `createCloudflareProvider`/`ensureToken` injection-arg precedents), so the unit
+ * tests exercise start/probe hermetically — a fake `forward` returns a fake listener
+ * whose `url()`/`close()` are deterministic; no live network, no real napi binary.
+ * The production export {@link ngrokProvider} passes nothing and lazy-imports the real
+ * SDK. Registered in `src/tunnel/index.ts` (keys by `kind`, so unchanged).
  */
-import { type ChildProcess, spawn } from "node:child_process";
-import { isToolAvailable } from "../../tools/bin.ts";
 import { err, ok } from "../../tools/result.ts";
 import type { ChannelProvider } from "../types.ts";
 
-const DEFAULT_NGROK_TIMEOUT_MS = 15_000;
-const DEFAULT_POLL_INTERVAL_MS = 200;
-const DEFAULT_INSPECTOR_URL = "http://127.0.0.1:4040/api/tunnels";
+const DEFAULT_TIMEOUT_MS = 15_000;
 
-/** A `spawn()`-shaped dependency so tests can swap in a deterministic subprocess. */
-export type NgrokSpawn = (args: string[], env: Record<string, string>) => ChildProcess;
-
-/** Injectable seams so `start`/`probe` are hermetically unit-testable. */
-export interface NgrokProviderDeps {
-	/** Override `isToolAvailable("ngrok")` (tests inject; default = real binary check). */
-	isAvailable?: () => boolean;
-	/** Inject the ngrok CLI spawn (tests inject a deterministic subprocess). */
-	spawn?: NgrokSpawn;
-	/** Override the `fetch` the inspector poll + `/health` probe use (tests inject). */
-	fetch?: typeof fetch;
-	/** The ngrok inspector API URL polled for the public URL (default `:4040/api/tunnels`). */
-	inspectorUrl?: string;
-	/** Override the ~15s URL-wait timeout (tests pass a small value). */
-	timeoutMs?: number;
-	/** Override the inspector poll interval (tests pass a small value). */
-	pollIntervalMs?: number;
-	/** Local port the probe forwards (the running server). Required for `probe`. */
-	probePort?: number;
+/**
+ * Minimal structural view of the `@ngrok/ngrok` `Listener` (1.7.0 `.d.ts`): the two
+ * members this provider touches. Narrowed rather than importing the SDK types so the
+ * module loads without the napi binary present (the lazy-import posture above).
+ */
+export interface NgrokListener {
+	url(): string | null;
+	close(): Promise<void>;
 }
 
-/** `setTimeout`-based sleep for the inspector poll loop. */
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => {
-		setTimeout(resolve, ms);
-	});
+/**
+ * The slice of the SDK's `Config` we forward (the 1.7.0 binding mixes casing —
+ * `proto`/`schemes` are snake_case, the callbacks are camelCase `onStatusChange`/
+ * `onLogEvent`). `addr` is the local port; `authtoken` is the gate.
+ */
+export interface NgrokForwardConfig {
+	addr: number;
+	authtoken: string;
+	proto?: string;
+	schemes?: string | string[];
+	onStatusChange?: (status: string) => void;
+	onLogEvent?: (data: string) => void;
+}
+
+/** Injectable SDK seams so `start`/`probe` are hermetically unit-testable. */
+export interface NgrokProviderDeps {
+	/** Raise a listener for `addr`+`authtoken`. Default lazy-imports `@ngrok/ngrok`. */
+	forward?: (config: NgrokForwardConfig) => Promise<NgrokListener>;
+	/** Close all listeners / sweep the session. Default lazy-imports `@ngrok/ngrok`. */
+	disconnect?: () => Promise<void>;
+	/** Local port to forward during an add-time probe (absent at channel-add time). */
+	probePort?: number;
+	/** Per-attempt connect timeout; a hang degrades to `null` rather than freezing. */
+	timeoutMs?: number;
 }
 
 /** True iff a non-empty ngrok authtoken is present in the field answers. */
@@ -99,98 +95,66 @@ function hasAuthtoken(options: Record<string, string>): boolean {
 	return typeof token === "string" && token.trim() !== "";
 }
 
-/** Narrow an unknown value to a plain string-keyed record (no `as`). */
-function isRecord(v: unknown): v is Record<string, unknown> {
-	return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 /** Narrow a catch value to a message string (AGENTS.md: `catch` is `unknown`). */
 function messageOf(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
 }
 
-/**
- * Pull the public URL out of an ngrok inspector `GET /api/tunnels` body. Prefers the
- * first `https://` `public_url` (ngrok may also expose an `http://` variant); falls
- * back to the first tunnel's URL. Pure so it is unit-tested directly. Returns `null`
- * when the body is not the expected shape or no tunnel has a URL yet — the inspector
- * binds `:4040` before the tunnel is provisioned, replying `{ tunnels: [] }` meanwhile.
- */
-export function extractNgrokUrl(data: unknown): string | null {
-	if (!isRecord(data)) return null;
-	const tunnels = data.tunnels;
-	if (!Array.isArray(tunnels)) return null;
-	const urls: string[] = [];
-	for (const tunnel of tunnels) {
-		if (isRecord(tunnel)) {
-			const url = tunnel.public_url;
-			if (typeof url === "string") urls.push(url);
-		}
-	}
-	if (urls.length === 0) return null;
-	const httpsUrl = urls.find((url) => url.startsWith("https://"));
-	return httpsUrl ?? urls[0];
-}
+/** Default `forward`: lazy-import the SDK so module load never touches the napi binary. */
+const realForward = async (config: NgrokForwardConfig): Promise<NgrokListener> => {
+	const ngrok = await import("@ngrok/ngrok");
+	return (await ngrok.forward(config)) as NgrokListener;
+};
 
-/** True iff the spawned ngrok process has exited (by exit code or signal). */
-function hasExited(child: ChildProcess): boolean {
-	return child.exitCode !== null || child.signalCode !== null;
-}
-
-interface PollDeps {
-	fetch: typeof fetch;
-	inspectorUrl: string;
-	timeoutMs: number;
-	pollIntervalMs: number;
-	isDead: () => boolean;
-}
+/** Default `disconnect`: close all listeners (frees the session for the free tier). */
+const realDisconnect = async (): Promise<void> => {
+	const ngrok = await import("@ngrok/ngrok");
+	await ngrok.disconnect();
+};
 
 /**
- * Poll the ngrok inspector API for the public URL until it appears, the child dies,
- * or the timeout elapses. The inspector responds once the tunnel is provisioned;
- * until then it returns `{ tunnels: [] }` (or connection-refused), so we retry. Bails
- * the instant the child exits — a bad authtoken makes `ngrok` exit at once — rather
- * than spinning to the timeout.
+ * Raise a listener, racing `forward` against a timeout. Resolves `{ url, listener }`
+ * on success or an `Error` on any failure (timeout, agent error, no URL). Never
+ * throws. A listener that produces no URL is closed so it does not leak; a successful
+ * listener is returned alive (its teardown is `stop`'s job).
  */
-async function waitForNgrokUrl(deps: PollDeps): Promise<string | null> {
-	const deadline = Date.now() + deps.timeoutMs;
-	while (Date.now() < deadline) {
-		if (deps.isDead()) return null;
-		try {
-			const response = await deps.fetch(deps.inspectorUrl);
-			if (response.ok) {
-				const data: unknown = await response.json();
-				const url = extractNgrokUrl(data);
-				if (url) return url;
-			}
-		} catch {
-			// Inspector not up yet / connection refused / non-JSON body → keep polling.
+async function raise(
+	forward: (config: NgrokForwardConfig) => Promise<NgrokListener>,
+	addr: number,
+	authtoken: string,
+	timeoutMs: number,
+): Promise<{ url: string; listener: NgrokListener } | Error> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const listener = await Promise.race([
+			forward({ addr, authtoken, proto: "http" }),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error("ngrok did not connect in time")), timeoutMs);
+			}),
+		]);
+		const url = listener.url();
+		if (!url) {
+			await listener.close().catch(() => {});
+			return new Error("ngrok listener produced no URL");
 		}
-		await sleep(deps.pollIntervalMs);
+		return { url, listener };
+	} catch (e) {
+		return new Error(`ngrok connect failed: ${messageOf(e)}`);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
-	return null;
 }
 
 /**
  * Build the ngrok provider. `deps` is omitted in production ({@link ngrokProvider});
- * tests inject `isAvailable`/`spawn`/`fetch` to exercise start/probe hermetically. The
- * injected `isAvailable` feeds the provider's presence check **and** the start/probe
- * short-circuits so they agree (one presence source); `spawn` threads a deterministic
- * subprocess through the real poll/kill plumbing.
+ * tests inject `forward`/`disconnect` to exercise start/probe hermetically. The
+ * injected `forward` is the single raise-the-tunnel seam; `disconnect` is the single
+ * teardown-the-session seam — both default to a lazy import of the real SDK.
  */
 export function createNgrokProvider(deps: NgrokProviderDeps = {}): ChannelProvider {
-	const checkAvailable = deps.isAvailable ?? (() => isToolAvailable("ngrok"));
-	const doSpawn =
-		deps.spawn ??
-		((args, env) =>
-			spawn("ngrok", args, {
-				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env, ...env },
-			}));
-	const doFetch = deps.fetch ?? globalThis.fetch;
-	const inspectorUrl = deps.inspectorUrl ?? DEFAULT_INSPECTOR_URL;
-	const timeoutMs = deps.timeoutMs ?? DEFAULT_NGROK_TIMEOUT_MS;
-	const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+	const forward = deps.forward ?? realForward;
+	const disconnect = deps.disconnect ?? realDisconnect;
+	const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const { probePort } = deps;
 	return {
 		kind: "ngrok",
@@ -198,65 +162,42 @@ export function createNgrokProvider(deps: NgrokProviderDeps = {}): ChannelProvid
 		fields: [
 			{ key: "authtoken", label: "ngrok authtoken", kind: "secret", required: true, help: "dashboard.ngrok.com" },
 		],
-		// Binary presence (the same model as cloudflare) — the authtoken is a start/probe concern.
-		isAvailable: async () => checkAvailable(),
+		// No binary to presence-check — the authtoken (and a reachable ngrok edge at
+		// `start`) is the gate. doctor reports "missing credentials," not "missing binary."
+		isAvailable: async (options) => hasAuthtoken(options),
 		start: async (localPort, options) => {
-			// No authtoken → graceful-absent (never spawn a process doomed to fail).
+			// No authtoken → graceful-absent (never raise a tunnel doomed to fail).
 			if (!hasAuthtoken(options)) return null;
-			// Absent binary → graceful-absent (mirrors startTunnel's presence short-circuit).
-			if (!checkAvailable()) return null;
-			const child = doSpawn(["http", String(localPort)], { NGROK_AUTHTOKEN: options.authtoken });
-			const url = await waitForNgrokUrl({
-				fetch: doFetch,
-				inspectorUrl,
-				timeoutMs,
-				pollIntervalMs,
-				isDead: () => hasExited(child),
-			});
-			if (url === null) {
-				// No URL (timeout / child death) — tear the process down. `kill()` on an
-				// already-exited child returns false without throwing (verified), so the
-				// `!killed` guard is all the safety this needs.
-				if (!child.killed) child.kill();
-				return null;
-			}
+			const raised = await raise(forward, localPort, options.authtoken, timeoutMs);
+			if (raised instanceof Error) return null; // timeout / agent error / no URL → localhost-only
 			let stopped = false;
 			return {
-				url,
+				url: raised.url,
 				// Idempotent teardown: a second `stop()` (a double signal during shutdown)
 				// is a no-op — matches main.ts's one-shot `shuttingDown` posture (spec 14b).
+				// The listener ref is captured here so the JS handle is not GC'd before
+				// close; `listener.close()` is the SDK's documented teardown, `disconnect()`
+				// sweeps the session (free-tier restart safety).
 				stop: async () => {
 					if (stopped) return;
 					stopped = true;
-					if (!child.killed) child.kill();
+					await raised.listener.close().catch(() => {});
+					await disconnect().catch(() => {});
 				},
 			};
 		},
 		probe: async (options) => {
 			if (!hasAuthtoken(options)) return err(new Error("ngrok authtoken is required"));
 			if (probePort === undefined) return err(new Error("ngrok probe requires a local server port"));
-			if (!checkAvailable()) return err(new Error("ngrok binary not found on PATH"));
-			const child = doSpawn(["http", String(probePort)], { NGROK_AUTHTOKEN: options.authtoken });
-			try {
-				const url = await waitForNgrokUrl({
-					fetch: doFetch,
-					inspectorUrl,
-					timeoutMs,
-					pollIntervalMs,
-					isDead: () => hasExited(child),
-				});
-				if (url === null) return err(new Error("ngrok probe did not produce a URL in time"));
-				const response = await doFetch(`${url}/health`);
-				return response.ok ? ok(undefined) : err(new Error(`ngrok probe /health returned ${response.status}`));
-			} catch (e) {
-				// `waitForNgrokUrl` swallows its own fetch errors, so this is the `/health` fetch.
-				return err(new Error(`ngrok probe /health failed: ${messageOf(e)}`));
-			} finally {
-				if (!child.killed) child.kill();
-			}
+			const raised = await raise(forward, probePort, options.authtoken, timeoutMs);
+			if (raised instanceof Error) return err(raised);
+			// Tear the probe listener + session down win or lose.
+			await raised.listener.close().catch(() => {});
+			await disconnect().catch(() => {});
+			return ok(undefined);
 		},
 	};
 }
 
-/** The production ngrok provider — uses the real `ngrok` CLI + global `fetch`. */
+/** The production ngrok provider — lazy-imports the real `@ngrok/ngrok` SDK. */
 export const ngrokProvider: ChannelProvider = createNgrokProvider();

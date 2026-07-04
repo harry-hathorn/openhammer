@@ -98,21 +98,25 @@ const silentStream: BannerStream = { write: () => false };
 /**
  * Format the plaintext-secret reveal for a freshly issued client — shown ONCE.
  * The secret is never stored (only its SHA-256 hash), so this block is the only
- * chance to capture it. An empty/blank label renders without the quoted suffix.
- * Pure — unit-tested directly.
+ * chance to capture it — but a **public** client (no secret; PKCE + the `/authorize`
+ * login authenticate) carries no `plaintextSecret`, and the reveal says so. An
+ * empty/blank label renders without the quoted suffix. Pure — unit-tested directly.
  */
 export function formatSecretReveal(client: IssuedClient, label: string): string {
 	const trimmed = label.trim();
 	const labelLine = trimmed ? ` "${trimmed}"` : "";
-	return [
-		`Issued OAuth client${labelLine}.`,
-		"",
-		`  client_id:     ${client.clientId}`,
-		`  client_secret: ${client.plaintextSecret}`,
-		"",
-		"Store the secret now — it will NOT be shown again.",
-		"(Only a SHA-256 hash is kept in ~/.openhammer/credentials.json.)",
-	].join("\n");
+	const lines = [`Issued OAuth client${labelLine}.`, "", `  client_id:     ${client.clientId}`];
+	if (client.plaintextSecret !== undefined) {
+		lines.push(
+			`  client_secret: ${client.plaintextSecret}`,
+			"",
+			"Store the secret now — it will NOT be shown again.",
+			"(Only a SHA-256 hash is kept in ~/.openhammer/credentials.json.)",
+		);
+	} else {
+		lines.push("", "Public client — no secret. It authenticates with PKCE + the /authorize login.");
+	}
+	return lines.join("\n");
 }
 
 /**

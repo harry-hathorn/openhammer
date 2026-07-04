@@ -1,6 +1,6 @@
 {
 	"name": "openhammer",
-	"version": "1.0.1",
+	"version": "1.1.0",
 	"description": "Standalone MCP server (no LLM) exposing shell + filesystem tools to a remote agent over Streamable HTTP. Run it on a laptop or deploy it on a server to give any authenticated MCP client controlled computer access.",
 	"type": "module",
 	"main": "dist/main.js",
@@ -60,6 +60,7 @@
 		"@fastify/cors": "^8.5.0",
 		"@fastify/formbody": "^7.4.0",
 		"@modelcontextprotocol/sdk": "^1.29.0",
+		"@ngrok/ngrok": "^1.7.0",
 		"fastify": "^4.29.1",
 		"jose": "^6.2.3"
 	},

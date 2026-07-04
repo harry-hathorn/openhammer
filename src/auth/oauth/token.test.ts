@@ -10,6 +10,8 @@ import {
 	GRANT_AUTHORIZATION_CODE,
 	type IssuedClient,
 	issueClient,
+	listClients,
+	resetPendingClients,
 	resolveJwtSecret,
 	setOperatorLogin,
 } from "./clients.ts";
@@ -64,8 +66,8 @@ function jwtSecret(credPath: string): string {
 }
 
 /** A form-encoded token-request body for the given credentials. */
-function formBody(grant: string, c: { clientId: string; plaintextSecret: string }): string {
-	return `grant_type=${grant}&client_id=${encodeURIComponent(c.clientId)}&client_secret=${encodeURIComponent(c.plaintextSecret)}`;
+function formBody(grant: string, c: { clientId: string; plaintextSecret?: string }): string {
+	return `grant_type=${grant}&client_id=${encodeURIComponent(c.clientId)}&client_secret=${encodeURIComponent(c.plaintextSecret ?? "")}`;
 }
 
 /** Form-encoded content-type header (the OAuth norm for /authorize + /token). */
@@ -96,7 +98,7 @@ function pkcePair(): { verifier: string; challenge: string } {
 /** Seed an authorization-code client with an optional per-client login + a registered redirect_uri. */
 function seedAuthCodeClient(
 	credPath: string,
-	opts: { username?: string; password?: string; redirectUri?: string; label?: string } = {},
+	opts: { username?: string; password?: string; redirectUri?: string; label?: string; tokenEndpointAuthMethod?: string } = {},
 ): IssuedClient {
 	const r = issueClient(
 		opts.label ?? "web",
@@ -105,6 +107,7 @@ function seedAuthCodeClient(
 			redirectUris: [opts.redirectUri ?? CLAUDE_REDIRECT],
 			...(opts.username !== undefined ? { username: opts.username } : {}),
 			...(opts.password !== undefined ? { password: opts.password } : {}),
+			...(opts.tokenEndpointAuthMethod !== undefined ? { tokenEndpointAuthMethod: opts.tokenEndpointAuthMethod } : {}),
 		},
 		credPath,
 	);
@@ -117,8 +120,9 @@ async function authorizeLogin(
 	app: FastifyInstance,
 	credPath: string,
 	password: string,
+	opts: { tokenEndpointAuthMethod?: string } = {},
 ): Promise<{ client: IssuedClient; code: string; verifier: string }> {
-	const client = seedAuthCodeClient(credPath, { username: "op", password: "pw" });
+	const client = seedAuthCodeClient(credPath, { username: "op", password: "pw", ...opts });
 	const { verifier, challenge } = pkcePair();
 	const login = await app.inject({
 		method: "POST",
@@ -275,6 +279,21 @@ describe("POST /oauth/token", () => {
 		expect(JSON.parse(res.body)).toEqual({ error: "invalid_client" });
 	});
 
+	it("rejects a public client (no secret) on client_credentials with 401", async () => {
+		// An authorization-code client is public (no secretHash) — it has no PKCE/redirect
+		// step to substitute for a secret, so it cannot use the client_credentials grant.
+		const r = issueClient("web", { grantTypes: [GRANT_AUTHORIZATION_CODE] }, credPath);
+		if (!r.ok) throw new Error(`issueClient failed: ${r.error.message}`);
+		const res = await app.inject({
+			method: "POST",
+			url: "/oauth/token",
+			headers: { "content-type": "application/json" },
+			payload: { grant_type: "client_credentials", client_id: r.value.clientId, client_secret: "anything" },
+		});
+		expect(res.statusCode).toBe(401);
+		expect(JSON.parse(res.body)).toEqual({ error: "invalid_client" });
+	});
+
 	it("rejects an unsupported grant_type with 400", async () => {
 		const res = await app.inject({
 			method: "POST",
@@ -319,7 +338,7 @@ describe("POST /register (RFC 7591)", () => {
 		rmUnder(credPath);
 	});
 
-	it("creates an authorization-code client + returns the registration response", async () => {
+	it("registers a public client by default (no secret) — the MCP norm", async () => {
 		const res = await app.inject({
 			method: "POST",
 			url: "/register",
@@ -330,15 +349,66 @@ describe("POST /register (RFC 7591)", () => {
 		expect(res.statusCode).toBe(201);
 		const body = JSON.parse(res.body);
 		expect(body.client_id).toMatch(/^oh_/);
-		expect(typeof body.client_secret).toBe("string");
+		expect(body.client_secret).toBeUndefined(); // public → no secret
+		expect(body.client_secret_expires_at).toBeUndefined();
 		expect(body.grant_types).toEqual([GRANT_AUTHORIZATION_CODE]);
 		expect(body.redirect_uris).toEqual([CLAUDE_REDIRECT]);
 		expect(body.token_endpoint_auth_method).toBe("none");
-		expect(body.client_secret_expires_at).toBe(0);
-		// The client is persisted + usable for /authorize.
+		// Persisted as a public client (no secretHash) + usable for /authorize.
 		const rec = findClient(body.client_id, credPath);
 		expect(rec?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
 		expect(rec?.redirectUris).toEqual([CLAUDE_REDIRECT]);
+		expect(rec?.tokenEndpointAuthMethod).toBe("none");
+		expect(rec?.secretHash).toBeUndefined();
+	});
+
+	it("registers a confidential client (client_secret_post) — mints + returns a secret", async () => {
+		const res = await app.inject({
+			method: "POST",
+			url: "/register",
+			headers: { "content-type": "application/json" },
+			payload: {
+				client_name: "server-side web app",
+				redirect_uris: [CLAUDE_REDIRECT],
+				token_endpoint_auth_method: "client_secret_post",
+			},
+		});
+		expect(res.statusCode).toBe(201);
+		const body = JSON.parse(res.body);
+		expect(typeof body.client_secret).toBe("string");
+		expect(body.client_secret_expires_at).toBe(0);
+		expect(body.token_endpoint_auth_method).toBe("client_secret_post");
+		const rec = findClient(body.client_id, credPath);
+		expect(rec?.tokenEndpointAuthMethod).toBe("client_secret_post");
+		expect(rec?.secretHash).toBeDefined();
+	});
+
+	it("honors requested grant_types + token_endpoint_auth_method", async () => {
+		const res = await app.inject({
+			method: "POST",
+			url: "/register",
+			headers: { "content-type": "application/json" },
+			payload: {
+				redirect_uris: [CLAUDE_REDIRECT],
+				grant_types: ["client_credentials", "authorization_code"],
+				token_endpoint_auth_method: "client_secret_post",
+			},
+		});
+		expect(res.statusCode).toBe(201);
+		const body = JSON.parse(res.body);
+		expect(body.grant_types).toEqual(["client_credentials", "authorization_code"]);
+		expect(body.token_endpoint_auth_method).toBe("client_secret_post");
+	});
+
+	it("rejects an unsupported token_endpoint_auth_method with 400", async () => {
+		const res = await app.inject({
+			method: "POST",
+			url: "/register",
+			headers: { "content-type": "application/json" },
+			payload: { redirect_uris: [CLAUDE_REDIRECT], token_endpoint_auth_method: "client_secret_basic" },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(JSON.parse(res.body).error).toBe("invalid_client_metadata");
 	});
 
 	it("defaults the client_name when none is provided", async () => {
@@ -378,6 +448,20 @@ describe("GET /oauth/authorize", () => {
 		expect(res.body).toContain(`value="${c.clientId}"`);
 	});
 
+	it("renders a 'no login configured' notice when nothing can authenticate the request", async () => {
+		// A login-less client (no per-client login) and no operator login set → the form would
+		// only loop on "Invalid username or password"; the notice surfaces the misconfiguration.
+		const c = seedAuthCodeClient(credPath);
+		const res = await app.inject({
+			method: "GET",
+			url: `/oauth/authorize?${form({ client_id: c.clientId, redirect_uri: CLAUDE_REDIRECT, code_challenge: "ch", code_challenge_method: "S256" })}`,
+		});
+		expect(res.statusCode).toBe(200);
+		expect(res.headers["content-type"]).toContain("text/html");
+		expect(res.body).toContain("No login configured");
+		expect(res.body).not.toContain("Sign in to grant access");
+	});
+
 	it("returns 400 for an unknown client_id", async () => {
 		const res = await app.inject({
 			method: "GET",
@@ -401,6 +485,103 @@ describe("GET /oauth/authorize", () => {
 		const c = seedAuthCodeClient(credPath);
 		const res = await app.inject({ method: "GET", url: `/oauth/authorize?${form({ client_id: c.clientId })}` });
 		expect(res.statusCode).toBe(400);
+	});
+});
+
+describe("POST /register — persists only on a successful /authorize login", () => {
+	let app: FastifyInstance;
+	let credPath: string;
+
+	beforeEach(async () => {
+		({ app, credPath } = await buildApp());
+		resetPendingClients();
+	});
+	afterEach(async () => {
+		await app.close();
+		rmUnder(credPath);
+	});
+
+	it("a registered client is pending (not listed) until the operator logs in, then persists + exchanges", async () => {
+		// 1. Dynamic registration (public client) — staged, NOT persisted.
+		const reg = await app.inject({
+			method: "POST",
+			url: "/register",
+			headers: { "content-type": "application/json" },
+			payload: { client_name: "Claude", redirect_uris: [CLAUDE_REDIRECT] },
+		});
+		expect(reg.statusCode).toBe(201);
+		const clientId = JSON.parse(reg.body).client_id;
+		expect(findClient(clientId, credPath)?.grantTypes).toEqual([GRANT_AUTHORIZATION_CODE]);
+		expect(listClients(credPath).find((c) => c.clientId === clientId)).toBeUndefined(); // no ghost
+
+		// 2. Set the operator login so /authorize can succeed.
+		setOperatorLogin("op", "pw", credPath);
+
+		// 3. Login → the pending client is committed (now listed).
+		const { verifier, challenge } = pkcePair();
+		const login = await app.inject({
+			method: "POST",
+			url: "/oauth/authorize",
+			headers: FORM_HEADERS,
+			payload: form({
+				client_id: clientId,
+				redirect_uri: CLAUDE_REDIRECT,
+				state: "",
+				code_challenge: challenge,
+				code_challenge_method: "S256",
+				username: "op",
+				password: "pw",
+			}),
+		});
+		expect(login.statusCode).toBe(302);
+		const code = locationUrl(login).searchParams.get("code") ?? "";
+		expect(code).not.toBe("");
+		expect(listClients(credPath).map((c) => c.clientId)).toContain(clientId);
+
+		// 4. Token exchange works (PKCE only — public client).
+		const tok = await app.inject({
+			method: "POST",
+			url: "/oauth/token",
+			headers: FORM_HEADERS,
+			payload: form({
+				grant_type: "authorization_code",
+				code,
+				client_id: clientId,
+				redirect_uri: CLAUDE_REDIRECT,
+				code_verifier: verifier,
+			}),
+		});
+		expect(tok.statusCode).toBe(200);
+		expect(JSON.parse(tok.body).token_type).toBe("Bearer");
+	});
+
+	it("a registered client whose login fails is NOT persisted", async () => {
+		const reg = await app.inject({
+			method: "POST",
+			url: "/register",
+			headers: { "content-type": "application/json" },
+			payload: { redirect_uris: [CLAUDE_REDIRECT] },
+		});
+		const clientId = JSON.parse(reg.body).client_id;
+		setOperatorLogin("op", "pw", credPath);
+		// Wrong password → login fails.
+		const { challenge } = pkcePair();
+		const login = await app.inject({
+			method: "POST",
+			url: "/oauth/authorize",
+			headers: FORM_HEADERS,
+			payload: form({
+				client_id: clientId,
+				redirect_uri: CLAUDE_REDIRECT,
+				state: "",
+				code_challenge: challenge,
+				code_challenge_method: "S256",
+				username: "op",
+				password: "wrong",
+			}),
+		});
+		expect(login.statusCode).toBe(302); // redirects back with an error
+		expect(listClients(credPath).find((c) => c.clientId === clientId)).toBeUndefined(); // still not persisted
 	});
 });
 
@@ -558,6 +739,72 @@ describe("POST /oauth/token — authorization_code", () => {
 		const second = await app.inject({ method: "POST", url: "/oauth/token", headers: FORM_HEADERS, payload });
 		expect(second.statusCode).toBe(400);
 		expect(JSON.parse(second.body).error).toBe("invalid_grant");
+	});
+
+	it("requires a confidential client's secret — omitting it is 401 (not bypassed)", async () => {
+		// Keys the fix: a confidential client must present its secret. Omitting the field
+		// cannot short-circuit past validation the way "validate-if-set" keyed on the request would.
+		const { client, code, verifier } = await authorizeLogin(app, credPath, "pw", {
+			tokenEndpointAuthMethod: "client_secret_post",
+		});
+		const res = await app.inject({
+			method: "POST",
+			url: "/oauth/token",
+			headers: FORM_HEADERS,
+			payload: form({
+				grant_type: "authorization_code",
+				code,
+				client_id: client.clientId,
+				redirect_uri: CLAUDE_REDIRECT,
+				code_verifier: verifier,
+			}),
+		});
+		expect(res.statusCode).toBe(401);
+		expect(JSON.parse(res.body).error).toBe("invalid_client");
+	});
+
+	it("rejects a confidential client's wrong client_secret with 401", async () => {
+		const { client, code, verifier } = await authorizeLogin(app, credPath, "pw", {
+			tokenEndpointAuthMethod: "client_secret_post",
+		});
+		const res = await app.inject({
+			method: "POST",
+			url: "/oauth/token",
+			headers: FORM_HEADERS,
+			payload: form({
+				grant_type: "authorization_code",
+				code,
+				client_id: client.clientId,
+				redirect_uri: CLAUDE_REDIRECT,
+				code_verifier: verifier,
+				client_secret: "wrong-secret",
+			}),
+		});
+		expect(res.statusCode).toBe(401);
+		expect(JSON.parse(res.body).error).toBe("invalid_client");
+	});
+
+	it("accepts a confidential client presenting the correct client_secret", async () => {
+		const { client, code, verifier } = await authorizeLogin(app, credPath, "pw", {
+			tokenEndpointAuthMethod: "client_secret_post",
+		});
+		const secret = client.plaintextSecret;
+		if (secret === undefined) throw new Error("confidential client must mint a secret");
+		const res = await app.inject({
+			method: "POST",
+			url: "/oauth/token",
+			headers: FORM_HEADERS,
+			payload: form({
+				grant_type: "authorization_code",
+				code,
+				client_id: client.clientId,
+				redirect_uri: CLAUDE_REDIRECT,
+				code_verifier: verifier,
+				client_secret: secret,
+			}),
+		});
+		expect(res.statusCode).toBe(200);
+		expect(JSON.parse(res.body).token_type).toBe("Bearer");
 	});
 });
 
