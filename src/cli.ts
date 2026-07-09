@@ -16,7 +16,6 @@
  *
  * `npm start` (`dist/main.js`, spec 14) is unchanged.
  */
-import { pathToFileURL } from "node:url";
 import { type ParsedArgs, parseArgs } from "./cli/args.ts";
 import { authCommand } from "./cli/auth.ts";
 import { doctorCommand } from "./cli/doctor.ts";
@@ -25,6 +24,7 @@ import { monitorCommand } from "./cli/monitor.ts";
 import { CONFIG_SECTIONS } from "./config/sections.ts";
 import { loadSettings, type Settings, saveSettings, settingsPath } from "./config/settings.ts";
 import { loadConfig } from "./config.ts";
+import { isMainEntry } from "./entrypoint.ts";
 import { type BannerStream, printBanner } from "./tui/banner.ts";
 import type { ServerStatusState } from "./tui/dashboard/store.ts";
 import { flagIo } from "./tui/prompts.ts";
@@ -569,7 +569,7 @@ const CONFIG_USAGE = `Usage: openhammer config { get | set [section] }`;
 // Auto-run only when invoked as the entrypoint (the `openhammer` bin), not when
 // imported by tests. Matches the T-canary guard: under vitest `process.argv[1]`
 // is the runner binary, never this file, so dispatch never fires in a test.
-const invokedDirectly = typeof process.argv[1] === "string" && pathToFileURL(process.argv[1]).href === import.meta.url;
+const invokedDirectly = isMainEntry(process.argv[1], import.meta.url);
 if (invokedDirectly) {
 	const parsed = runCli(process.argv.slice(2));
 	// A completed command resolves to its exit code; `start`/default resolves
