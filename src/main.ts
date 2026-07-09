@@ -24,13 +24,13 @@
  * only when this file is the direct entrypoint (`npm start` / `node dist/main.js`),
  * so importing `main` from the CLI (or a test) does **not** boot a server.
  */
-import { pathToFileURL } from "node:url";
 import { resolveJwtSecret } from "./auth/oauth/clients.ts";
 import { oauthIssuerAudience } from "./auth/oauth/token.ts";
 import { ensureToken } from "./auth/token.ts";
 import { parseArgs } from "./cli/args.ts";
 import { loadSettings } from "./config/settings.ts";
 import { resolveConfig } from "./config.ts";
+import { isMainEntry } from "./entrypoint.ts";
 import { RequestRecorder } from "./mcp/telemetry.ts";
 import { type ChannelStateLine, startStatusSocket } from "./observability/status-socket.ts";
 import { buildFastify } from "./server.ts";
@@ -149,7 +149,7 @@ export async function main(): Promise<void> {
 // not when imported by the CLI dispatcher (17o) or a test — otherwise importing
 // `main` would boot a server. Matches the `src/cli.ts` guard: under `tsx src/main.ts`
 // (the boot E2E) `process.argv[1]` resolves to this file, so the guard fires.
-const invokedDirectly = typeof process.argv[1] === "string" && pathToFileURL(process.argv[1]).href === import.meta.url;
+const invokedDirectly = isMainEntry(process.argv[1], import.meta.url);
 if (invokedDirectly) {
 	main().catch((error: unknown) => {
 		const message = error instanceof Error ? error.message : String(error);
