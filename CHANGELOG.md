@@ -5,6 +5,11 @@ All notable changes to OpenHammer are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-09
+
+### Fixed
+- **Installed binary silently no-op'd on every command.** npm installs the `openhammer` bin as a symlink, so `process.argv[1]` was the symlink path while `import.meta.url` resolved to the real file — the entrypoint guard never matched, dispatch never ran, and `openhammer`, `openhammer doctor`, and `openhammer --help` all printed nothing and exited 0. The guard now resolves the symlink (`realpathSync`) before comparing; `npx openhammer@latest` and `npm install -g openhammer` run as intended.
+
 ## [1.1.0] - 2026-07-04
 
 ### Added
