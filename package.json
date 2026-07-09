@@ -1,6 +1,6 @@
 {
 	"name": "openhammer",
-	"version": "1.1.0",
+	"version": "1.1.1",
 	"description": "Standalone MCP server (no LLM) exposing shell + filesystem tools to a remote agent over Streamable HTTP. Run it on a laptop or deploy it on a server to give any authenticated MCP client controlled computer access.",
 	"type": "module",
 	"main": "dist/main.js",
