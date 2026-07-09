@@ -37,6 +37,28 @@ import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
 import { resolveChannelHandle } from "./tunnel/boot.ts";
 
+/**
+ * Map a Fastify `listen` failure to a one-line actionable boot message, or
+ * `undefined` to let `main` rethrow the original error unchanged. `EADDRINUSE`
+ * (the configured port is taken) and `EACCES` (a privileged port without
+ * permission) are the common, operator-fixable bind failures — both get guidance
+ * instead of the raw Node errno. Other failures stay verbatim so they still
+ * surface as a non-zero boot exit via the entrypoint's `catch`.
+ */
+export function listenErrorMessage(error: unknown, port: number, host: string): string | undefined {
+	if (!(error instanceof Error) || !("code" in error) || typeof error.code !== "string") {
+		return undefined;
+	}
+	switch (error.code) {
+		case "EADDRINUSE":
+			return `port ${port} on ${host} is already in use. Set PORT=<another port>, or stop the process holding it.`;
+		case "EACCES":
+			return `permission denied binding port ${port} on ${host}. Use a port >=1024, or run with elevated privileges.`;
+		default:
+			return undefined;
+	}
+}
+
 export async function main(): Promise<void> {
 	// `--channel <id>` / `--tunnel` come from argv (re-parsed here because `npm
 	// start` / `node dist/main.js` bypass the CLI dispatcher). `resolveConfig`
@@ -85,7 +107,15 @@ export async function main(): Promise<void> {
 	const jwtSecret = resolveJwtSecret();
 	const oauth = jwtSecret !== undefined ? { jwtSecret, issuer, audience } : undefined;
 	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth, baseUrl);
-	await fastify.listen({ port: config.port, host: config.host });
+	try {
+		await fastify.listen({ port: config.port, host: config.host });
+	} catch (error) {
+		const message = listenErrorMessage(error, config.port, config.host);
+		if (message !== undefined) {
+			throw new Error(message);
+		}
+		throw error;
+	}
 
 	if (notice !== null) {
 		fastify.log.warn(notice);
