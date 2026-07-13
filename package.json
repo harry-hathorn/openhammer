@@ -57,7 +57,7 @@
 	},
 	"dependencies": {
 		"@earendil-works/pi-tui": "^0.80.2",
-		"@fastify/cors": "^8.5.0",
+		"@fastify/cors": "^11.3.0",
 		"@fastify/formbody": "^7.4.0",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@ngrok/ngrok": "^1.7.0",
