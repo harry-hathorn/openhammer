@@ -3,7 +3,8 @@
  * (spec 12b). The auth `preHandler` is attached to the **POST `/mcp` route
  * only**, so `/health` and `/.well-known/*` stay open (discovery precedes auth).
  * Each request builds a fresh `createMcpServer(config.rootDir,
- * config.maxResponseBytes)`.
+ * config.maxResponseBytes, backend)` — the server is per-request, but the
+ * backend is boot-scoped and shared (spec 23).
  *
  * **Per-request `Server` + `Transport`, no `sessionIdGenerator`** (stateless,
  * the SDK's "stateless mode"): every POST builds a fresh
@@ -21,13 +22,16 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { FastifyInstance } from "fastify";
 import { createAuthMiddleware, type OauthMiddlewareOptions } from "../auth/middleware.ts";
 import type { Config } from "../config.ts";
+import type { ToolBackend } from "../tools/backend.ts";
 import { createMcpServer } from "./server.ts";
 import { attachRequestRecorder, type RequestRecorder } from "./telemetry.ts";
 
-/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + optional client allowlist (17r) + optional recorder (17s) + optional OAuth/JWT config (20d). */
+/** Options threaded in from `buildFastify` (spec 12c) — the token + resolved config + the boot-scoped backend (23) + optional client allowlist (17r) + optional recorder (17s) + optional OAuth/JWT config (20d). */
 export interface McpHttpRoutesOptions {
 	token: string;
 	config: Config;
+	/** The boot-scoped tool backend (spec 23) every per-request server executes tools against — required, so each route registration says what backend it serves. */
+	backend: ToolBackend;
 	/** The `allowedClients` allowlist — `[]`/`["*"]` (default) = any client; else a User-Agent (`opaque`) / `client_id` (`JWT`) filter (17r/20d). */
 	allowedClients?: string[];
 	/** When set, each `POST /mcp` is recorded into the ring buffer for `openhammer monitor` (spec 17s). */
@@ -43,7 +47,7 @@ export interface McpHttpRoutesOptions {
  * pass the options as the 2nd arg. Either keeps the routes on the parent scope.
  */
 export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoutesOptions): Promise<void> {
-	const { token, config, allowedClients = [], recorder, oauth } = opts;
+	const { token, config, backend, allowedClients = [], recorder, oauth } = opts;
 
 	// Live activity capture (17s): the `onRequest` hook records each `POST /mcp`.
 	// No-op per request when no recorder is wired (the default — existing tests).
@@ -55,8 +59,9 @@ export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoute
 	fastify.post("/mcp", {
 		preHandler: createAuthMiddleware(token, config, allowedClients, oauth),
 		handler: async (req, reply) => {
-			// Per-request server + transport — stateless, isolates clients.
-			const server = createMcpServer(config.rootDir, config.maxResponseBytes);
+			// Per-request server + transport — stateless, isolates clients. The
+			// backend stays boot-scoped and shared across requests (spec 23).
+			const server = createMcpServer(config.rootDir, config.maxResponseBytes, backend);
 			// Stateless mode: omit `sessionIdGenerator` (per SDK docs).
 			const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
 

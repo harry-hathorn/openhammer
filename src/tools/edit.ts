@@ -143,7 +143,7 @@ export const editTool: ToolModule = {
 		required: ["path", "edits"],
 		additionalProperties: false,
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Normalize (JSON-string edits / legacy form), then validate at the boundary.
 		const prepared = prepareEditArguments(args);
 		const validated = validateEditInput(prepared);
@@ -152,7 +152,7 @@ export const editTool: ToolModule = {
 		}
 		const { path, edits } = validated.value;
 
-		const absolutePath = resolveToCwd(path, rootDir);
+		const absolutePath = resolveToCwd(path, ctx.rootDir);
 
 		// Must be readable + writable (pi: R_OK | W_OK). On failure, mirror pi's message.
 		const accessRes = await access(absolutePath, constants.R_OK | constants.W_OK);

@@ -59,8 +59,8 @@ export const guideTool: ToolModule = {
 		type: "object",
 		properties: {},
 	},
-	async execute(_args, rootDir) {
-		const toolOk: ToolOk = { content: [{ type: "text", text: buildGuide(rootDir) }] };
+	async execute(_args, ctx) {
+		const toolOk: ToolOk = { content: [{ type: "text", text: buildGuide(ctx.rootDir) }] };
 		return ok(toolOk);
 	},
 };

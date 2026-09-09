@@ -21,10 +21,15 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { Config } from "../config.ts";
+import { createLocalBackend } from "../tools/backend.ts";
 import { mcpHttpRoutes } from "./http-transport.ts";
 
 const TOKEN = "a-real-opaque-base64url-token-value";
 const TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"];
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Minimal `Config` — only `rootDir`/`maxResponseBytes` reach the transport. */
 function configWith(rootDir: string): Config {
@@ -42,7 +47,7 @@ function configWith(rootDir: string): Config {
 /** Minimal Fastify with the `/mcp` routes registered directly (no CORS — orthogonal here). */
 async function buildApp(rootDir: string): Promise<FastifyInstance> {
 	const app = Fastify({ logger: false });
-	await mcpHttpRoutes(app, { token: TOKEN, config: configWith(rootDir) });
+	await mcpHttpRoutes(app, { token: TOKEN, config: configWith(rootDir), backend });
 	return app;
 }
 

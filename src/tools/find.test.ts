@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { findTool } from "./find.ts";
 import type { Result } from "./result.ts";
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Assert a successful result and return its first text block's text. */
 function expectText(res: Result<ToolOk, Error>): string {
@@ -45,7 +50,7 @@ describe("findTool", () => {
 		// needed in the temp dir) — the same ignore-filtering path the tool delegates to.
 		writeFileSync(join(rootDir, ".gitignore"), "ignored.ts\n");
 
-		const res = await findTool.execute({ pattern: "**/*.ts" }, rootDir);
+		const res = await findTool.execute({ pattern: "**/*.ts" }, { rootDir, backend });
 		const text = expectText(res);
 
 		// Paths are relative to the search dir with POSIX separators.
@@ -61,7 +66,7 @@ describe("findTool", () => {
 		writeFileSync(join(rootDir, "src", "nested.json"), "");
 		writeFileSync(join(rootDir, "readme.md"), "");
 
-		const res = await findTool.execute({ pattern: "*.json" }, rootDir);
+		const res = await findTool.execute({ pattern: "*.json" }, { rootDir, backend });
 		const text = expectText(res);
 
 		// `--glob` (no `--full-path`) matches the basename recursively.
@@ -72,7 +77,7 @@ describe("findTool", () => {
 
 	test("no match -> 'No files found matching pattern' (fd exit 0 is not an error)", async () => {
 		writeFileSync(join(rootDir, "a.ts"), "");
-		const res = await findTool.execute({ pattern: "zzz-none" }, rootDir);
+		const res = await findTool.execute({ pattern: "zzz-none" }, { rootDir, backend });
 		expect(expectText(res)).toBe("No files found matching pattern");
 	}, 15000);
 
@@ -80,7 +85,7 @@ describe("findTool", () => {
 		writeFileSync(join(rootDir, "a.ts"), "");
 		process.env.PATH = "/nonexistent";
 
-		const res = await findTool.execute({ pattern: "*.ts" }, rootDir);
+		const res = await findTool.execute({ pattern: "*.ts" }, { rootDir, backend });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toBe("fd is not installed. Install fd to use the find tool.");
@@ -93,7 +98,7 @@ describe("findTool", () => {
 			writeFileSync(join(rootDir, name), "");
 		}
 
-		const res = await findTool.execute({ pattern: "*.ts", limit: 2 }, rootDir);
+		const res = await findTool.execute({ pattern: "*.ts", limit: 2 }, { rootDir, backend });
 		const text = expectText(res);
 
 		const resultLines = text.split("\n").filter((line) => line.endsWith(".ts"));
@@ -106,7 +111,7 @@ describe("findTool", () => {
 		writeFileSync(join(rootDir, "sub", "one.ts"), "");
 		writeFileSync(join(rootDir, "top.ts"), "");
 
-		const res = await findTool.execute({ pattern: "*.ts", path: "sub" }, rootDir);
+		const res = await findTool.execute({ pattern: "*.ts", path: "sub" }, { rootDir, backend });
 		const text = expectText(res);
 		// Searching `sub/` -> paths are relative to `sub`, not the original root.
 		expect(text).toContain("one.ts");

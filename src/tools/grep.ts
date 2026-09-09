@@ -140,7 +140,7 @@ export const grepTool: ToolModule = {
 		},
 		required: ["pattern"],
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Validate external args at the boundary (no zod; hand-narrowed).
 		const pattern = args.pattern;
 		if (typeof pattern !== "string") {
@@ -157,7 +157,7 @@ export const grepTool: ToolModule = {
 			return err(new Error(RG_MISSING));
 		}
 
-		const searchPath = resolveToCwd(searchDir || ".", rootDir);
+		const searchPath = resolveToCwd(searchDir || ".", ctx.rootDir);
 		let isDirectory: boolean;
 		try {
 			isDirectory = statSync(searchPath).isDirectory();

@@ -3,12 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { editTool } from "./edit.ts";
 
 // The edit tool is a `ToolModule`; tests drive `execute` directly (Tier-0). Fixtures
 // are real files under a throwaway tmpdir used as `rootDir` — `resolveToCwd` resolves
 // relative paths under it. Each error case also asserts the file is left unchanged
 // (spec 06: "file unchanged" on every validation failure).
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 const BOM = "﻿";
 
@@ -53,7 +58,10 @@ describe("edit tool", () => {
 		const file = join(rootDir, "f.txt");
 		writeFileSync(file, "foo bar baz");
 
-		const r = await editTool.execute({ path: "f.txt", edits: [{ oldText: "bar", newText: "qux" }] }, rootDir);
+		const r = await editTool.execute(
+			{ path: "f.txt", edits: [{ oldText: "bar", newText: "qux" }] },
+			{ rootDir, backend },
+		);
 
 		expect(textOf(r)).toBe("Successfully replaced 1 block(s) in f.txt.");
 		expect(readFileSync(file, "utf-8")).toBe("foo qux baz");
@@ -71,7 +79,7 @@ describe("edit tool", () => {
 					{ oldText: "gamma", newText: "GAMMA" },
 				],
 			},
-			rootDir,
+			{ rootDir, backend },
 		);
 
 		expect(textOf(r)).toBe("Successfully replaced 2 block(s) in multi.txt.");
@@ -93,7 +101,7 @@ describe("edit tool", () => {
 					{ oldText: "new", newText: "NEW" },
 				],
 			},
-			rootDir,
+			{ rootDir, backend },
 		);
 
 		expect(r.ok).toBe(false);
@@ -105,7 +113,10 @@ describe("edit tool", () => {
 		const original = "foo foo foo";
 		writeFileSync(file, original);
 
-		const r = await editTool.execute({ path: "dup.txt", edits: [{ oldText: "foo", newText: "bar" }] }, rootDir);
+		const r = await editTool.execute(
+			{ path: "dup.txt", edits: [{ oldText: "foo", newText: "bar" }] },
+			{ rootDir, backend },
+		);
 
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
@@ -120,7 +131,10 @@ describe("edit tool", () => {
 		const original = "foo bar baz";
 		writeFileSync(file, original);
 
-		const r = await editTool.execute({ path: "nf.txt", edits: [{ oldText: "nope", newText: "x" }] }, rootDir);
+		const r = await editTool.execute(
+			{ path: "nf.txt", edits: [{ oldText: "nope", newText: "x" }] },
+			{ rootDir, backend },
+		);
 
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
@@ -143,7 +157,7 @@ describe("edit tool", () => {
 					{ oldText: "defgh", newText: "Y" },
 				],
 			},
-			rootDir,
+			{ rootDir, backend },
 		);
 
 		expect(r.ok).toBe(false);
@@ -161,7 +175,7 @@ describe("edit tool", () => {
 
 		const r = await editTool.execute(
 			{ path: "fuzzy.txt", edits: [{ oldText: "foo\nbar", newText: "qux\nbar" }] },
-			rootDir,
+			{ rootDir, backend },
 		);
 
 		expect(textOf(r)).toBe("Successfully replaced 1 block(s) in fuzzy.txt.");
@@ -175,7 +189,7 @@ describe("edit tool", () => {
 
 		const r = await editTool.execute(
 			{ path: "crlf.txt", edits: [{ oldText: "line2", newText: "line two" }] },
-			rootDir,
+			{ rootDir, backend },
 		);
 
 		expect(textOf(r)).toBe("Successfully replaced 1 block(s) in crlf.txt.");
@@ -186,7 +200,10 @@ describe("edit tool", () => {
 		const file = join(rootDir, "legacy.txt");
 		writeFileSync(file, "hello world");
 
-		const r = await editTool.execute({ path: "legacy.txt", oldText: "world", newText: "earth" }, rootDir);
+		const r = await editTool.execute(
+			{ path: "legacy.txt", oldText: "world", newText: "earth" },
+			{ rootDir, backend },
+		);
 
 		expect(textOf(r)).toBe("Successfully replaced 1 block(s) in legacy.txt.");
 		expect(readFileSync(file, "utf-8")).toBe("hello earth");
@@ -198,7 +215,7 @@ describe("edit tool", () => {
 
 		const r = await editTool.execute(
 			{ path: "jsonstr.txt", edits: JSON.stringify([{ oldText: "bar", newText: "baz" }]) },
-			rootDir,
+			{ rootDir, backend },
 		);
 
 		expect(textOf(r)).toBe("Successfully replaced 1 block(s) in jsonstr.txt.");
@@ -206,7 +223,10 @@ describe("edit tool", () => {
 	});
 
 	it("errors when the file is missing (access failure)", async () => {
-		const r = await editTool.execute({ path: "missing.txt", edits: [{ oldText: "x", newText: "y" }] }, rootDir);
+		const r = await editTool.execute(
+			{ path: "missing.txt", edits: [{ oldText: "x", newText: "y" }] },
+			{ rootDir, backend },
+		);
 
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
@@ -217,17 +237,17 @@ describe("edit tool", () => {
 	it("errors when edits is empty or not an array", async () => {
 		writeFileSync(join(rootDir, "e.txt"), "x");
 
-		const empty = await editTool.execute({ path: "e.txt", edits: [] }, rootDir);
+		const empty = await editTool.execute({ path: "e.txt", edits: [] }, { rootDir, backend });
 		expect(empty.ok).toBe(false);
 		if (empty.ok) throw new Error("unreachable");
 		expect(empty.error.message).toBe("Edit tool input is invalid. edits must contain at least one replacement.");
 
-		const notArray = await editTool.execute({ path: "e.txt", edits: "nope" }, rootDir);
+		const notArray = await editTool.execute({ path: "e.txt", edits: "nope" }, { rootDir, backend });
 		expect(notArray.ok).toBe(false);
 	});
 
 	it("errors when path is not a string", async () => {
-		const r = await editTool.execute({ path: 42, edits: [{ oldText: "x", newText: "y" }] }, rootDir);
+		const r = await editTool.execute({ path: 42, edits: [{ oldText: "x", newText: "y" }] }, { rootDir, backend });
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
 		expect(r.error.message).toBe("edit requires a string 'path' argument");
@@ -237,7 +257,10 @@ describe("edit tool", () => {
 		const file = join(rootDir, "msg.txt");
 		writeFileSync(file, "aaa");
 
-		const r = await editTool.execute({ path: "msg.txt", edits: [{ oldText: "aaa", newText: "bbb" }] }, rootDir);
+		const r = await editTool.execute(
+			{ path: "msg.txt", edits: [{ oldText: "aaa", newText: "bbb" }] },
+			{ rootDir, backend },
+		);
 		const text = textOf(r);
 
 		expect(text).toBe("Successfully replaced 1 block(s) in msg.txt.");

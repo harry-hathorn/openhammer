@@ -25,20 +25,25 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import pkg from "../../package.json" with { type: "json" };
+import type { ToolBackend } from "../tools/backend.ts";
 import { createAllTools } from "../tools/index.ts";
 import { err, type Result } from "../tools/result.ts";
-import type { ToolOk } from "./types.ts";
+import type { ToolContext, ToolOk } from "./types.ts";
 
 /**
  * Build a stateless MCP `Server` over the 8 tools (`guide` + the 7 capability
- * tools), each bound to `rootDir`.
+ * tools), each bound to `ctx` (`rootDir` + `backend`).
  *
  * `maxResponseBytes` is the whole-response cap (the `MAX_RESPONSE_BYTES`
  * backstop); it is threaded in from `config.maxResponseBytes` (spec 12b/12c)
  * rather than read from `process.env` here so the single config boundary owns it.
+ *
+ * `backend` is the boot-scoped `ToolBackend` (spec 23): the per-request server
+ * is rebuilt fresh, but it shares the one backend the process booted with.
  */
-export function createMcpServer(rootDir: string, maxResponseBytes: number): Server {
-	const entries = createAllTools(rootDir);
+export function createMcpServer(rootDir: string, maxResponseBytes: number, backend: ToolBackend): Server {
+	const ctx: ToolContext = { rootDir, backend };
+	const entries = createAllTools(ctx);
 
 	const server = new Server({ name: "openhammer", version: pkg.version }, { capabilities: { tools: {} } });
 

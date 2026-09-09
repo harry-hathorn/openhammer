@@ -118,7 +118,7 @@ export const findTool: ToolModule = {
 		},
 		required: ["pattern"],
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Validate external args at the boundary (no zod; hand-narrowed).
 		const pattern = args.pattern;
 		if (typeof pattern !== "string") {
@@ -131,7 +131,7 @@ export const findTool: ToolModule = {
 			return err(new Error(FD_MISSING));
 		}
 
-		const searchPath = resolveToCwd(searchDir || ".", rootDir);
+		const searchPath = resolveToCwd(searchDir || ".", ctx.rootDir);
 		const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
 
 		// Build fd args (verbatim from pi). --no-require-git applies hierarchical

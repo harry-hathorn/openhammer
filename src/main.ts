@@ -35,6 +35,7 @@ import { RequestRecorder } from "./mcp/telemetry.ts";
 import { type ChannelStateLine, startStatusSocket } from "./observability/status-socket.ts";
 import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
+import { createLocalBackend } from "./tools/backend.ts";
 import { resolveChannelHandle } from "./tunnel/boot.ts";
 
 export async function main(): Promise<void> {
@@ -84,7 +85,10 @@ export async function main(): Promise<void> {
 	const { issuer, audience } = oauthIssuerAudience(baseUrl);
 	const jwtSecret = resolveJwtSecret();
 	const oauth = jwtSecret !== undefined ? { jwtSecret, issuer, audience } : undefined;
-	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth, baseUrl);
+	// The boot-scoped tool backend (spec 23): one per server process, threaded
+	// through buildFastify → the /mcp routes → every per-request MCP server.
+	const backend = createLocalBackend();
+	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth, baseUrl, backend);
 	await fastify.listen({ port: config.port, host: config.host });
 
 	if (notice !== null) {
@@ -139,6 +143,10 @@ export async function main(): Promise<void> {
 		if (stop !== undefined) {
 			await stop().catch(() => {});
 		}
+		// The boot-scoped tool backend's teardown (spec 23) — LocalBackend's
+		// `close` is a documented no-op today; a VM backend shuts its guest down
+		// here (spec 25). The discipline starts now.
+		await backend.close().catch(() => {});
 		process.exit(0);
 	};
 	process.on("SIGINT", () => void shutdown("SIGINT"));

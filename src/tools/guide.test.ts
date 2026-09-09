@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { buildGuide, guideTool } from "./guide.ts";
 
 // The `guide` tool is a `ToolModule`; tests drive `execute` directly (Tier-0) and
@@ -7,6 +8,10 @@ import { buildGuide, guideTool } from "./guide.ts";
 // of orientation markdown built from the working root (spec 18, Phase A).
 
 const ROOT = "/srv/openhammer-root";
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Unwrap a successful Result; throw (failing the test) if it was an err. */
 function unwrap<T extends ToolOk>(r: { ok: true; value: T } | { ok: false; error: Error }): T {
@@ -81,14 +86,14 @@ describe("guideTool", () => {
 	});
 
 	it("execute returns ok with a single text block equal to buildGuide(rootDir)", async () => {
-		const r = await guideTool.execute({}, ROOT);
+		const r = await guideTool.execute({}, { rootDir: ROOT, backend });
 		expect(r.ok).toBe(true);
 		expect(textOf(r)).toBe(buildGuide(ROOT));
 	});
 
 	it("execute is rootDir-driven and ignores any args (no params)", async () => {
 		// The handler forwards `args ?? {}`; guide must not choke on stray args.
-		const r = await guideTool.execute({ unexpected: "ignored" }, ROOT);
+		const r = await guideTool.execute({ unexpected: "ignored" }, { rootDir: ROOT, backend });
 		expect(r.ok).toBe(true);
 		if (r.ok) {
 			expect(textOf(r)).toContain(ROOT);

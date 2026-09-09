@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { grepTool } from "./grep.ts";
 import type { Result } from "./result.ts";
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Assert a successful result and return its first text block's text. */
 function expectText(res: Result<ToolOk, Error>): string {
@@ -44,7 +49,7 @@ describe("grepTool", () => {
 		// git-free so the temp dir needs no `.git` (which `--hidden` would otherwise drag in).
 		writeFileSync(join(rootDir, ".ignore"), "ignored.ts\n");
 
-		const res = await grepTool.execute({ pattern: "TODO" }, rootDir);
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
 		const text = expectText(res);
 
 		// Match row is `path:line: text` (relative path under the searched dir).
@@ -56,10 +61,10 @@ describe("grepTool", () => {
 	test("ignoreCase matches case-insensitively", async () => {
 		writeFileSync(join(rootDir, "a.txt"), "Hello World\n");
 
-		const sensitive = await grepTool.execute({ pattern: "hello" }, rootDir);
+		const sensitive = await grepTool.execute({ pattern: "hello" }, { rootDir, backend });
 		expect(expectText(sensitive)).toBe("No matches found");
 
-		const insensitive = await grepTool.execute({ pattern: "hello", ignoreCase: true }, rootDir);
+		const insensitive = await grepTool.execute({ pattern: "hello", ignoreCase: true }, { rootDir, backend });
 		expect(expectText(insensitive)).toContain("a.txt:1: Hello World");
 	}, 15000);
 
@@ -67,12 +72,12 @@ describe("grepTool", () => {
 		writeFileSync(join(rootDir, "a.txt"), "axb\n");
 
 		// As a regex, "x.y" matches "x<any>y" — here there is none, so no match.
-		const regex = await grepTool.execute({ pattern: "x.y" }, rootDir);
+		const regex = await grepTool.execute({ pattern: "x.y" }, { rootDir, backend });
 		expect(expectText(regex)).toBe("No matches found");
 
 		writeFileSync(join(rootDir, "a.txt"), "axb\nx.y\n");
 		// Literal "x.y" matches only the literal dots, not "x<any>y".
-		const literal = await grepTool.execute({ pattern: "x.y", literal: true }, rootDir);
+		const literal = await grepTool.execute({ pattern: "x.y", literal: true }, { rootDir, backend });
 		const text = expectText(literal);
 		expect(text).toContain("x.y");
 		expect(text).not.toContain("axb");
@@ -80,7 +85,7 @@ describe("grepTool", () => {
 
 	test("no match -> 'No matches found' (rg exit 1 is not an error)", async () => {
 		writeFileSync(join(rootDir, "a.txt"), "nothing here\n");
-		const res = await grepTool.execute({ pattern: "zzz-nope" }, rootDir);
+		const res = await grepTool.execute({ pattern: "zzz-nope" }, { rootDir, backend });
 		expect(expectText(res)).toBe("No matches found");
 	}, 15000);
 
@@ -88,7 +93,7 @@ describe("grepTool", () => {
 		writeFileSync(join(rootDir, "a.txt"), "TODO\n");
 		process.env.PATH = "/nonexistent";
 
-		const res = await grepTool.execute({ pattern: "TODO" }, rootDir);
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toBe("ripgrep (rg) is not installed. Install ripgrep to use the grep tool.");
@@ -96,7 +101,7 @@ describe("grepTool", () => {
 	}, 15000);
 
 	test("missing search path -> err", async () => {
-		const res = await grepTool.execute({ pattern: "TODO", path: "does-not-exist" }, rootDir);
+		const res = await grepTool.execute({ pattern: "TODO", path: "does-not-exist" }, { rootDir, backend });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toContain("Path not found:");
@@ -107,7 +112,7 @@ describe("grepTool", () => {
 		// 5 matching lines; limit 2 -> exactly 2 rows + a notice.
 		writeFileSync(join(rootDir, "many.txt"), `${Array.from({ length: 5 }, () => "needle").join("\n")}\n`);
 
-		const res = await grepTool.execute({ pattern: "needle", limit: 2 }, rootDir);
+		const res = await grepTool.execute({ pattern: "needle", limit: 2 }, { rootDir, backend });
 		const text = expectText(res);
 
 		const matchRows = text.split("\n").filter((line) => line.startsWith("many.txt:"));
@@ -118,7 +123,7 @@ describe("grepTool", () => {
 	test("context emits match line plus before/after context lines", async () => {
 		writeFileSync(join(rootDir, "ctx.txt"), "alpha\nTODO beta\ngamma\n");
 
-		const res = await grepTool.execute({ pattern: "TODO", context: 1 }, rootDir);
+		const res = await grepTool.execute({ pattern: "TODO", context: 1 }, { rootDir, backend });
 		const text = expectText(res);
 
 		// Match line (line 2) uses `path:n:`; context lines use `path-n-`.
@@ -131,7 +136,7 @@ describe("grepTool", () => {
 		mkdirSync(join(rootDir, "sub"), { recursive: true });
 		writeFileSync(join(rootDir, "sub", "one.ts"), "TODO in a subdir\n");
 
-		const res = await grepTool.execute({ pattern: "TODO", path: "sub/one.ts" }, rootDir);
+		const res = await grepTool.execute({ pattern: "TODO", path: "sub/one.ts" }, { rootDir, backend });
 		const text = expectText(res);
 		// Not a directory search -> basename only (no subdir prefix).
 		expect(text).toContain("one.ts:1: TODO in a subdir");
