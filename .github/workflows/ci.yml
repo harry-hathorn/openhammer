@@ -38,11 +38,13 @@ jobs:
       - name: Build
         run: npm run build
 
-      # NOTE: the test suite has known failures being resolved separately —
-      # (1) banner README<->code drift, (2) a doctor-test credentials-isolation
-      # leak, (3) `fd` is not on the default ubuntu runner. Tests run for
-      # visibility but do NOT fail the job. Remove `continue-on-error` once those
-      # are fixed to make tests a hard gate.
+      # `fd` ships as `fdfind` on Debian/Ubuntu; the doctor binary check (and the
+      # `find` tool) expect the `fd` name on PATH.
+      - name: Install fd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fd-find
+          sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
+
       - name: Test
-        continue-on-error: true
         run: npm test
