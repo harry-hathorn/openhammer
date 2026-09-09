@@ -83,14 +83,19 @@ export interface DiagnosticReport {
  * defaults; this check surfaces it (via {@link normalizeSettings}, the
  * single-source validator).
  */
-export function createConfigCheck(path: string = settingsPath()): DiagnosticCheck {
+export function createConfigCheck(path?: string): DiagnosticCheck {
 	return {
 		id: "config",
 		run: async () => {
-			if (!existsSync(path)) return { status: "pass", message: "config.json absent (using defaults)" };
+			// Resolve the default lazily: the registry self-registers these checks at
+			// module load, and a load-time `settingsPath()` default would freeze the
+			// importing process's HOME into the closure (breaking HOME-isolated tests
+			// on any machine that has a real ~/.openhammer).
+			const target = path ?? settingsPath();
+			if (!existsSync(target)) return { status: "pass", message: "config.json absent (using defaults)" };
 			let parsed: unknown;
 			try {
-				parsed = JSON.parse(readFileSync(path, "utf-8"));
+				parsed = JSON.parse(readFileSync(target, "utf-8"));
 			} catch (e) {
 				return { status: "fail", message: `config.json is not valid JSON: ${messageOf(e)}` };
 			}
@@ -107,12 +112,14 @@ export function createConfigCheck(path: string = settingsPath()): DiagnosticChec
  * (the install still works, but secrets are group/other-readable — fix with
  * `chmod 600`). A secrets-file perm drift is advisory, not a hard failure.
  */
-export function createCredentialsCheck(path: string = credentialsPath()): DiagnosticCheck {
+export function createCredentialsCheck(path?: string): DiagnosticCheck {
 	return {
 		id: "credentials",
 		run: async () => {
-			if (!existsSync(path)) return { status: "pass", message: "credentials.json absent (no secrets stored)" };
-			const mode = statSync(path).mode & 0o777;
+			// Lazy default for the same registry-bakes-at-load reason as createConfigCheck.
+			const target = path ?? credentialsPath();
+			if (!existsSync(target)) return { status: "pass", message: "credentials.json absent (no secrets stored)" };
+			const mode = statSync(target).mode & 0o777;
 			if (mode === 0o600) return { status: "pass", message: "credentials.json perms 0600 (owner-only)" };
 			return {
 				status: "warn",
@@ -134,10 +141,11 @@ export function createJwtSecretCheck(
 	deps: { env?: NodeJS.ProcessEnv; credentialsPath?: string } = {},
 ): DiagnosticCheck {
 	const env = deps.env ?? process.env;
-	const path = deps.credentialsPath ?? credentialsPath();
 	return {
 		id: "oauth-jwt-secret",
 		run: async () => {
+			// Lazy path default (registry-bakes-at-load; see createConfigCheck).
+			const path = deps.credentialsPath ?? credentialsPath();
 			const secret = peekJwtSecret(env, path);
 			if (!secret) return { status: "warn", message: "OAuth jwtSecret not set (minted on first use)" };
 			const fromEnv = env.OAUTH_JWT_SECRET !== undefined && env.OAUTH_JWT_SECRET.trim() !== "";
