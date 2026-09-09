@@ -9,12 +9,21 @@ import { bashTool } from "../tools/bash.ts";
 import type { Result } from "../tools/result.ts";
 import {
 	createVmBackend,
+	createVmBackendFromQmp,
 	DEFAULT_GUEST_OVERFLOW_DIR,
 	GUEST_TIMEOUT_CEILING_SEC,
 	type VmBackendSpec,
 	type VmExecSync,
 } from "./backend.ts";
-import type { SshExecOptions, SshExecResult, SshTarget, sshCloseMux, sshExec } from "./ssh.ts";
+import type { QmpClient } from "./qmp/client.ts";
+import {
+	type SshExecOptions,
+	type SshExecResult,
+	type SshTarget,
+	type sshCloseMux,
+	type sshExec,
+	sshExecArgv,
+} from "./ssh.ts";
 
 // The sample session target (ssh.test.ts's): paths are opaque strings to the builders.
 const TARGET: SshTarget = {
@@ -712,4 +721,54 @@ describe("wrapper scripts against real bash", () => {
 		},
 		15000,
 	);
+});
+
+// ------------------------------------------------ port-discovery wiring (25d) ----
+
+describe("createVmBackendFromQmp (25d port-discovery wiring)", () => {
+	it("discovers the port from the qmp passthrough; the built backend's probe/exec dials it as -p", async () => {
+		// The gate-8 row (fd 39 → port 40199) as the one table the passthrough ever returns —
+		// usernet.test.ts owns the poll's mechanics; this pins the WIRING: the port-less spec,
+		// the real discovery over a fake qmp, and the deps threading into createVmBackend.
+		const row = "TCP[HOST_FORWARD]  39       127.0.0.1 40199       10.0.2.15    22     0     0";
+		const commands: string[] = [];
+		const qmp: Pick<QmpClient, "humanMonitorCommand"> = {
+			humanMonitorCommand: async (commandLine) => {
+				commands.push(commandLine);
+				return row;
+			},
+		};
+		const PORTLESS: Omit<SshTarget, "port"> = {
+			user: "sandbox",
+			host: "127.0.0.1",
+			keyPath: "/vm/secrets/id_ed25519",
+			knownHostsPath: "/vm/sessions/s1/known_hosts",
+			controlPath: "/vm/sessions/s1/cm.sock",
+		};
+		const targets: SshTarget[] = [];
+		const exec: typeof sshExec = async (target) => {
+			targets.push(target);
+			return { exitCode: 0, timedOut: false, stdoutTail: "", stderrTail: "" };
+		};
+		const execSync: VmExecSync = (target) => {
+			targets.push(target);
+			return 0;
+		};
+		const backend = await createVmBackendFromQmp(
+			{ target: PORTLESS, guestUser: "sandbox", serialLogPath: "/vm/sessions/s1/serial.log" },
+			qmp,
+			{ exec, execSync },
+		);
+		expect(commands).toEqual(["info usernet"]); // the one passthrough this wiring makes
+		// The sync probe seam and the async exec seam both received the COMPLETED target.
+		expect(backend.probe("rg")).toBe(true);
+		await backend.runShell("true", { cwd: "/work" });
+		expect(targets).toEqual([
+			{ ...PORTLESS, port: 40199 },
+			{ ...PORTLESS, port: 40199 },
+		]);
+		// And the ssh argv those ops spawn carries the discovered port as -p.
+		const argv = sshExecArgv(targets[1], ["true"]);
+		expect(argv[argv.indexOf("-p") + 1]).toBe("40199");
+	});
 });

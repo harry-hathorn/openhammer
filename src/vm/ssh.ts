@@ -91,6 +91,18 @@ export interface SshTarget {
 }
 
 /**
+ * Complete an {@link SshTarget} with the port 25d's `info usernet` discovery resolved. The
+ * session's own facts (user, key, the pinned known_hosts, the mux socket) are known at
+ * session-build time, but the slirp-assigned ephemeral port only exists once QEMU is up —
+ * this is the join, typed so the port-less half (`Omit<SshTarget, "port">`) is what session
+ * layers hold and the discovered number is the only thing that can fill it. Trivial on
+ * purpose: it exists to NAME the join, the one place a target meets its discovered port.
+ */
+export function sshTargetForPort(base: Omit<SshTarget, "port">, port: number): SshTarget {
+	return { ...base, port };
+}
+
+/**
  * Quote ONE remote command argument so it arrives in the guest verbatim.
  *
  * WHY THIS LIVES HERE (and not "OpenSSH does the quoting"): ssh JOINS the trailing command
