@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { type FakeBackend, fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { readTool } from "./read.ts";
 import { writeTool } from "./write.ts";
@@ -14,23 +15,6 @@ import { writeTool } from "./write.ts";
 // One local backend per file (spec 23) — LocalBackend is stateless, matching the
 // boot-scoped seam without per-test machinery.
 const backend = createLocalBackend();
-
-let workdir: string;
-
-beforeAll(() => {
-	workdir = mkdtempSync(join(tmpdir(), "openhammer-write-"));
-});
-
-afterAll(() => {
-	rmSync(workdir, { recursive: true, force: true });
-});
-
-let rootDir: string;
-
-beforeEach(() => {
-	// Each test gets an isolated subdir as `rootDir`.
-	rootDir = mkdtempSync(join(workdir, "t-"));
-});
 
 /** Unwrap a successful Result; throw (failing the test) if it was an err. */
 function unwrap<T extends ToolOk>(r: { ok: true; value: T } | { ok: false; error: Error }): T {
@@ -52,6 +36,24 @@ function textOf(r: { ok: true; value: ToolOk } | { ok: false; error: Error }): s
 }
 
 describe("write tool", () => {
+	// Real-fs hooks scoped to this describe (not module level) so the FakeBackend
+	// suite below runs with zero real-fs access and zero process spawns.
+	let workdir: string;
+	let rootDir: string;
+
+	beforeAll(() => {
+		workdir = mkdtempSync(join(tmpdir(), "openhammer-write-"));
+	});
+
+	afterAll(() => {
+		rmSync(workdir, { recursive: true, force: true });
+	});
+
+	beforeEach(() => {
+		// Each test gets an isolated subdir as `rootDir`.
+		rootDir = mkdtempSync(join(workdir, "t-"));
+	});
+
 	it("creates parent directories and writes the file (spec acceptance)", async () => {
 		const r = await writeTool.execute({ path: "sub/dir/new.txt", content: "hi" }, { rootDir, backend });
 
@@ -137,5 +139,68 @@ describe("write tool", () => {
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
 		expect(r.error).toBeInstanceOf(Error);
+	});
+});
+
+// Spec 23: the shaping suite — same tool, FakeBackend instead of LocalBackend, so
+// the success message, strict-parent error, and dir-target error are pinned with
+// zero real-fs access and zero process spawns. The fake's files map is private;
+// read-back goes through the same backend instance's `readFile`.
+describe("write via FakeBackend", () => {
+	/** Read a file back through the same fake (assert what the tool wrote). */
+	async function readBack(fake: FakeBackend, path: string): Promise<string> {
+		const r = await fake.fs.readFile(path);
+		if (!r.ok) throw new Error(`readBack(${path}) failed: ${r.error.message}`);
+		return r.value.toString("utf-8");
+	}
+
+	it("happy path: creates parents, writes, reports UTF-16 length + the original path", async () => {
+		const fake = fakeBackend({ dirs: ["/work"] });
+
+		const r = await writeTool.execute(
+			{ path: "sub/dir/new.txt", content: "hi" },
+			{ rootDir: "/work", backend: fake },
+		);
+
+		expect(textOf(r)).toBe("Successfully wrote 2 bytes to sub/dir/new.txt");
+		expect(await readBack(fake, "/work/sub/dir/new.txt")).toBe("hi");
+	});
+
+	it("overwrites a seeded file", async () => {
+		const fake = fakeBackend({ files: { "/work/exists.txt": "old content" } });
+
+		const r = await writeTool.execute(
+			{ path: "exists.txt", content: "new content" },
+			{ rootDir: "/work", backend: fake },
+		);
+
+		expect(textOf(r)).toBe("Successfully wrote 11 bytes to exists.txt");
+		expect(await readBack(fake, "/work/exists.txt")).toBe("new content");
+	});
+
+	it("strict-parent error: a file on the parent path → err ENOTDIR, nothing written", async () => {
+		// `write` mkdir -p's first, so a plain missing parent never surfaces as
+		// writeFile's ENOENT (the fake exercises that errno at the backend level,
+		// backend.test.ts). The reachable strict-parent failure through the tool is
+		// a *file* sitting where a parent dir should be: the fake's mkdir stays
+		// permissive, its writeFile does not.
+		const fake = fakeBackend({ files: { "/work/afile": "not a dir" } });
+
+		const r = await writeTool.execute({ path: "afile/child.txt", content: "x" }, { rootDir: "/work", backend: fake });
+
+		expect(r.ok).toBe(false);
+		if (r.ok) throw new Error("unreachable");
+		expect(r.error.message).toBe("ENOTDIR: not a directory, open '/work/afile/child.txt'");
+		expect((await fake.fs.readFile("/work/afile/child.txt")).ok).toBe(false); // nothing was created
+	});
+
+	it("target is an existing directory → err EISDIR", async () => {
+		const fake = fakeBackend({ dirs: ["/work/adir"] });
+
+		const r = await writeTool.execute({ path: "adir", content: "x" }, { rootDir: "/work", backend: fake });
+
+		expect(r.ok).toBe(false);
+		if (r.ok) throw new Error("unreachable");
+		expect(r.error.message).toBe("EISDIR: illegal operation on a directory, open '/work/adir'");
 	});
 });
