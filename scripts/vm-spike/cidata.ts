@@ -2,8 +2,10 @@
 // installer consumes (manual 51-unattended-installs.md — "the files are exactly what the
 // installer's own wizard writes"). The JSON shapes below mirror the configurator's heredocs
 // from the pinned omarchy-4.0.3 ISO byte-for-key (verified against the quattro branch too):
-// NO invented fields. This box generates the UNENCRYPTED variant — no `disk_encryption`
-// block, no `encryption_password` — so the install needs zero input.
+// NO invented fields. The default is the UNENCRYPTED variant; `encrypt: true` (spec 22 gate 3)
+// adds exactly the three things the configurator's own encrypt path writes — the
+// `disk_config.disk_encryption` block, the `encryption_password` FIRST in
+// user_credentials.json, and `user_encrypt_installation.txt` = true.
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -61,14 +63,77 @@ function byteSize(value: number): ByteSize {
 	return { sector_size: { unit: "B", value: 512 }, unit: "B", value };
 }
 
+/** The LUKS passphrase for the encrypted variant (spec 22 gate 3). */
+export interface DiskEncryption {
+	readonly password: string;
+}
+
 /**
  * user_configuration.json — the wizard's full-disk output with the spike's hostname,
  * timezone, and keyboard. `kernel: "linux"` is what the configurator's detect_kernel()
  * picks on QEMU (linux-t2 only matches Apple T2 PCI ids). `network_config: iso` keeps the
- * live environment's own network. No `disk_encryption` key: the unencrypted variant.
+ * live environment's own network. No `disk_encryption` key unless `encryption` is passed:
+ * the encrypted variant (the gate-3 `--encrypt` path) appends the block AFTER
+ * device_modifications exactly as the configurator's heredoc does — key order included.
  */
-export function userConfiguration(): Record<string, unknown> {
+export function userConfiguration(encryption?: DiskEncryption): Record<string, unknown> {
 	const geometry = partitionGeometry(DISK_BYTES);
+	const diskConfig: Record<string, unknown> = {
+		config_type: "default_layout",
+		device_modifications: [
+			{
+				device: GUEST_DISK_DEVICE,
+				partitions: [
+					{
+						btrfs: [],
+						dev_path: null,
+						flags: ["boot", "esp"],
+						fs_type: "fat32",
+						mount_options: [],
+						mountpoint: "/boot",
+						obj_id: BOOT_PARTITION_OBJ_ID,
+						size: byteSize(geometry.bootSize),
+						start: byteSize(geometry.bootStart),
+						status: "create",
+						type: "primary",
+					},
+					{
+						btrfs: [
+							{ mountpoint: "/", name: "@" },
+							{ mountpoint: "/home", name: "@home" },
+							{ mountpoint: "/var/log", name: "@log" },
+							{ mountpoint: "/var/cache/pacman/pkg", name: "@pkg" },
+						],
+						dev_path: null,
+						flags: [],
+						fs_type: "btrfs",
+						mount_options: ["compress=zstd"],
+						mountpoint: null,
+						obj_id: ROOT_PARTITION_OBJ_ID,
+						size: byteSize(geometry.mainSize),
+						start: byteSize(geometry.mainStart),
+						status: "create",
+						type: "primary",
+					},
+				],
+				wipe: true,
+			},
+		],
+	};
+	if (encryption !== undefined) {
+		// The configurator's exact encrypted shape (verified against its heredoc + the quattro
+		// branch): partitions reference the ROOT partition by obj_id (NOT `encrypted: true` flags
+		// on the partition entries — the docs' shape is wrong), lvm_volumes empty, iter_time 2000.
+		// The in-block encryption_password mirrors the wizard's own output; archinstall itself
+		// parses the password from the TOP-LEVEL field (see userCredentials).
+		diskConfig.disk_encryption = {
+			encryption_type: "luks",
+			lvm_volumes: [],
+			iter_time: 2000,
+			partitions: [ROOT_PARTITION_OBJ_ID],
+			encryption_password: encryption.password,
+		};
+	}
 	return {
 		app_config: null,
 		"archinstall-language": "English",
@@ -88,48 +153,7 @@ export function userConfiguration(): Record<string, unknown> {
 			},
 			storage: { kernel: "linux" },
 		},
-		disk_config: {
-			config_type: "default_layout",
-			device_modifications: [
-				{
-					device: GUEST_DISK_DEVICE,
-					partitions: [
-						{
-							btrfs: [],
-							dev_path: null,
-							flags: ["boot", "esp"],
-							fs_type: "fat32",
-							mount_options: [],
-							mountpoint: "/boot",
-							obj_id: BOOT_PARTITION_OBJ_ID,
-							size: byteSize(geometry.bootSize),
-							start: byteSize(geometry.bootStart),
-							status: "create",
-							type: "primary",
-						},
-						{
-							btrfs: [
-								{ mountpoint: "/", name: "@" },
-								{ mountpoint: "/home", name: "@home" },
-								{ mountpoint: "/var/log", name: "@log" },
-								{ mountpoint: "/var/cache/pacman/pkg", name: "@pkg" },
-							],
-							dev_path: null,
-							flags: [],
-							fs_type: "btrfs",
-							mount_options: ["compress=zstd"],
-							mountpoint: null,
-							obj_id: ROOT_PARTITION_OBJ_ID,
-							size: byteSize(geometry.mainSize),
-							start: byteSize(geometry.mainStart),
-							status: "create",
-							type: "primary",
-						},
-					],
-					wipe: true,
-				},
-			],
-		},
+		disk_config: diskConfig,
 		hostname: GUEST_HOSTNAME,
 		kernels: ["linux"],
 		network_config: { type: "iso" },
@@ -157,22 +181,31 @@ export function userConfiguration(): Record<string, unknown> {
 }
 
 /**
- * user_credentials.json — the wizard's unencrypted shape: the SHA-512 crypt hash in BOTH
+ * user_credentials.json — the wizard's shape: the SHA-512 crypt hash in BOTH
  * root_enc_password and users[0].enc_password (the manual's `openssl passwd -6` hash), the
- * username the installer creates. The orchestrator reads users[0].username.
+ * username the installer creates. The orchestrator reads users[0].username. The encrypted
+ * variant additionally leads with `encryption_password` (the wizard writes it FIRST, before
+ * root_enc_password) — and it is LOAD-BEARING: archinstall's ArchConfigHandler merges the
+ * creds file over the config, and ArchConfig.from_config picks the TOP-LEVEL
+ * `encryption_password` as the DiskEncryption password. Without it, DiskEncryption.parse_arg
+ * returns None and the disk_encryption block is silently ignored — the "encrypted" install
+ * comes out plain.
  */
-export function userCredentials(passwordHash: string): Record<string, unknown> {
-	return {
-		root_enc_password: passwordHash,
-		users: [
-			{
-				enc_password: passwordHash,
-				groups: [],
-				sudo: true,
-				username: GUEST_USERNAME,
-			},
-		],
-	};
+export function userCredentials(passwordHash: string, encryptionPassword?: string): Record<string, unknown> {
+	const credentials: Record<string, unknown> = {};
+	if (encryptionPassword !== undefined) {
+		credentials.encryption_password = encryptionPassword;
+	}
+	credentials.root_enc_password = passwordHash;
+	credentials.users = [
+		{
+			enc_password: passwordHash,
+			groups: [],
+			sudo: true,
+			username: GUEST_USERNAME,
+		},
+	];
+	return credentials;
 }
 
 /**
@@ -230,6 +263,8 @@ export interface CidataInput {
 	readonly name: string;
 	/** Session dir: the plaintext recovery password lands here as luks-or-sudo-password.txt. */
 	readonly recoveryDir: string;
+	/** Spec 22 gate 3: bake the LUKS variant. The passphrase IS the recovery password. */
+	readonly encrypt: boolean;
 }
 
 export interface CidataBuild {
@@ -254,11 +289,21 @@ export async function buildCidata(input: CidataInput): Promise<CidataBuild> {
 
 	const password = randomBytes(24).toString("base64url");
 	const passwordHash = await sha512CryptHash(password);
-	writeFileSync(join(dir, "user_configuration.json"), `${JSON.stringify(userConfiguration(), null, 4)}\n`);
-	writeFileSync(join(dir, "user_credentials.json"), `${JSON.stringify(userCredentials(passwordHash), null, 4)}\n`);
+	writeFileSync(
+		join(dir, "user_configuration.json"),
+		`${JSON.stringify(userConfiguration(input.encrypt ? { password } : undefined), null, 4)}\n`,
+	);
+	writeFileSync(
+		join(dir, "user_credentials.json"),
+		`${JSON.stringify(userCredentials(passwordHash, input.encrypt ? password : undefined), null, 4)}\n`,
+	);
 	writeFileSync(join(dir, "user_full_name.txt"), `${GUEST_FULL_NAME}\n`);
 	writeFileSync(join(dir, "user_email_address.txt"), `${GUEST_EMAIL}\n`);
-	writeFileSync(join(dir, "user_encrypt_installation.txt"), "false\n");
+	// The wizard's `printf '%s\n' "$encrypt_installation"` — lowercase true/false. ctx.encrypt
+	// gates the orchestrator's encrypted-install provisioning (SDDM autologin — the LUKS prompt
+	// is the auth boundary — and the cryptdevice= sanity check), so the file must be true even
+	// though the JSON blocks alone drive the LUKS formatting.
+	writeFileSync(join(dir, "user_encrypt_installation.txt"), `${input.encrypt}\n`);
 
 	const keypair = await ensureSshKeypair(input.dirs.root);
 	writeFileSync(join(dir, "authorized_keys"), `${keypair.publicKey}\n`);
