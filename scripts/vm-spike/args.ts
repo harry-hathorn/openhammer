@@ -101,6 +101,15 @@ export interface InstallQemuArgsInput {
 	readonly cidataIsoPath: string;
 }
 
+// The virtual monitor the matrix pins for both configs (spec 22 gate 6's grim reference
+// resolution): EDID-forced 1280x720, so the desktop, the QMP screendump, and grim all see
+// the same single mode instead of whatever QEMU's default EDID advertises. The stable
+// device id lets QMP `screendump` address THIS device explicitly — under egl-headless the
+// default console pick errors "no surface" (a matrix-gl finding), and naming the device
+// is the documented way to select its scanout console.
+const MONITOR_EDID = "edid=on,xres=1280,yres=720";
+export const MATRIX_DISPLAY_DEVICE_ID = "vgpu0";
+
 /**
  * Unattended-install argv (spec 22 gate 2): the live chassis with the headless recipe
  * FIXED (4G / virtio-vga / `-display none` — no desktop is driven during install), the
@@ -164,6 +173,69 @@ export function installQemuArgs(input: InstallQemuArgsInput): string[] {
 		"virtio-blk-pci,drive=hd-cidata",
 		"-cdrom",
 		input.isoPath,
+		"-pidfile",
+		join(session, "qemu.pid"),
+	];
+}
+
+export interface MatrixQemuArgsInput {
+	/** Session name — `-name openhammer-spike-<name>` (also the session dir basename). */
+	readonly name: string;
+	readonly sessionDir: string;
+	readonly config: DisplayConfig;
+}
+
+/**
+ * Display-matrix argv (spec 22 gate 1, desktop half): the 22a chassis under either
+ * display recipe by flag, booting the INSTALLED system — the session's overlay qcow2 as
+ * the only disk (virtio, bootindex=0), NO cdrom, NO cidata. The session's OVMF_VARS copy
+ * (taken from the install session, which holds the Boot0004 "Limine" entry) is what makes
+ * it boot; the display device carries the pinned 1280x720 EDID. Everything else — QMP
+ * socket, serial-to-file (console=ttyS0 is baked into the installed kernel cmdline, so
+ * serial.log carries the full boot), ephemeral hostfwd, pidfile — is identical to 22a.
+ */
+export function matrixQemuArgs(input: MatrixQemuArgsInput): string[] {
+	const recipe = DISPLAY_RECIPES[input.config];
+	const session = input.sessionDir;
+	return [
+		"-name",
+		`openhammer-spike-${input.name}`,
+		"-machine",
+		"q35",
+		"-cpu",
+		"host",
+		"-accel",
+		"kvm",
+		"-smp",
+		"4",
+		"-m",
+		recipe.memory,
+		"-device",
+		`${recipe.device},${MONITOR_EDID},id=${MATRIX_DISPLAY_DEVICE_ID}`,
+		"-display",
+		recipe.display,
+		"-drive",
+		`if=pflash,format=raw,readonly=on,file=${OVMF_CODE}`,
+		"-drive",
+		`if=pflash,format=raw,file=${join(session, "OVMF_VARS.4m.fd")}`,
+		"-device",
+		"qemu-xhci",
+		"-device",
+		"usb-tablet",
+		"-chardev",
+		`socket,id=qmp,path=${join(session, "qmp.sock")},server=on,wait=off`,
+		"-mon",
+		"chardev=qmp,mode=control",
+		"-serial",
+		`file:${join(session, "serial.log")}`,
+		"-netdev",
+		"user,id=n0,hostfwd=tcp:127.0.0.1:0-:22",
+		"-device",
+		"virtio-net-pci,netdev=n0",
+		"-drive",
+		`file=${join(session, "disk.qcow2")},if=none,id=hd0,format=qcow2`,
+		"-device",
+		"virtio-blk-pci,drive=hd0,bootindex=0",
 		"-pidfile",
 		join(session, "qemu.pid"),
 	];

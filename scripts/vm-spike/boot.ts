@@ -1,18 +1,27 @@
 // Boot runner: `npx tsx scripts/vm-spike/boot.ts --config gl|headless [--hold-seconds 90]`
 // Boots the pinned live ISO under one display config, asserts QMP liveness for the hold
 // window, then shuts QEMU down with the stop ladder and appends a run log under <SPIKE_DIR>/runs/.
-import { type ChildProcess, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
-import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { DISK_SIZE, type DisplayConfig, isDisplayConfig, OVMF_VARS, QEMU_BIN, QEMU_IMG, qemuArgs } from "./args.ts";
 import { ensureIso } from "./iso.ts";
 import { run } from "./proc.ts";
-import { connectQmp, type QmpClient } from "./qmp.ts";
+import type { QmpClient } from "./qmp.ts";
+import {
+	assertProcessGone,
+	connectQmpWithRetry,
+	hasExited,
+	type LadderResult,
+	shutdownLadder,
+	sleep,
+	statusState,
+	tailText,
+	waitForFile,
+} from "./runtime.ts";
 import { ISO_URL, openSpikeDirs } from "./scratch.ts";
 
 const SAMPLE_INTERVAL_MS = 10_000;
-const LADDER_STEP_MS = 5_000;
 const SERIAL_TAIL_BYTES = 8192;
 
 interface BootFlags {
@@ -40,138 +49,6 @@ function parseFlags(argv: readonly string[]): BootFlags {
 		throw new Error(`boot: --hold-seconds must be a positive number, got ${argv.join(" ")}`);
 	}
 	return { config, holdSeconds };
-}
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => {
-		setTimeout(resolve, ms);
-	});
-}
-
-async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
-	const deadline = Date.now() + timeoutMs;
-	for (;;) {
-		if (statSync(path, { throwIfNoEntry: false }) !== undefined) {
-			return true;
-		}
-		if (Date.now() >= deadline) {
-			return false;
-		}
-		await sleep(100);
-	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-function statusState(returned: unknown): string {
-	if (isRecord(returned) && typeof returned.status === "string") {
-		return returned.status;
-	}
-	return `unexpected return: ${JSON.stringify(returned)}`;
-}
-
-// The socket file can appear a beat before QEMU finishes listening — retry the connect.
-async function connectQmpWithRetry(socketPath: string, attempts: number): Promise<QmpClient> {
-	let lastError: unknown = new Error("connectQmpWithRetry: no attempts");
-	for (let attempt = 0; attempt < attempts; attempt++) {
-		try {
-			return await connectQmp(socketPath);
-		} catch (error) {
-			lastError = error;
-		}
-		await sleep(500);
-	}
-	return Promise.reject(lastError instanceof Error ? lastError : new Error(String(lastError)));
-}
-
-function hasExited(child: ChildProcess): boolean {
-	return child.exitCode !== null || child.signalCode !== null;
-}
-
-function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-	if (hasExited(child)) {
-		return Promise.resolve(true);
-	}
-	return new Promise<boolean>((resolve) => {
-		const timer = setTimeout(() => {
-			child.removeListener("exit", onExit);
-			resolve(false);
-		}, timeoutMs);
-		const onExit = (): void => {
-			clearTimeout(timer);
-			resolve(true);
-		};
-		child.once("exit", onExit);
-	});
-}
-
-type LadderPath = "quit" | "sigterm" | "sigkill" | "already-exited";
-
-interface LadderResult {
-	readonly path: LadderPath;
-	readonly detail: string;
-}
-
-// The stop ladder (ported from Oligarchy's process.ts shape): QMP quit → wait ≤5 s →
-// SIGTERM → wait 5 s → SIGKILL → wait. The quit reply routinely races the socket teardown,
-// so only the observed exit decides the path.
-async function shutdownLadder(child: ChildProcess, qmp: QmpClient | undefined): Promise<LadderResult> {
-	const describe = (): string => `exitCode=${child.exitCode} signalCode=${child.signalCode}`;
-	if (hasExited(child)) {
-		return { path: "already-exited", detail: describe() };
-	}
-	let quitNote = "quit sent";
-	if (qmp !== undefined) {
-		try {
-			await qmp.execute("quit");
-		} catch (error) {
-			quitNote = `quit sent (reply lost to close, expected: ${error instanceof Error ? error.message : String(error)})`;
-		}
-	}
-	if (await waitForExit(child, LADDER_STEP_MS)) {
-		return { path: "quit", detail: `${quitNote}; ${describe()}` };
-	}
-	child.kill("SIGTERM");
-	if (await waitForExit(child, LADDER_STEP_MS)) {
-		return { path: "sigterm", detail: describe() };
-	}
-	child.kill("SIGKILL");
-	if (await waitForExit(child, LADDER_STEP_MS)) {
-		return { path: "sigkill", detail: describe() };
-	}
-	throw new Error(`qemu pid ${child.pid ?? "?"} survived SIGKILL`);
-}
-
-// Belt-and-braces after the ladder: a reaped child is un signalable; a killable pid is a leak.
-function assertProcessGone(child: ChildProcess): void {
-	const pid = child.pid;
-	if (pid === undefined) {
-		return;
-	}
-	try {
-		process.kill(pid, 0);
-	} catch {
-		return; // ESRCH — gone, as required
-	}
-	throw new Error(`qemu pid ${pid} is still signalable after the stop ladder`);
-}
-
-async function tailText(path: string, bytes: number): Promise<string> {
-	const size = statSync(path, { throwIfNoEntry: false })?.size ?? 0;
-	if (size === 0) {
-		return "";
-	}
-	const length = Math.min(size, bytes);
-	const buffer = Buffer.alloc(length);
-	const handle = await open(path, "r");
-	try {
-		await handle.read(buffer, 0, length, size - length);
-	} finally {
-		await handle.close();
-	}
-	return buffer.toString("utf8");
 }
 
 let stopRequested = false;
