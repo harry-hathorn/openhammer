@@ -65,7 +65,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 - `src/{tools,mcp,auth,tunnel}`, `src/config.ts`, `src/server.ts`, `src/main.ts`, `src/startup-print.ts`.
   **Not** feature-first — layer-based to mirror pi for verbatim porting. `src/tools/` is the project's standard library (`result`/`io`/`path-utils`/`truncate`/`output-accumulator`/`edit-diff`/`bin`).
 - Co-locate `*.test.ts` next to the source. No circular imports; no wide barrel files.
-- **No `Operations` interface seams** (locked: every tool is a direct local implementation).
+- **`ToolBackend` (src/tools/backend.ts) is the one sanctioned execution seam** (spec 23 supersedes spec 04:54; zero behavior change) — every tool's fs/spawn goes through it, and no other `Operations`-style interface seams are added.
 
 ## Porting (the core of the work)
 

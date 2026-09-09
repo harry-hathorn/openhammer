@@ -1,31 +1,34 @@
 /**
- * The `find` tool (spec 08).
+ * The `find` tool (spec 08; execution via the backend seam, spec 23).
  *
  * Ports pi's `find` execute logic, stripped of all pi-package/TUI/operations
- * coupling: `ensureTool("fd", true)` (→ `isToolAvailable("fd")` presence check —
- * no download, no Node fallback), `FindOperations` (→ direct `fd` spawn),
- * `typebox` (→ plain JSON-Schema literal), and the `AbortSignal` plumbing
- * (unreachable in v1 — `ToolModule.execute` carries no signal, mirroring
- * `bash`/`grep`). Every render/TUI helper is gone.
+ * coupling: `ensureTool("fd", true)` (→ `ctx.backend.probe("fd")` presence
+ * check — no download, no Node fallback), `FindOperations` (→
+ * `ctx.backend.runArgv` — the argument-array spawn, never `runShell`, so the
+ * user-controlled pattern never rides a shell string), `typebox` (→ plain
+ * JSON-Schema literal), and the `AbortSignal` plumbing (unreachable in v1 —
+ * `ToolModule.execute` carries no signal, mirroring `bash`/`grep`). Every
+ * render/TUI helper is gone. The old module-level
+ * `--no-require-git` capability cache now lives in the backend instance
+ * (`probeFlag`), so a fresh backend re-probes instead of trusting a stale
+ * process-wide memo.
  *
- * Spawns `fd --glob … <searchPath>`, collects stdout path lines, and relativizes
+ * Runs `fd --glob … <searchPath>`, collects stdout path lines, and relativizes
  * each against the search root (fd emits absolute paths for an absolute search
  * root; directory entries keep their trailing `/`; separators normalize to
  * POSIX). `--max-results` bounds the result set at the fd side — there is no
- * client-side kill (unlike `grep`, whose match cap kills mid-stream) — so the
- * close handler is plain. fd exits **0** even on no-match (unlike rg's exit 1),
- * so an empty result is signalled by empty output, not a non-zero exit; only a
- * non-zero exit with **no** output is an error (with output it's a partial
- * success). pi throws on missing-fd / failing exit; here those become `err(...)`.
- * Like `grep`, find manages its own streaming and does **not** use `io.ts`; the
- * try/catch-free body composes via `Result` (the spawn lifecycle already
- * resolves to a `Result`, narrowed at the `await`).
+ * client-side kill (unlike `grep`, whose match cap aborts mid-stream) — so no
+ * `signal` rides this spawn. fd exits **0** even on no-match (unlike rg's exit
+ * 1), so an empty result is signalled by empty output, not a non-zero exit;
+ * only a non-zero exit with **no** output is an error (with output it's a
+ * partial success). pi throws on missing-fd / failing exit; here those become
+ * `err(...)`; the one genuine-throw path (spawn error) is narrowed inside
+ * `runFd`, where the old `child.on("error")` handler used to live.
  */
-import { spawn, spawnSync } from "node:child_process";
 import { relative, sep } from "node:path";
-import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
-import { isToolAvailable } from "./bin.ts";
+import type { ShellResult, ToolBackend } from "./backend.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok, type Result } from "./result.ts";
 import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "./truncate.ts";
@@ -33,74 +36,55 @@ import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "./truncate.ts";
 const DEFAULT_LIMIT = 1000;
 const FD_MISSING = "fd is not installed. Install fd to use the find tool.";
 
-/**
- * Whether this `fd` build supports `--no-require-git` (added in a later fd 8.x;
- * the flag applies hierarchical `.gitignore` rules even outside a git repo).
- * Debian bookworm's `fd-find` (8.6.0) predates it and rejects the flag — without
- * this guard the real server's container would fail every `find` call. Probed
- * once per process + cached (a `spawnSync` of ~ms, only on the first `find`).
- */
-let noRequireGitSupported: boolean | undefined;
-function supportsNoRequireGit(): boolean {
-	if (noRequireGitSupported === undefined) {
-		const res = spawnSync("fd", ["--no-require-git", "--help"], { stdio: "ignore" });
-		noRequireGitSupported = res.status === 0;
-	}
-	return noRequireGitSupported;
-}
-
 /** Convert an OS-native path to POSIX forward-slash separators. */
 function toPosixPath(value: string): string {
 	return value.split(sep).join("/");
 }
 
 /**
- * Spawn `fd` with the given args and collect stdout path lines. The child's own
- * lifecycle resolves to a `Result`, so `execute` can `await` + short-circuit
- * with no try/catch (the Result-spine convention; `grep` resolves the same way).
+ * Run `fd` through the backend and collect stdout path lines. Line parsing is
+ * owned here (the backend stays dumb): chunks decode incrementally
+ * (`StringDecoder`, so a multi-byte UTF-8 filename split across pipe chunks
+ * survives) and split on newlines, with the partial tail carried between
+ * chunks — the same framing `readline` gave the old local spawn.
  */
-function runFd(fdArgs: string[]): Promise<Result<{ lines: string[] }, Error>> {
-	return new Promise((resolve) => {
-		const child = spawn("fd", fdArgs, { stdio: ["ignore", "pipe", "pipe"] });
-		const rl = createInterface({ input: child.stdout });
-		let stderr = "";
-		let settled = false;
-		const lines: string[] = [];
+async function runFd(backend: ToolBackend, fdArgs: string[]): Promise<Result<{ lines: string[] }, Error>> {
+	let stderr = "";
+	const decoder = new StringDecoder("utf-8");
+	let pending = "";
+	const lines: string[] = [];
 
-		const settle = (r: Result<{ lines: string[] }, Error>): void => {
-			if (!settled) {
-				settled = true;
-				resolve(r);
-			}
-		};
-
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+	let result: ShellResult;
+	try {
+		result = await backend.runArgv("fd", fdArgs, {
+			onStdout: (chunk) => {
+				pending += decoder.write(chunk);
+				const complete = pending.split("\n");
+				pending = complete.pop() ?? "";
+				for (const line of complete) lines.push(line);
+			},
+			onStderr: (chunk) => {
+				stderr += chunk.toString();
+			},
 		});
+	} catch (error) {
+		// Spawn error (the backend's one rejection, e.g. fd missing from PATH).
+		return err(new Error(`Failed to run fd: ${error instanceof Error ? error.message : String(error)}`));
+	}
+	// The streams are drained by now (runArgv resolves on close): flush any
+	// trailing partial line, exactly as readline emitted the tail at stream end.
+	pending += decoder.end();
+	if (pending) lines.push(pending);
 
-		rl.on("line", (line) => {
-			lines.push(line);
-		});
-
-		child.on("error", (error) => {
-			rl.close();
-			settle(err(new Error(`Failed to run fd: ${error.message}`)));
-		});
-
-		child.on("close", (code) => {
-			rl.close();
-			const output = lines.join("\n");
-			// fd exits 0 even on no-match; non-zero only on real failure. A non-zero
-			// exit with no output is an error (surface stderr or a code message); with
-			// output it's a partial success — fall through and relativize what we have.
-			if (code !== 0 && !output) {
-				const msg = stderr.trim() || `fd exited with code ${code}`;
-				settle(err(new Error(msg)));
-				return;
-			}
-			settle(ok({ lines }));
-		});
-	});
+	const output = lines.join("\n");
+	// fd exits 0 even on no-match; non-zero only on real failure. A non-zero
+	// exit with no output is an error (surface stderr or a code message); with
+	// output it's a partial success — fall through and relativize what we have.
+	if (result.exitCode !== 0 && !output) {
+		const msg = stderr.trim() || `fd exited with code ${result.exitCode}`;
+		return err(new Error(msg));
+	}
+	return ok({ lines });
 }
 
 export const findTool: ToolModule = {
@@ -127,7 +111,7 @@ export const findTool: ToolModule = {
 		const searchDir = typeof args.path === "string" ? args.path : undefined;
 		const limit = typeof args.limit === "number" ? args.limit : undefined;
 
-		if (!isToolAvailable("fd")) {
+		if (!ctx.backend.probe("fd")) {
 			return err(new Error(FD_MISSING));
 		}
 
@@ -138,9 +122,10 @@ export const findTool: ToolModule = {
 		// .gitignore semantics whether or not the search path is inside a git repo,
 		// without leaking sibling-directory rules the way --ignore-file (a global
 		// source) would. Older fd builds (Debian bookworm's 8.6.0) lack the flag, so
-		// include it only when the build supports it (probed once + cached above).
+		// include it only when the build supports it (probed once per backend
+		// instance — the per-instance cache replaced the old module-level memo).
 		const fdArgs: string[] = ["--glob", "--color=never", "--hidden"];
-		if (supportsNoRequireGit()) {
+		if (ctx.backend.probeFlag("fd", "--no-require-git")) {
 			fdArgs.push("--no-require-git");
 		}
 		fdArgs.push("--max-results", String(effectiveLimit));
@@ -159,7 +144,7 @@ export const findTool: ToolModule = {
 		}
 		fdArgs.push("--", effectivePattern, searchPath);
 
-		const searchRes = await runFd(fdArgs);
+		const searchRes = await runFd(ctx.backend, fdArgs);
 		if (!searchRes.ok) {
 			return searchRes;
 		}

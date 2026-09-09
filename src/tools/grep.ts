@@ -1,28 +1,31 @@
 /**
- * The `grep` tool (spec 07).
+ * The `grep` tool (spec 07; execution via the backend seam, spec 23).
  *
  * Ports pi's `grep` execute logic, stripped of all pi-package/TUI/operations
- * coupling: `ensureTool("rg", true)` (→ `isToolAvailable("rg")` presence check —
- * no download, no Node fallback), `GrepOperations` (→ direct `fs` reads for
- * context lines), `typebox` (→ plain JSON-Schema literal), and the `AbortSignal`
- * plumbing (unreachable in v1 — `ToolModule.execute` carries no signal, mirroring
- * `bash`). Every render/TUI helper is gone.
+ * coupling: `ensureTool("rg", true)` (→ `ctx.backend.probe("rg")` presence check —
+ * no download, no Node fallback), `GrepOperations` (→ `ctx.backend.fs` reads for
+ * context lines — the off-seam host reads this module used to make directly are
+ * gone, so a VM backend serves them too), `typebox` (→ plain JSON-Schema
+ * literal), and the external `AbortSignal` plumbing (still unreachable in v1 —
+ * `ToolModule.execute` carries no signal). Every render/TUI helper is gone.
  *
- * Spawns `rg --json …` under `rootDir`, parses NDJSON `match` events until the
- * match cap (then kills the child so a huge result set never streams in full),
- * formats `path:line: text` rows (or `path-line-` context blocks), and byte-caps
- * the joined output via `truncateHead`. pi throws on missing-rg / non-(0|1) exit;
- * here those become `err(...)` — the MCP `CallTool` handler (spec 12) is the single
- * narrowing point. Like `bash`, grep manages its own streaming and does **not**
- * use `io.ts`; the `try/catch`-free body composes via `Result` (the spawn lifecycle
- * already resolves to a `Result`, narrowed at the `await`).
+ * Runs `rg --json …` through `ctx.backend.runArgv` — the argument-array spawn,
+ * never `runShell` (the pattern must not ride a shell string) — and parses
+ * NDJSON `match` events until the match cap, where an `AbortController`
+ * replaces the old direct `child.kill()`: aborting the backend's signal kills
+ * the child early so a huge result set never streams in full. Formats
+ * `path:line: text` rows (or `path-line-` context blocks) and byte-caps the
+ * joined output via `truncateHead`. pi throws on missing-rg / non-(0|1) exit;
+ * here those become `err(...)` — the MCP `CallTool` handler (spec 12) is the
+ * single narrowing point. The body stays `try/catch`-free for fs work (the
+ * backend resolves to `Result`s, narrowed at the `await`); the spawn
+ * lifecycle's one genuine-throw path (spawn error) is narrowed where the old
+ * `child.on("error")` handler used to live — inside `runRipgrep`.
  */
-import { spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
 import { basename, relative } from "node:path";
-import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
-import { isToolAvailable } from "./bin.ts";
+import type { ShellResult, ToolBackend } from "./backend.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok, type Result } from "./result.ts";
 import { DEFAULT_MAX_BYTES, formatSize, GREP_MAX_LINE_LENGTH, truncateHead, truncateLine } from "./truncate.ts";
@@ -38,90 +41,93 @@ interface Match {
 }
 
 /**
- * Spawn `rg` and stream NDJSON, collecting `match` events until `effectiveLimit`
- * is hit (then kill the child). rg exits **1** on no-match, which is *not* an
- * error — only codes other than 0/1 fail. Mirrors pi's parse + limit-kill with
- * the abort plumbing stripped. The child's own lifecycle resolves to a `Result`,
- * so `execute` can `await` + short-circuit with no try/catch.
+ * Run `rg` through the backend and stream NDJSON, collecting `match` events
+ * until `effectiveLimit` is hit (then abort the backend spawn). rg exits **1**
+ * on no-match, which is *not* an error — only codes other than 0/1 fail.
+ * Mirrors pi's parse + limit-kill. Line parsing is owned here (the backend
+ * stays dumb): stdout chunks decode incrementally (`StringDecoder`, so a
+ * multi-byte UTF-8 sequence split across pipe chunks survives) and split on
+ * newlines, with the partial tail carried between chunks — the same framing
+ * `readline` gave the old local spawn.
  */
-function runRipgrep(
+async function runRipgrep(
+	backend: ToolBackend,
 	rgArgs: string[],
 	effectiveLimit: number,
 ): Promise<Result<{ matches: Match[]; matchCount: number; matchLimitReached: boolean }, Error>> {
-	return new Promise((resolve) => {
-		const child = spawn("rg", rgArgs, { stdio: ["ignore", "pipe", "pipe"] });
-		const rl = createInterface({ input: child.stdout });
-		let stderr = "";
-		let matchCount = 0;
-		let matchLimitReached = false;
-		let settled = false;
-		let killedDueToLimit = false;
-		const matches: Match[] = [];
+	let stderr = "";
+	const decoder = new StringDecoder("utf-8");
+	let pending = "";
+	let matchCount = 0;
+	let matchLimitReached = false;
+	let killedDueToLimit = false;
+	const matches: Match[] = [];
+	// Aborting once the match cap is hit kills rg at the backend (group SIGKILL
+	// → `{ exitCode: -1, timedOut: false }`) — that is *not* an error, so track
+	// it and skip the exit-code check (the old close-after-SIGTERM success).
+	const controller = new AbortController();
 
-		const settle = (r: Result<{ matches: Match[]; matchCount: number; matchLimitReached: boolean }, Error>): void => {
-			if (!settled) {
-				settled = true;
-				resolve(r);
+	const handleLine = (line: string): void => {
+		if (!line.trim() || matchCount >= effectiveLimit) return;
+		let event: unknown;
+		try {
+			event = JSON.parse(line);
+		} catch {
+			return;
+		}
+		if (typeof event !== "object" || event === null) return;
+		const ev = event as { type?: unknown; data?: unknown };
+		if (ev.type !== "match") return;
+		matchCount++;
+		const data = ev.data;
+		if (typeof data === "object" && data !== null) {
+			const d = data as { path?: { text?: unknown }; line_number?: unknown; lines?: { text?: unknown } };
+			const filePath = d.path?.text;
+			const lineNumber = d.line_number;
+			const lineText = d.lines?.text;
+			if (typeof filePath === "string" && typeof lineNumber === "number") {
+				matches.push({ filePath, lineNumber, lineText: typeof lineText === "string" ? lineText : undefined });
 			}
-		};
-		// Killing rg once the match cap is hit makes `close` fire with `code === null`
-		// (SIGTERM) — that is *not* an error, so track it and skip the exit-code check.
-		const stopChild = (): void => {
-			if (!child.killed) {
+		}
+		if (matchCount >= effectiveLimit) {
+			matchLimitReached = true;
+			if (!killedDueToLimit) {
 				killedDueToLimit = true;
-				child.kill();
+				controller.abort();
 			}
-		};
+		}
+	};
 
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+	let result: ShellResult;
+	try {
+		result = await backend.runArgv("rg", rgArgs, {
+			signal: controller.signal,
+			onStdout: (chunk) => {
+				pending += decoder.write(chunk);
+				const complete = pending.split("\n");
+				pending = complete.pop() ?? "";
+				for (const line of complete) handleLine(line);
+			},
+			onStderr: (chunk) => {
+				stderr += chunk.toString();
+			},
 		});
+	} catch (error) {
+		// Spawn error (the backend's one rejection, e.g. rg missing from PATH).
+		return err(new Error(`Failed to run ripgrep: ${error instanceof Error ? error.message : String(error)}`));
+	}
+	// The streams are drained by now (runArgv resolves on close): flush any
+	// trailing partial line, exactly as readline emitted the tail at stream end.
+	pending += decoder.end();
+	if (pending) handleLine(pending);
 
-		rl.on("line", (line) => {
-			if (!line.trim() || matchCount >= effectiveLimit) return;
-			let event: unknown;
-			try {
-				event = JSON.parse(line);
-			} catch {
-				return;
-			}
-			if (typeof event !== "object" || event === null) return;
-			const ev = event as { type?: unknown; data?: unknown };
-			if (ev.type !== "match") return;
-			matchCount++;
-			const data = ev.data;
-			if (typeof data === "object" && data !== null) {
-				const d = data as { path?: { text?: unknown }; line_number?: unknown; lines?: { text?: unknown } };
-				const filePath = d.path?.text;
-				const lineNumber = d.line_number;
-				const lineText = d.lines?.text;
-				if (typeof filePath === "string" && typeof lineNumber === "number") {
-					matches.push({ filePath, lineNumber, lineText: typeof lineText === "string" ? lineText : undefined });
-				}
-			}
-			if (matchCount >= effectiveLimit) {
-				matchLimitReached = true;
-				stopChild();
-			}
-		});
-
-		child.on("error", (error) => {
-			rl.close();
-			settle(err(new Error(`Failed to run ripgrep: ${error.message}`)));
-		});
-
-		child.on("close", (code) => {
-			rl.close();
-			// rg exits 1 on no-match (NOT an error); only codes other than 0/1 fail.
-			// A limit-kill arrives as code === null (signal) — not an error either.
-			if (!killedDueToLimit && code !== 0 && code !== 1) {
-				const msg = stderr.trim() || `ripgrep exited with code ${code}`;
-				settle(err(new Error(msg)));
-				return;
-			}
-			settle(ok({ matches, matchCount, matchLimitReached }));
-		});
-	});
+	// rg exits 1 on no-match (NOT an error); only codes other than 0/1 fail.
+	// A limit-abort arrives as exitCode -1 (signal) — not an error either.
+	if (!killedDueToLimit && result.exitCode !== 0 && result.exitCode !== 1) {
+		const msg = stderr.trim() || `ripgrep exited with code ${result.exitCode}`;
+		return err(new Error(msg));
+	}
+	return ok({ matches, matchCount, matchLimitReached });
 }
 
 export const grepTool: ToolModule = {
@@ -153,17 +159,18 @@ export const grepTool: ToolModule = {
 		const context = typeof args.context === "number" ? args.context : undefined;
 		const limit = typeof args.limit === "number" ? args.limit : undefined;
 
-		if (!isToolAvailable("rg")) {
+		if (!ctx.backend.probe("rg")) {
 			return err(new Error(RG_MISSING));
 		}
 
 		const searchPath = resolveToCwd(searchDir || ".", ctx.rootDir);
-		let isDirectory: boolean;
-		try {
-			isDirectory = statSync(searchPath).isDirectory();
-		} catch {
+		// Any stat failure (ENOENT, EACCES, …) collapses to the same message the
+		// old local stat's bare catch produced.
+		const statRes = await ctx.backend.fs.stat(searchPath);
+		if (!statRes.ok) {
 			return err(new Error(`Path not found: ${searchPath}`));
 		}
+		const isDirectory = statRes.value.isDir;
 
 		const contextValue = context && context > 0 ? context : 0;
 		const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
@@ -176,7 +183,7 @@ export const grepTool: ToolModule = {
 		if (glob) rgArgs.push("--glob", glob);
 		rgArgs.push("--", pattern, searchPath);
 
-		const searchRes = await runRipgrep(rgArgs, effectiveLimit);
+		const searchRes = await runRipgrep(ctx.backend, rgArgs, effectiveLimit);
 		if (!searchRes.ok) {
 			return searchRes;
 		}
@@ -199,15 +206,15 @@ export const grepTool: ToolModule = {
 
 		// Per-file line cache for context blocks (read once, reused across matches).
 		const fileCache = new Map<string, string[]>();
-		const getFileLines = (filePath: string): string[] => {
+		const getFileLines = async (filePath: string): Promise<string[]> => {
 			let lines = fileCache.get(filePath);
 			if (!lines) {
-				try {
-					const content = readFileSync(filePath, "utf-8");
-					lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-				} catch {
-					lines = [];
-				}
+				// An unreadable file collapses to [] → the "(unable to read file)"
+				// placeholder, exactly like the old local read's bare catch.
+				const contentRes = await ctx.backend.fs.readFile(filePath);
+				lines = contentRes.ok
+					? contentRes.value.toString("utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")
+					: [];
 				fileCache.set(filePath, lines);
 			}
 			return lines;
@@ -215,9 +222,9 @@ export const grepTool: ToolModule = {
 
 		let linesTruncated = false;
 		// Context block: match line `path:n:` + context lines `path-n-` for ±contextValue.
-		const formatBlock = (filePath: string, lineNumber: number): string[] => {
+		const formatBlock = async (filePath: string, lineNumber: number): Promise<string[]> => {
 			const relPath = formatPath(filePath);
-			const lines = getFileLines(filePath);
+			const lines = await getFileLines(filePath);
 			if (!lines.length) return [`${relPath}:${lineNumber}: (unable to read file)`];
 			const block: string[] = [];
 			const start = contextValue > 0 ? Math.max(1, lineNumber - contextValue) : lineNumber;
@@ -243,7 +250,7 @@ export const grepTool: ToolModule = {
 				if (wasTruncated) linesTruncated = true;
 				outputLines.push(`${relPath}:${match.lineNumber}: ${truncatedText}`);
 			} else {
-				outputLines.push(...formatBlock(match.filePath, match.lineNumber));
+				outputLines.push(...(await formatBlock(match.filePath, match.lineNumber)));
 			}
 		}
 

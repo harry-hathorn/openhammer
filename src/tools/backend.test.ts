@@ -150,6 +150,92 @@ describe("LocalBackend", () => {
 		});
 	});
 
+	describe("runArgv", () => {
+		test("exit code propagates (bash -c 'exit 3', no shell string of its own)", async () => {
+			const r = await backend.runArgv("bash", ["-c", "exit 3"], {});
+			expect(r).toEqual({ exitCode: 3, timedOut: false });
+		}, 15000);
+
+		test("stdout and stderr arrive split: each callback sees only its own pipe", async () => {
+			const out: Buffer[] = [];
+			const errOut: Buffer[] = [];
+			const r = await backend.runArgv("bash", ["-c", "echo one; echo two 1>&2"], {
+				onStdout: (b) => out.push(b),
+				onStderr: (b) => errOut.push(b),
+			});
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
+			expect(Buffer.concat(out).toString("utf-8")).toBe("one\n");
+			expect(Buffer.concat(errOut).toString("utf-8")).toBe("two\n");
+		}, 15000);
+
+		test("resolves on close: every stdout byte is delivered before resolution", async () => {
+			// ~109KB overflows the 64KB pipe buffer, so bytes are still buffered in
+			// the pipe when the child exits — resolving on `exit` would lose them
+			// (grep's NDJSON parse would drop trailing matches); `close` cannot.
+			let received = "";
+			const r = await backend.runArgv("seq", ["1", "20000"], {
+				onStdout: (b) => {
+					received += b.toString("utf-8");
+				},
+			});
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
+			const lines = received.split("\n");
+			expect(lines[0]).toBe("1");
+			expect(lines[19999]).toBe("20000");
+			expect(lines.length).toBe(20001); // + the trailing "" after the final newline
+		}, 15000);
+
+		test("signal abort kills the child: resolves { exitCode: -1, timedOut: false } quickly", async () => {
+			const controller = new AbortController();
+			const promise = backend.runArgv("bash", ["-c", "sleep 30"], { signal: controller.signal });
+			const start = Date.now();
+			setTimeout(() => controller.abort(), 100);
+			const r = await promise;
+			// Aborted is not timed out — grep maps this onto its limit-kill success.
+			expect(r).toEqual({ exitCode: -1, timedOut: false });
+			expect(Date.now() - start).toBeLessThan(10000);
+		}, 15000);
+
+		test("signal abort kills the whole process group (no orphan)", async () => {
+			// `$$` is the spawned bash — the detached process-group leader — so the
+			// pidfile names exactly the process the abort's group SIGKILL must reap.
+			const pidfile = join(dir, "pid");
+			const controller = new AbortController();
+			const promise = backend.runArgv("bash", ["-c", `echo $$ > ${pidfile}; sleep 30`], {
+				signal: controller.signal,
+			});
+			setTimeout(() => controller.abort(), 100);
+			expect(await promise).toEqual({ exitCode: -1, timedOut: false });
+			const pid = Number(readFileSync(pidfile, "utf-8").trim());
+			expect(Number.isInteger(pid)).toBe(true);
+			// Poll until the group leader is no longer live (gone or zombie, not R/S).
+			let live = true;
+			for (let i = 0; i < 80 && live; i++) {
+				const state = processState(pid);
+				if (state === null || state === "Z") {
+					live = false;
+				} else {
+					await sleep(25);
+				}
+			}
+			expect(live).toBe(false);
+		}, 15000);
+
+		test("timeout resolves { exitCode: -1, timedOut: true } via the process-group kill", async () => {
+			const start = Date.now();
+			const r = await backend.runArgv("bash", ["-c", "sleep 30"], { timeoutSec: 1 });
+			expect(r).toEqual({ exitCode: -1, timedOut: true });
+			// Killed at ~1s by the group SIGKILL, not after `sleep 30` ran out.
+			expect(Date.now() - start).toBeLessThan(10000);
+		}, 15000);
+
+		test("a missing binary rejects (spawn error is the documented genuine-throw path)", async () => {
+			await expect(backend.runArgv("/nonexistent/openhammer-no-such-bin", ["--version"], {})).rejects.toBeInstanceOf(
+				Error,
+			);
+		}, 15000);
+	});
+
 	describe("runShell", () => {
 		test("exit code propagates (exit 3)", async () => {
 			const r = await backend.runShell("exit 3", { cwd: dir });
@@ -267,6 +353,22 @@ describe("LocalBackend", () => {
 
 		test("probeFlag returns false for a missing binary", () => {
 			expect(backend.probeFlag("openhammer-definitely-not-a-real-binary-xyz", "--harmony")).toBe(false);
+		}, 15000);
+
+		// No call-count assertion here on purpose: LocalBackend hard-spawns via
+		// `node:child_process`'s spawnSync with no injection seam, so counting
+		// invocations would mean monkey-patching the built-in. The cache is instead
+		// asserted observably — a stripped PATH after a successful probe keeps
+		// answering from the cache while a fresh instance sees the stripped PATH.
+		test("probe and probeFlag results are cached per instance (spec 23's moved cache)", () => {
+			expect(backend.probe("node")).toBe(true);
+			expect(backend.probeFlag("node", "--harmony")).toBe(true);
+			process.env.PATH = "/nonexistent";
+			// Warm instance: cached results answer, no fresh spawnSync runs.
+			expect(backend.probe("node")).toBe(true);
+			expect(backend.probeFlag("node", "--harmony")).toBe(true);
+			// Fresh instance: empty cache, so the stripped PATH makes the probe fail.
+			expect(createLocalBackend().probe("node")).toBe(false);
 		}, 15000);
 	});
 });
@@ -525,6 +627,89 @@ describe("FakeBackend", () => {
 				script: [{ match: "echo", result: { exitCode: 0 }, stdout: "hi", chunkDelayMs: 1 }],
 			});
 			expect(await backend.runShell("echo hi", { cwd: "/work" })).toEqual({ exitCode: 0, timedOut: false });
+		});
+	});
+
+	describe("runArgv scripting", () => {
+		test("script entries match the joined form; the exact bin/args pair is recorded; calls stays runShell-only", async () => {
+			const backend = fakeBackend({
+				script: [{ match: /^rg --json /, result: { exitCode: 0 }, stdout: '{"type":"end"}\n' }],
+			});
+			const out: Buffer[] = [];
+			const r = await backend.runArgv("rg", ["--json", "--", "pat", "/work"], { onStdout: (b) => out.push(b) });
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
+			expect(Buffer.concat(out).toString("utf-8")).toBe('{"type":"end"}\n');
+			expect(backend.argvCalls).toEqual([
+				{ cmd: "rg --json -- pat /work", bin: "rg", args: ["--json", "--", "pat", "/work"] },
+			]);
+			expect(backend.calls).toEqual([]); // runShell's ledger stays untouched
+			expect(backend.unexpectedCalls).toEqual([]);
+		});
+
+		test("stdout and stderr are emitted split: each callback sees only its own stream", async () => {
+			const backend = fakeBackend({
+				script: [{ match: "fd", result: { exitCode: 0 }, stdout: "paths\n", stderr: "warning\n" }],
+			});
+			const out: Buffer[] = [];
+			const errOut: Buffer[] = [];
+			const r = await backend.runArgv("fd", ["--glob"], {
+				cwd: "/work",
+				onStdout: (b) => out.push(b),
+				onStderr: (b) => errOut.push(b),
+			});
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
+			expect(Buffer.concat(out).toString("utf-8")).toBe("paths\n");
+			expect(Buffer.concat(errOut).toString("utf-8")).toBe("warning\n");
+			expect(backend.argvCalls).toEqual([{ cmd: "fd --glob", bin: "fd", args: ["--glob"], cwd: "/work" }]);
+		});
+
+		test("chunkDelayMs splits each stream into delayed chunks — all stdout, then all stderr, never interleaved", async () => {
+			const backend = fakeBackend({
+				script: [
+					{ match: "rg", result: { exitCode: 0 }, stdout: "0123456789", stderr: "abcdefghij", chunkDelayMs: 5 },
+				],
+			});
+			const events: Array<{ stream: "out" | "err"; text: string }> = [];
+			await backend.runArgv("rg", ["--json"], {
+				onStdout: (b) => events.push({ stream: "out", text: b.toString("utf-8") }),
+				onStderr: (b) => events.push({ stream: "err", text: b.toString("utf-8") }),
+			});
+			expect(events).toEqual([
+				{ stream: "out", text: "0123" },
+				{ stream: "out", text: "4567" },
+				{ stream: "out", text: "89" },
+				{ stream: "err", text: "abcd" },
+				{ stream: "err", text: "efgh" },
+				{ stream: "err", text: "ij" },
+			]);
+		});
+
+		test("no matching script -> 127, a stderr chunk (never stdout), and an unexpectedCalls record", async () => {
+			const backend = fakeBackend();
+			const out: Buffer[] = [];
+			const errOut: Buffer[] = [];
+			const r = await backend.runArgv("rg", ["--json", "x"], {
+				onStdout: (b) => out.push(b),
+				onStderr: (b) => errOut.push(b),
+			});
+			expect(r).toEqual({ exitCode: 127, timedOut: false });
+			expect(backend.unexpectedCalls).toEqual(["rg --json x"]);
+			expect(Buffer.concat(out).toString("utf-8")).toBe("");
+			expect(Buffer.concat(errOut).toString("utf-8")).toBe("fake-backend: no script for: rg --json x");
+		});
+
+		test("the script is shared with runShell: an entry consumed by one is spent for the other", async () => {
+			const backend = fakeBackend({ script: [{ match: "probe", result: { exitCode: 0 } }] });
+			expect((await backend.runArgv("probe", ["--once"], {})).exitCode).toBe(0);
+			expect((await backend.runShell("probe --twice", { cwd: "/work" })).exitCode).toBe(127);
+		});
+
+		test("an already-aborted signal changes nothing (no child to kill — the abort contract is LocalBackend's)", async () => {
+			const backend = fakeBackend({ script: [{ match: "rg", result: { exitCode: 0 }, stdout: "x\n" }] });
+			const controller = new AbortController();
+			controller.abort();
+			const r = await backend.runArgv("rg", ["--json"], { signal: controller.signal });
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
 		});
 	});
 

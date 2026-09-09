@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { grepTool } from "./grep.ts";
 import type { Result } from "./result.ts";
@@ -93,7 +94,11 @@ describe("grepTool", () => {
 		writeFileSync(join(rootDir, "a.txt"), "TODO\n");
 		process.env.PATH = "/nonexistent";
 
-		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
+		// Fresh backend on purpose: the shared instance above has `rg` cached as
+		// present (spec 23's per-instance probe cache), and a warm cache keeps
+		// answering true even with PATH stripped — the state the cache makes
+		// unreachable for one process.
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend: createLocalBackend() });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toBe("ripgrep (rg) is not installed. Install ripgrep to use the grep tool.");
@@ -141,4 +146,164 @@ describe("grepTool", () => {
 		// Not a directory search -> basename only (no subdir prefix).
 		expect(text).toContain("one.ts:1: TODO in a subdir");
 	}, 15000);
+});
+
+// Spec 23f: the runArgv + backend-fs shaping, driven by the scripted FakeBackend —
+// zero process spawns, zero host fs (the NDJSON comes from the script; the
+// context lines from the fake's in-memory files, which is exactly what the
+// off-seam fs fix makes testable). The real-rg counterparts live above.
+describe("grep via FakeBackend", () => {
+	const rootDir = "/work";
+
+	/** A realistic `rg --json` match event line (the shape rg emits per hit). */
+	function rgMatch(path: string, lineNumber: number, text: string): string {
+		return JSON.stringify({
+			type: "match",
+			data: {
+				path: { text: path },
+				lines: { text: `${text}\n` },
+				line_number: lineNumber,
+				absolute_offset: 0,
+				submatches: [{ match: { text: "TODO" }, start: 0, end: 4 }],
+			},
+		});
+	}
+
+	test("scripted rg NDJSON stdout -> path:line: text rows; exact argv recorded", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			probeResults: { rg: true },
+			script: [
+				{
+					match: /^rg --json/,
+					result: { exitCode: 0 },
+					stdout: `${rgMatch("/work/a.ts", 1, "TODO fix this")}\n${rgMatch("/work/b.ts", 7, "TODO elsewhere")}\n`,
+				},
+			],
+		});
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
+		expect(expectText(res)).toBe("a.ts:1: TODO fix this\nb.ts:7: TODO elsewhere");
+		// Arg-array hygiene is assertable now: the pattern rides an argument slot
+		// after "--", never a shell string.
+		expect(backend.argvCalls).toEqual([
+			{
+				cmd: "rg --json --line-number --color=never --hidden -- TODO /work",
+				bin: "rg",
+				args: ["--json", "--line-number", "--color=never", "--hidden", "--", "TODO", "/work"],
+			},
+		]);
+		expect(backend.calls).toEqual([]); // grep never touches the shell-string seam
+		expect(backend.unexpectedCalls).toEqual([]);
+	});
+
+	test("no match (rg exit 1, empty stdout) -> 'No matches found'", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			probeResults: { rg: true },
+			script: [{ match: /^rg --json/, result: { exitCode: 1 } }],
+		});
+		const res = await grepTool.execute({ pattern: "zzz" }, { rootDir, backend });
+		expect(expectText(res)).toBe("No matches found");
+	});
+
+	test("missing rg (probe table false) -> the RG_MISSING err before any argv call", async () => {
+		const backend = fakeBackend({ dirs: [rootDir], probeResults: { rg: false }, script: [] });
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toBe("ripgrep (rg) is not installed. Install ripgrep to use the grep tool.");
+		expect(backend.argvCalls).toEqual([]); // gated before the spawn
+	});
+
+	test("missing search path (no stat seed) -> 'Path not found: …'", async () => {
+		const backend = fakeBackend({ probeResults: { rg: true }, script: [] });
+		const res = await grepTool.execute({ pattern: "TODO", path: "nope" }, { rootDir, backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toBe("Path not found: /work/nope");
+	});
+
+	test("context blocks read through the backend fs (the off-seam fix): context=1 -> path-n- lines", async () => {
+		const backend = fakeBackend({
+			files: { "/work/ctx.txt": "alpha\nTODO beta\ngamma\n" },
+			probeResults: { rg: true },
+			script: [
+				{ match: /^rg --json/, result: { exitCode: 0 }, stdout: `${rgMatch("/work/ctx.txt", 2, "TODO beta")}\n` },
+			],
+		});
+		const res = await grepTool.execute({ pattern: "TODO", context: 1 }, { rootDir, backend });
+		const text = expectText(res);
+		// Match line (line 2) uses `path:n:`; context lines use `path-n-` — and the
+		// context text came from backend.fs.readFile, not a host read.
+		expect(text).toContain("ctx.txt:2: TODO beta");
+		expect(text).toContain("ctx.txt-1- alpha");
+		expect(text).toContain("ctx.txt-3- gamma");
+	});
+
+	test("context on an unreadable file -> '(unable to read file)' placeholder", async () => {
+		// No file seeded: backend.fs.readFile errs (the fake errs where the real fs
+		// errs), so the block degrades to the placeholder row.
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			probeResults: { rg: true },
+			script: [
+				{ match: /^rg --json/, result: { exitCode: 0 }, stdout: `${rgMatch("/work/gone.ts", 1, "TODO x")}\n` },
+			],
+		});
+		const res = await grepTool.execute({ pattern: "TODO", context: 1 }, { rootDir, backend });
+		expect(expectText(res)).toBe("gone.ts:1: (unable to read file)");
+	});
+
+	test("limit aborts at the cap: capped rows + the limit-reached notice (AbortController path, no spawn)", async () => {
+		// Three matches stream in; the cap fires at 2 and aborts (the fake has no
+		// child to kill, but the capping/framing must hold regardless).
+		const ndjson = [1, 2, 3].map((n) => rgMatch("/work/many.ts", n, `match ${n}`)).join("\n");
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			probeResults: { rg: true },
+			script: [
+				{
+					match: /^rg --json/,
+					result: { exitCode: 0 },
+					stdout: `${ndjson}\n`,
+				},
+			],
+		});
+		const res = await grepTool.execute({ pattern: "match", limit: 2 }, { rootDir, backend });
+		const text = expectText(res);
+		const rows = text.split("\n").filter((line) => line.startsWith("many.ts:"));
+		expect(rows).toEqual(["many.ts:1: match 1", "many.ts:2: match 2"]);
+		expect(text).toContain("2 matches limit reached. Use limit=4 for more, or refine pattern");
+	});
+
+	test("NDJSON split across stdout chunks parses correctly (partial-line carry between chunks)", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			probeResults: { rg: true },
+			script: [
+				{
+					match: /^rg --json/,
+					result: { exitCode: 0 },
+					stdout: `${rgMatch("/work/a.ts", 1, "TODO x")}\n${rgMatch("/work/b.ts", 1, "TODO y")}\n`,
+					chunkDelayMs: 1,
+				},
+			],
+		});
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
+		// chunkDelayMs splits the output into 3 contiguous chunks — each JSON line
+		// straddles chunk boundaries, so the caller's incremental framing reassembles.
+		expect(expectText(res)).toBe("a.ts:1: TODO x\nb.ts:1: TODO y");
+	});
+
+	test("non-(0|1) rg exit with stderr -> err carrying rg's stderr", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			probeResults: { rg: true },
+			script: [{ match: /^rg --json/, result: { exitCode: 2 }, stderr: "rg: bad pattern\n" }],
+		});
+		const res = await grepTool.execute({ pattern: "TODO" }, { rootDir, backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toBe("rg: bad pattern");
+	});
 });
