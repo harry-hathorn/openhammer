@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend, type LocalBackend } from "./backend.ts";
 import type { Result } from "./result.ts";
 
@@ -36,8 +37,8 @@ function expectErr<T>(r: Result<T>, code?: string): void {
 
 // LocalBackend is the host-real backend, so these tests hit the real filesystem
 // (throwaway tmpdir) and spawn real processes — this is spec 23's acceptance test
-// that runShell matches today's bash semantics. A FakeBackend (23f/later) makes
-// the tool-layer shaping tests spawn-free.
+// that runShell matches today's bash semantics. The FakeBackend below (spec 23)
+// is what makes the tool-layer shaping tests spawn-free.
 describe("LocalBackend", () => {
 	let backend: LocalBackend;
 	let dir: string;
@@ -267,5 +268,284 @@ describe("LocalBackend", () => {
 		test("probeFlag returns false for a missing binary", () => {
 			expect(backend.probeFlag("openhammer-definitely-not-a-real-binary-xyz", "--harmony")).toBe(false);
 		}, 15000);
+	});
+});
+
+// FakeBackend (backend.fake.ts) is the scripted, spawn-free ToolBackend that
+// later boxes point every tool's shaping tests at — these tests pin its fs errno
+// shapes, script consumption, spying, and determinism so those tool tests can
+// trust it blindly.
+describe("FakeBackend", () => {
+	describe("identity & lifecycle", () => {
+		test("kind is 'local' (it fakes the local shape; tools must not branch on kind)", () => {
+			expect(fakeBackend().kind).toBe("local");
+		});
+
+		test("homedir defaults to /home/fake and honors the seed override", () => {
+			expect(fakeBackend().homedir()).toBe("/home/fake");
+			expect(fakeBackend({ homedir: "/home/vm" }).homedir()).toBe("/home/vm");
+		});
+
+		test("close resolves and sets the closed flag", async () => {
+			const backend = fakeBackend();
+			expect(backend.closed).toBe(false);
+			await expect(backend.close()).resolves.toBeUndefined();
+			expect(backend.closed).toBe(true);
+		});
+
+		test("overflowPath is deterministic and unique: /tmp/fake/<prefix>-<n>.log", () => {
+			const backend = fakeBackend();
+			expect(backend.overflowPath("openhammer")).toBe("/tmp/fake/openhammer-1.log");
+			expect(backend.overflowPath("openhammer")).toBe("/tmp/fake/openhammer-2.log");
+			// One counter per instance (shared across prefixes → unique)…
+			expect(backend.overflowPath("other")).toBe("/tmp/fake/other-3.log");
+			// …and a fresh instance restarts at 1, so tests stay order-independent.
+			expect(fakeBackend().overflowPath("openhammer")).toBe("/tmp/fake/openhammer-1.log");
+		});
+	});
+
+	describe("fs", () => {
+		test("writeFile → readFile round-trips; the stored and returned Buffers are copies", async () => {
+			const backend = fakeBackend({ dirs: ["/work"] });
+			const input = Buffer.from("abc");
+			const w = await backend.fs.writeFile("/work/f", input);
+			expect(w).toEqual({ ok: true, value: undefined });
+			input[0] = 88; // mutate the caller's buffer after the write — must not rewrite history
+			const first = await backend.fs.readFile("/work/f");
+			expect(first.ok).toBe(true);
+			if (!first.ok) throw new Error("unreachable");
+			expect(first.value.toString("utf-8")).toBe("abc");
+			first.value[0] = 88; // mutate the returned copy — the store must stay intact
+			const second = await backend.fs.readFile("/work/f");
+			expect(second.ok).toBe(true);
+			if (!second.ok) throw new Error("unreachable");
+			expect(second.value.toString("utf-8")).toBe("abc");
+		});
+
+		test("readFile of a missing path returns err ENOENT with the real message shape", async () => {
+			const backend = fakeBackend({ dirs: ["/work"] });
+			const r = await backend.fs.readFile("/work/nope.txt");
+			expectErr(r, "ENOENT");
+			if (r.ok) throw new Error("unreachable");
+			expect(r.error.message).toBe("ENOENT: no such file or directory, open '/work/nope.txt'");
+		});
+
+		test("readFile of a directory returns err EISDIR (real message carries no path)", async () => {
+			const backend = fakeBackend({ dirs: ["/work"] });
+			const r = await backend.fs.readFile("/work");
+			expectErr(r, "EISDIR");
+			if (r.ok) throw new Error("unreachable");
+			expect(r.error.message).toBe("EISDIR: illegal operation on a directory, read");
+		});
+
+		test("writeFile with a missing parent errs ENOENT (strict: runtime writes create no implicit dirs)", async () => {
+			const backend = fakeBackend();
+			const r = await backend.fs.writeFile("/work/f.txt", Buffer.from("x"));
+			expectErr(r, "ENOENT");
+			if (r.ok) throw new Error("unreachable");
+			expect(r.error.message).toBe("ENOENT: no such file or directory, open '/work/f.txt'");
+			// The tree becomes writable once the parent is properly made.
+			expect((await backend.fs.mkdir("/work")).ok).toBe(true);
+			expect((await backend.fs.writeFile("/work/f.txt", Buffer.from("x"))).ok).toBe(true);
+		});
+
+		test("writeFile under a file-as-parent errs ENOTDIR; onto a directory errs EISDIR", async () => {
+			const backend = fakeBackend({ files: { "/work/f": "not a dir" } });
+			expectErr(await backend.fs.writeFile("/work/f/x.txt", Buffer.from("x")), "ENOTDIR");
+			expectErr(await backend.fs.writeFile("/work", Buffer.from("x")), "EISDIR");
+		});
+
+		test("stat maps a file: isFile, size from contents, mtimeMs > 0", async () => {
+			const backend = fakeBackend({ files: { "/work/f.txt": "12345" } });
+			const r = await backend.fs.stat("/work/f.txt");
+			expect(r.ok).toBe(true);
+			if (!r.ok) throw new Error("unreachable");
+			expect(r.value.isFile).toBe(true);
+			expect(r.value.isDir).toBe(false);
+			expect(r.value.size).toBe(5);
+			expect(r.value.mtimeMs).toBeGreaterThan(0);
+		});
+
+		test("stat maps a directory: isDir, size 0", async () => {
+			const backend = fakeBackend({ dirs: ["/work"] });
+			const r = await backend.fs.stat("/work");
+			expect(r.ok).toBe(true);
+			if (!r.ok) throw new Error("unreachable");
+			expect(r.value.isFile).toBe(false);
+			expect(r.value.isDir).toBe(true);
+			expect(r.value.size).toBe(0);
+			expect(r.value.mtimeMs).toBeGreaterThan(0);
+		});
+
+		test("stat of a missing path returns err ENOENT", async () => {
+			expectErr(await fakeBackend().fs.stat("/work/nope"), "ENOENT");
+		});
+
+		test("mkdir registers the whole ancestor chain (-p) and is idempotent", async () => {
+			const backend = fakeBackend();
+			expect(await backend.fs.mkdir("/work/a/b")).toEqual({ ok: true, value: undefined });
+			expect(await backend.fs.exists("/work")).toEqual({ ok: true, value: true });
+			expect(await backend.fs.exists("/work/a")).toEqual({ ok: true, value: true });
+			expect(await backend.fs.exists("/work/a/b")).toEqual({ ok: true, value: true });
+			expect(await backend.fs.mkdir("/work/a/b")).toEqual({ ok: true, value: undefined });
+		});
+
+		test("readdir lists direct entry names sorted (files and dirs alike)", async () => {
+			const backend = fakeBackend({
+				files: { "/work/c.txt": "c", "/work/a.txt": "a" },
+				dirs: ["/work/sub", "/work/empty"],
+			});
+			const r = await backend.fs.readdir("/work");
+			expect(r).toEqual({ ok: true, value: ["a.txt", "c.txt", "empty", "sub"] });
+			expect(await backend.fs.readdir("/work/empty")).toEqual({ ok: true, value: [] });
+			expect(await backend.fs.readdir("/work/sub")).toEqual({ ok: true, value: [] });
+		});
+
+		test("readdir of a file errs ENOTDIR; of a missing path errs ENOENT", async () => {
+			const backend = fakeBackend({ files: { "/work/f.txt": "x" } });
+			const notDir = await backend.fs.readdir("/work/f.txt");
+			expectErr(notDir, "ENOTDIR");
+			if (notDir.ok) throw new Error("unreachable");
+			expect(notDir.error.message).toBe("ENOTDIR: not a directory, scandir '/work/f.txt'");
+			const missing = await backend.fs.readdir("/work/nope");
+			expectErr(missing, "ENOENT");
+			if (missing.ok) throw new Error("unreachable");
+			expect(missing.error.message).toBe("ENOENT: no such file or directory, scandir '/work/nope'");
+		});
+
+		test("exists ok(true)/ok(false); access ok on file and dir, ENOENT on missing", async () => {
+			const backend = fakeBackend({ files: { "/work/f.txt": "x" }, dirs: ["/work/empty"] });
+			expect(await backend.fs.exists("/work/f.txt")).toEqual({ ok: true, value: true });
+			expect(await backend.fs.exists("/work/empty")).toEqual({ ok: true, value: true });
+			expect(await backend.fs.exists("/work/nope.txt")).toEqual({ ok: true, value: false });
+			expect(await backend.fs.access("/work/f.txt")).toEqual({ ok: true, value: undefined });
+			expect(await backend.fs.access("/work/empty")).toEqual({ ok: true, value: undefined });
+			expectErr(await backend.fs.access("/work/nope.txt"), "ENOENT");
+		});
+
+		test("seeded files auto-register their ancestor dirs (world-building sugar)", async () => {
+			const backend = fakeBackend({ files: { "/work/deep/nest/f.txt": "hi" } });
+			expect(await backend.fs.exists("/work/deep/nest")).toEqual({ ok: true, value: true });
+			expect(await backend.fs.readdir("/work/deep")).toEqual({ ok: true, value: ["nest"] });
+			const r = await backend.fs.readFile("/work/deep/nest/f.txt");
+			expect(r.ok).toBe(true);
+			if (!r.ok) throw new Error("unreachable");
+			expect(r.value.toString("utf-8")).toBe("hi");
+		});
+	});
+
+	describe("runShell scripting", () => {
+		test("the first matching unconsumed entry wins and is consumed, in script order", async () => {
+			const backend = fakeBackend({
+				script: [
+					{ match: "git", result: { exitCode: 0 }, stdout: "first" },
+					{ match: "git", result: { exitCode: 1 }, stderr: "second" },
+				],
+			});
+			expect(await backend.runShell("git status", { cwd: "/work" })).toEqual({ exitCode: 0, timedOut: false });
+			expect(await backend.runShell("git status", { cwd: "/work" })).toEqual({ exitCode: 1, timedOut: false });
+			// Both entries spent → the command is now unscripted (loud 127 below).
+			expect(await backend.runShell("git status", { cwd: "/work" })).toEqual({ exitCode: 127, timedOut: false });
+		});
+
+		test("a string match is a substring test; a RegExp uses .test", async () => {
+			const backend = fakeBackend({
+				script: [{ match: /^rg --json /, result: { exitCode: 0 }, stdout: "rg-out" }],
+			});
+			expect((await backend.runShell("rg --json -- pat /work", { cwd: "/work" })).exitCode).toBe(0);
+			// The regex anchors on the command start, so this one misses.
+			expect((await backend.runShell("echo rg --json", { cwd: "/work" })).exitCode).toBe(127);
+			const substring = fakeBackend({
+				script: [{ match: "definitely-substring", result: { exitCode: 0 } }],
+			});
+			expect((await substring.runShell("echo definitely-substring-today", { cwd: "/work" })).exitCode).toBe(0);
+		});
+
+		test("stdout then stderr each arrive as one immediate chunk, in order", async () => {
+			const backend = fakeBackend({
+				script: [{ match: "probe", result: { exitCode: 0 }, stdout: "out-lump\n", stderr: "err-lump\n" }],
+			});
+			const chunks: Buffer[] = [];
+			const r = await backend.runShell("probe --version", { cwd: "/work", onChunk: (b) => chunks.push(b) });
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
+			expect(chunks.map((c) => c.toString("utf-8"))).toEqual(["out-lump\n", "err-lump\n"]);
+		});
+
+		test("chunkDelayMs splits the output into multiple delayed chunks, order preserved", async () => {
+			const backend = fakeBackend({
+				script: [
+					{ match: "tee", result: { exitCode: 0 }, stdout: "0123456789", stderr: "abcdefghij", chunkDelayMs: 5 },
+				],
+			});
+			const chunks: Buffer[] = [];
+			const start = Date.now();
+			const r = await backend.runShell("tee /tmp/x", { cwd: "/work", onChunk: (b) => chunks.push(b) });
+			expect(r).toEqual({ exitCode: 0, timedOut: false });
+			// Each 10-char stream deterministically splits into 3 contiguous chunks.
+			expect(chunks.map((c) => c.toString("utf-8"))).toEqual(["0123", "4567", "89", "abcd", "efgh", "ij"]);
+			// 5 gaps of >=5ms between the 6 chunks (loose lower bound — timers never fire early).
+			expect(Date.now() - start).toBeGreaterThanOrEqual(20);
+		});
+
+		test("a scripted timeout result passes through verbatim (no real timer runs)", async () => {
+			const backend = fakeBackend({ script: [{ match: "sleep", result: { exitCode: -1, timedOut: true } }] });
+			expect(await backend.runShell("sleep 30", { cwd: "/work", timeoutSec: 1 })).toEqual({
+				exitCode: -1,
+				timedOut: true,
+			});
+		});
+
+		test("no matching script → 127, stderr chunk, and an unexpectedCalls record", async () => {
+			const backend = fakeBackend();
+			const chunks: Buffer[] = [];
+			const r = await backend.runShell("fd --json .", { cwd: "/work", onChunk: (b) => chunks.push(b) });
+			expect(r).toEqual({ exitCode: 127, timedOut: false });
+			expect(backend.unexpectedCalls).toEqual(["fd --json ."]);
+			expect(Buffer.concat(chunks).toString("utf-8")).toBe("fake-backend: no script for: fd --json .");
+		});
+
+		test("calls record cmd, cwd and timeoutSec for command-construction assertions", async () => {
+			const backend = fakeBackend({
+				script: [
+					{ match: "echo", result: { exitCode: 0 } },
+					{ match: "echo", result: { exitCode: 0 } },
+				],
+			});
+			await backend.runShell("echo one", { cwd: "/w1" });
+			await backend.runShell("echo two", { cwd: "/w2", timeoutSec: 30, onChunk: () => {} });
+			expect(backend.calls).toEqual([
+				{ cmd: "echo one", cwd: "/w1" },
+				{ cmd: "echo two", cwd: "/w2", timeoutSec: 30 },
+			]);
+			expect(backend.unexpectedCalls).toEqual([]);
+		});
+
+		test("an omitted onChunk is fine (nothing to emit to)", async () => {
+			const backend = fakeBackend({
+				script: [{ match: "echo", result: { exitCode: 0 }, stdout: "hi", chunkDelayMs: 1 }],
+			});
+			expect(await backend.runShell("echo hi", { cwd: "/work" })).toEqual({ exitCode: 0, timedOut: false });
+		});
+	});
+
+	describe("probe scripting", () => {
+		test("probe returns the scripted table, defaulting false; calls are recorded", () => {
+			const backend = fakeBackend({ probeResults: { rg: true } });
+			expect(backend.probe("rg")).toBe(true);
+			expect(backend.probe("fd")).toBe(false); // unscripted → absent
+			expect(backend.probeCalls).toEqual(["rg", "fd"]);
+		});
+
+		test("probeFlag keys '<bin> <flag>', defaults false; calls are recorded", () => {
+			const backend = fakeBackend({ probeFlagResults: { "fd --no-require-git": true } });
+			expect(backend.probeFlag("fd", "--no-require-git")).toBe(true);
+			expect(backend.probeFlag("fd", "--definitely-not")).toBe(false);
+			expect(backend.probeFlag("rg", "--no-require-git")).toBe(false);
+			expect(backend.probeFlagCalls).toEqual([
+				{ bin: "fd", flag: "--no-require-git" },
+				{ bin: "fd", flag: "--definitely-not" },
+				{ bin: "rg", flag: "--no-require-git" },
+			]);
+		});
 	});
 });
