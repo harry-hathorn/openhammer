@@ -15,6 +15,11 @@ export function isDisplayConfig(value: string): value is DisplayConfig {
 	return value === "gl" || value === "headless";
 }
 
+// qemu-img size suffixes are binary: 40G == 40 GiB == 42949672960 B exactly. The cidata
+// partition geometry in cidata.ts is computed from this constant and must stay in lockstep
+// with DISK_SIZE — the installer partitions whatever virtio block device it finds.
+export const DISK_BYTES = 40 * 1024 * 1024 * 1024;
+
 // The display recipe and the memory default couple (spec 22 gate 1): GL gets 6G, plain gets 4G.
 interface DisplayRecipe {
 	readonly device: string;
@@ -81,6 +86,82 @@ export function qemuArgs(input: QemuArgsInput): string[] {
 		"virtio-net-pci,netdev=n0",
 		"-drive",
 		`file=${join(session, "disk.qcow2")},if=virtio,format=qcow2`,
+		"-cdrom",
+		input.isoPath,
+		"-pidfile",
+		join(session, "qemu.pid"),
+	];
+}
+
+export interface InstallQemuArgsInput {
+	/** Session name — `-name openhammer-spike-<name>` (also the session dir basename). */
+	readonly name: string;
+	readonly sessionDir: string;
+	readonly isoPath: string;
+	readonly cidataIsoPath: string;
+}
+
+/**
+ * Unattended-install argv (spec 22 gate 2): the live chassis with the headless recipe
+ * FIXED (4G / virtio-vga / `-display none` — no desktop is driven during install), the
+ * blank qcow2 as the install TARGET disk, the Omarchy ISO as the boot cdrom, and the
+ * cidata NoCloud ISO as a read-only second virtio disk (/dev/vdb). The installer finds
+ * the cidata drive by volume label — "any filesystem with the right label works", the
+ * manual says — so the device type is our choice; a second virtio disk avoids the q35
+ * two-`-cdrom` IDE-indexing collision ("drive with bus=2, unit=0 (index=2) exists" — a
+ * 22b finding) and the implicit AHCI's unaddressable bus name. bootindex=0 on the target
+ * disk encodes the manual's disk-first order (its Proxmox example: `order='scsi0;ide2'`):
+ * the blank disk fails and falls through to the installer ISO on the first boot, and the
+ * installed disk wins every boot after — the installer reboots by itself and must not
+ * land back in the ISO. The cdrom and the cidata disk carry no bootindex, so both sort
+ * after the target disk; neither can displace it once it holds a Limine ESP.
+ */
+export function installQemuArgs(input: InstallQemuArgsInput): string[] {
+	const session = input.sessionDir;
+	const recipe = DISPLAY_RECIPES.headless;
+	return [
+		"-name",
+		`openhammer-spike-${input.name}`,
+		"-machine",
+		"q35",
+		"-cpu",
+		"host",
+		"-accel",
+		"kvm",
+		"-smp",
+		"4",
+		"-m",
+		recipe.memory,
+		"-device",
+		recipe.device,
+		"-display",
+		recipe.display,
+		"-drive",
+		`if=pflash,format=raw,readonly=on,file=${OVMF_CODE}`,
+		"-drive",
+		`if=pflash,format=raw,file=${join(session, "OVMF_VARS.4m.fd")}`,
+		"-device",
+		"qemu-xhci",
+		"-device",
+		"usb-tablet",
+		"-chardev",
+		`socket,id=qmp,path=${join(session, "qmp.sock")},server=on,wait=off`,
+		"-mon",
+		"chardev=qmp,mode=control",
+		"-serial",
+		`file:${join(session, "serial.log")}`,
+		"-netdev",
+		"user,id=n0,hostfwd=tcp:127.0.0.1:0-:22",
+		"-device",
+		"virtio-net-pci,netdev=n0",
+		"-drive",
+		`file=${join(session, "disk.qcow2")},if=none,id=hd0,format=qcow2`,
+		"-device",
+		"virtio-blk-pci,drive=hd0,bootindex=0",
+		"-drive",
+		`file=${input.cidataIsoPath},if=none,id=hd-cidata,format=raw,readonly=on`,
+		"-device",
+		"virtio-blk-pci,drive=hd-cidata",
 		"-cdrom",
 		input.isoPath,
 		"-pidfile",
