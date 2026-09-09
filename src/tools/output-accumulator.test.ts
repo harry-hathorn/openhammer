@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { basename } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "./truncate.ts";
@@ -104,6 +105,45 @@ describe("tempFilePrefix", () => {
 		created.push(path);
 		await acc.closeTempFile();
 		expect(basename(path).startsWith("oh-custom-")).toBe(true);
+	});
+});
+
+describe("tempFilePath (spec 23: backend overflowPath wiring)", () => {
+	it("uses a provided path verbatim on truncation-persist", async () => {
+		const provided = join(tmpdir(), `openhammer-acc-provided-${process.pid}.log`);
+		created.push(provided);
+		const payload = "q".repeat(60 * 1024);
+		const acc = new OutputAccumulator({ tempFilePath: provided });
+		acc.append(Buffer.from(payload));
+		const snap = acc.snapshot({ persistIfTruncated: true });
+		expect(snap.truncation.truncated).toBe(true);
+		expect(snap.fullOutputPath).toBe(provided); // verbatim — no prefix minting
+		await acc.closeTempFile();
+		expect(readFileSync(provided, "utf-8")).toBe(payload);
+	});
+
+	it("still mints its own openhammer-prefixed path when constructed bare", async () => {
+		const acc = new OutputAccumulator();
+		acc.append(Buffer.from("y".repeat(60 * 1024)));
+		const snap = acc.snapshot({ persistIfTruncated: true });
+		const path = snap.fullOutputPath;
+		expect(path).toBeTruthy();
+		if (!path) throw new Error("unreachable");
+		created.push(path);
+		await acc.closeTempFile();
+		// Same shape defaultTempFilePath has always produced: tmpdir + prefix + 8 hex + .log.
+		expect(path.startsWith(join(tmpdir(), "openhammer-"))).toBe(true);
+		expect(basename(path)).toMatch(/^openhammer-[0-9a-f]{16}\.log$/);
+	});
+
+	it("creates nothing at the provided path when the output stays under the limits", () => {
+		const provided = join(tmpdir(), `openhammer-acc-unspilled-${process.pid}.log`);
+		const acc = new OutputAccumulator({ tempFilePath: provided });
+		acc.append(Buffer.from("small\n"));
+		const snap = acc.snapshot();
+		expect(snap.truncation.truncated).toBe(false);
+		expect(snap.fullOutputPath).toBeUndefined();
+		expect(existsSync(provided)).toBe(false); // the file is opened lazily, only on spill
 	});
 });
 
