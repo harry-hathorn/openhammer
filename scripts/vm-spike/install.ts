@@ -4,16 +4,34 @@
 // are disk growth + ssh (serial.log carries OVMF only — a 22a finding). The gate is TWO
 // successful `ssh ... true` round-trips 10 s apart: the installer reboots by itself
 // mid-flight, and a single answer could be an sshd that dies with the installer.
-// On success the installed session dir is left INTACT — the next box boots it.
-import { type ChildProcess, spawn } from "node:child_process";
-import { appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
-import { open } from "node:fs/promises";
+// On success the installed system is powered down CLEANLY over ssh (guest
+// `systemctl poweroff` — a hard QMP quit on the live guest is a power cut that loses
+// uncommitted btrfs data; the first golden lost its sshd host keys exactly that way) and
+// the installed session dir is left INTACT — the next box boots it via a qcow2 overlay.
+import { spawn } from "node:child_process";
+import { appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DISK_SIZE, installQemuArgs, OVMF_VARS, QEMU_BIN, QEMU_IMG } from "./args.ts";
 import { buildCidata } from "./cidata.ts";
 import { ensureIso } from "./iso.ts";
 import { run } from "./proc.ts";
-import { connectQmp, type QmpClient } from "./qmp.ts";
+import type { QmpClient } from "./qmp.ts";
+import {
+	assertProcessGone,
+	connectQmpWithRetry,
+	hasExited,
+	isRecord,
+	type LadderResult,
+	parseUsernetHostPort,
+	shutdownLadder,
+	sleep,
+	sshExecTrue,
+	sshRun,
+	statusState,
+	tailText,
+	waitForExit,
+	waitForFile,
+} from "./runtime.ts";
 import { ISO_URL, openSpikeDirs } from "./scratch.ts";
 
 const DEFAULT_BUDGET_MINUTES = 45;
@@ -21,7 +39,6 @@ const SSH_POLL_MS = 10_000;
 const CONFIRM_GAP_MS = 10_000;
 const OBSERVE_INTERVAL_MS = 60_000;
 const CONNECT_RETRY_ATTEMPTS = 5;
-const LADDER_STEP_MS = 5_000;
 // The configured user is the one authorized_keys is installed for; root/arch are the
 // long shots recorded as tried (installer-environment users that could answer first).
 const SSH_USER_CANDIDATES = ["sandbox", "root", "arch"];
@@ -44,87 +61,6 @@ function parseFlags(argv: readonly string[]): InstallFlags {
 		throw new Error(`install: --budget-minutes must be a positive number, got ${argv.join(" ")}`);
 	}
 	return { budgetMinutes };
-}
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => {
-		setTimeout(resolve, ms);
-	});
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
-	const deadline = Date.now() + timeoutMs;
-	for (;;) {
-		if (statSync(path, { throwIfNoEntry: false }) !== undefined) {
-			return true;
-		}
-		if (Date.now() >= deadline) {
-			return false;
-		}
-		await sleep(100);
-	}
-}
-
-// The socket file can appear a beat before QEMU finishes listening — retry the connect.
-async function connectQmpWithRetry(socketPath: string, attempts: number): Promise<QmpClient> {
-	let lastError: unknown = new Error("connectQmpWithRetry: no attempts");
-	for (let attempt = 0; attempt < attempts; attempt++) {
-		try {
-			return await connectQmp(socketPath);
-		} catch (error) {
-			lastError = error;
-		}
-		await sleep(500);
-	}
-	return Promise.reject(lastError instanceof Error ? lastError : new Error(String(lastError)));
-}
-
-/**
- * Parse the `info usernet` table for the slirp hostfwd row. Probe-verified shape on this
- * host's QEMU 11.1 (one row per hostfwd, whitespace-run separated):
- * `  TCP[HOST_FORWARD]  14  127.0.0.1 43423  10.0.2.15 22  0 0`
- * tokens: proto[state] fd srcAddr srcPort dstAddr dstPort recvq sendq — the host port we
- * dial is srcPort on the row whose guest port is 22.
- */
-function parseUsernetHostPort(table: string): { row: string; port: number } | undefined {
-	for (const line of table.split(/\r?\n/)) {
-		const tokens = line.trim().split(/\s+/);
-		if (tokens[0] !== "TCP[HOST_FORWARD]" || tokens.length < 6) {
-			continue;
-		}
-		const sourceAddress = tokens[2];
-		const sourcePort = tokens[3];
-		const destinationPort = tokens[5];
-		const port = Number(sourcePort);
-		if (sourceAddress === "127.0.0.1" && destinationPort === "22" && Number.isInteger(port) && port > 0) {
-			return { row: line.trim(), port };
-		}
-	}
-	return undefined;
-}
-
-async function sshExecTrue(user: string, port: number, keyPath: string): Promise<boolean> {
-	const result = await run("ssh", [
-		"-i",
-		keyPath,
-		"-p",
-		String(port),
-		"-o",
-		"StrictHostKeyChecking=no",
-		"-o",
-		"UserKnownHostsFile=/dev/null",
-		"-o",
-		"ConnectTimeout=5",
-		"-o",
-		"BatchMode=yes",
-		`${user}@127.0.0.1`,
-		"true",
-	]);
-	return result.code === 0;
 }
 
 interface DiskSample {
@@ -154,91 +90,6 @@ function diskSample(diskPath: string): Promise<DiskSample | undefined> {
 		}
 		return { virtualSize, actualSize };
 	});
-}
-
-function hasExited(child: ChildProcess): boolean {
-	return child.exitCode !== null || child.signalCode !== null;
-}
-
-function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-	if (hasExited(child)) {
-		return Promise.resolve(true);
-	}
-	return new Promise<boolean>((resolve) => {
-		const timer = setTimeout(() => {
-			child.removeListener("exit", onExit);
-			resolve(false);
-		}, timeoutMs);
-		const onExit = (): void => {
-			clearTimeout(timer);
-			resolve(true);
-		};
-		child.once("exit", onExit);
-	});
-}
-
-type LadderPath = "quit" | "sigterm" | "sigkill" | "already-exited";
-
-interface LadderResult {
-	readonly path: LadderPath;
-	readonly detail: string;
-}
-
-// The stop ladder (as in boot.ts): QMP quit → wait ≤5 s → SIGTERM → wait 5 s → SIGKILL.
-async function shutdownLadder(child: ChildProcess, qmp: QmpClient | undefined): Promise<LadderResult> {
-	const describe = (): string => `exitCode=${child.exitCode} signalCode=${child.signalCode}`;
-	if (hasExited(child)) {
-		return { path: "already-exited", detail: describe() };
-	}
-	let quitNote = "quit sent";
-	if (qmp !== undefined) {
-		try {
-			await qmp.execute("quit");
-		} catch (error) {
-			quitNote = `quit sent (reply lost to close, expected: ${error instanceof Error ? error.message : String(error)})`;
-		}
-	}
-	if (await waitForExit(child, LADDER_STEP_MS)) {
-		return { path: "quit", detail: `${quitNote}; ${describe()}` };
-	}
-	child.kill("SIGTERM");
-	if (await waitForExit(child, LADDER_STEP_MS)) {
-		return { path: "sigterm", detail: describe() };
-	}
-	child.kill("SIGKILL");
-	if (await waitForExit(child, LADDER_STEP_MS)) {
-		return { path: "sigkill", detail: describe() };
-	}
-	throw new Error(`qemu pid ${child.pid ?? "?"} survived SIGKILL`);
-}
-
-function assertProcessGone(child: ChildProcess): void {
-	const pid = child.pid;
-	if (pid === undefined) {
-		return;
-	}
-	try {
-		process.kill(pid, 0);
-	} catch {
-		return; // ESRCH — gone, as required
-	}
-	throw new Error(`qemu pid ${pid} is still signalable after the stop ladder`);
-}
-
-async function tailText(path: string, bytes: number): Promise<string> {
-	const size = statSync(path, { throwIfNoEntry: false })?.size ?? 0;
-	if (size === 0) {
-		return "";
-	}
-	const length = Math.min(size, bytes);
-	const buffer = Buffer.alloc(length);
-	const handle = await open(path, "r");
-	try {
-		await handle.read(buffer, 0, length, size - length);
-	} finally {
-		await handle.close();
-	}
-	return buffer.toString("utf8");
 }
 
 let stopRequested = false;
@@ -439,7 +290,30 @@ async function main(): Promise<number> {
 		}
 
 		const wallClockSeconds = (Date.now() - startedAt) / 1000;
-		ladder = await shutdownLadder(child, qmp);
+		// Clean shutdown beats the stop ladder here: the installed system is left as the
+		// golden image for every later box, and a QMP `quit` on the live guest is a hard
+		// power cut — the first golden lost its sshd host keys that way (0-byte key files:
+		// btrfs had the metadata committed but not the data; sshd then dies with "no
+		// hostkeys available" on every boot, and sshdgenkeys won't regen because its
+		// ConditionPathExists=!key only fires on ABSENT files). A guest-initiated
+		// `systemctl poweroff` unmounts and flushes before QEMU exits.
+		let poweroffNote = "not attempted";
+		if (gatePassed && candidateUser !== undefined && hostPort !== undefined) {
+			const password = readFileSync(cidata.recoveryPasswordPath, "utf8").trim();
+			const poweroff = await sshRun(candidateUser, hostPort, cidata.privateKeyPath, "sudo -S systemctl poweroff", {
+				stdin: `${password}\n`,
+			});
+			poweroffNote = `ssh sudo systemctl poweroff rc=${poweroff.code} ${poweroff.stderrTail.trim()}`;
+			console.log(`install: ${poweroffNote}`);
+		}
+		if (gatePassed && (await waitForExit(child, 180_000))) {
+			ladder = {
+				path: "guest-poweroff",
+				detail: `${poweroffNote}; exitCode=${child.exitCode} signalCode=${child.signalCode}`,
+			};
+		} else {
+			ladder = await shutdownLadder(child, qmp);
+		}
 		assertProcessGone(child);
 		console.log(`install: shutdown path ${ladder.path} (${ladder.detail})`);
 
@@ -503,13 +377,6 @@ async function main(): Promise<number> {
 			assertProcessGone(child);
 		}
 	}
-}
-
-function statusState(returned: unknown): string {
-	if (isRecord(returned) && typeof returned.status === "string") {
-		return returned.status;
-	}
-	return `unexpected return: ${JSON.stringify(returned)}`;
 }
 
 main()
