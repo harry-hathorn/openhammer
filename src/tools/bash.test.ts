@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { bashTool } from "./bash.ts";
 import type { Result } from "./result.ts";
@@ -118,4 +119,127 @@ describe("bashTool", () => {
 			}
 		}
 	}, 15000);
+
+	test("spawn error (missing shell) -> err carrying the spawn error, not an exit-code message", async () => {
+		// The rejection path bash's try/catch narrows. Covered here with the real
+		// LocalBackend because FakeBackend.runShell never rejects by design.
+		// Snapshot/restore SHELL (LocalBackend reads it per call) so sibling tests
+		// can't be poisoned — mirrors backend.test.ts's missing-shell test.
+		const savedShell = process.env.SHELL;
+		process.env.SHELL = "/nonexistent/openhammer-no-such-shell";
+		try {
+			const res = await bashTool.execute({ command: "echo hi" }, { rootDir, backend });
+			expect(res.ok).toBe(false);
+			if (res.ok) throw new Error("unreachable");
+			expect(res.error.message).toContain("spawn /nonexistent/openhammer-no-such-shell");
+			expect(res.error.message).toContain("ENOENT");
+			expect(res.error.message).not.toContain("Command exited with code");
+		} finally {
+			if (savedShell === undefined) {
+				delete process.env.SHELL;
+			} else {
+				process.env.SHELL = savedShell;
+			}
+		}
+	}, 15000);
+});
+
+// Spec 23e: the ShellResult -> result shaping, driven by the scripted
+// FakeBackend — zero process spawns, zero host fs (outputs stay under the
+// truncation limits, so the accumulator never spills; the fake's overflowPath
+// mint is a pure string). The real-spawn counterparts live in the suite above.
+describe("bash via FakeBackend", () => {
+	const rootDir = "/work";
+
+	test("exit 0 with stdout -> ok text; cmd and cwd recorded", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [{ match: "echo hello", result: { exitCode: 0 }, stdout: "hello\n" }],
+		});
+		const res = await bashTool.execute({ command: "echo hello" }, { rootDir, backend });
+		expect(expectText(res)).toBe("hello\n");
+		expect(backend.calls).toEqual([{ cmd: "echo hello", cwd: rootDir }]);
+		expect(backend.unexpectedCalls).toEqual([]);
+	});
+
+	test("exit 0 with no output -> ok '(no output)' placeholder", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [{ match: "true", result: { exitCode: 0 } }],
+		});
+		const res = await bashTool.execute({ command: "true" }, { rootDir, backend });
+		expect(expectText(res)).toBe("(no output)");
+	});
+
+	test("non-zero exit -> err 'Command exited with code 3' over the captured output", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [{ match: "make", result: { exitCode: 3 }, stdout: "building...\n", stderr: "make: error\n" }],
+		});
+		const res = await bashTool.execute({ command: "make all" }, { rootDir, backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toContain("building...");
+		expect(res.error.message).toContain("make: error");
+		// appendStatus shape: captured output, blank line, then the status as the last line.
+		expect(res.error.message.endsWith("Command exited with code 3")).toBe(true);
+	});
+
+	test("timedOut -> err 'Command timed out after N seconds'; timeout threads through as timeoutSec", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [{ match: "sleep", result: { exitCode: -1, timedOut: true }, stdout: "started\n" }],
+		});
+		const res = await bashTool.execute({ command: "sleep 30", timeout: 2 }, { rootDir, backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toContain("started");
+		expect(res.error.message.endsWith("Command timed out after 2 seconds")).toBe(true);
+		expect(backend.calls).toEqual([{ cmd: "sleep 30", cwd: rootDir, timeoutSec: 2 }]);
+	});
+
+	test("timedOut with no captured output -> the bare status line (no '(no output)' placeholder)", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [{ match: "hang", result: { exitCode: -1, timedOut: true } }],
+		});
+		const res = await bashTool.execute({ command: "hang", timeout: 1 }, { rootDir, backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toBe("Command timed out after 1 seconds");
+	});
+
+	test("chunked multi-chunk emission (chunkDelayMs) -> merged output in arrival order", async () => {
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [
+				{ match: "build", result: { exitCode: 0 }, stdout: "step-one-", stderr: "step-two-", chunkDelayMs: 1 },
+			],
+		});
+		const res = await bashTool.execute({ command: "build --all" }, { rootDir, backend });
+		// Each stream deterministically splits into 3 chunks; the accumulator
+		// must reassemble them in arrival order (stdout chunks, then stderr).
+		expect(expectText(res)).toBe("step-one-step-two-");
+	});
+
+	test("working directory does not exist -> err before any shell call", async () => {
+		const backend = fakeBackend({ script: [] });
+		const res = await bashTool.execute({ command: "echo hi" }, { rootDir: "/no/such/dir", backend });
+		expect(res.ok).toBe(false);
+		if (res.ok) throw new Error("unreachable");
+		expect(res.error.message).toBe("Working directory does not exist: /no/such/dir\nCannot execute bash commands.");
+		expect(backend.calls).toEqual([]); // the precheck fires before runShell
+	});
+
+	test("exitCode -1 without timedOut (signal death) -> ok, mapping the old null-exit branch", async () => {
+		// Documented spec 23e choice: the old local code saw `null` here and its
+		// `exitCode !== 0 && exitCode !== null` guard skipped the err, so the
+		// backend's -1 sentinel lands on the ok branch (see bash.ts's header).
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			script: [{ match: "kill", result: { exitCode: -1 }, stdout: "partial\n" }],
+		});
+		const res = await bashTool.execute({ command: "kill -9 $$" }, { rootDir, backend });
+		expect(expectText(res)).toBe("partial\n");
+	});
 });

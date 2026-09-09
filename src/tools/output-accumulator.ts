@@ -12,6 +12,10 @@
  *
  * One deliberate change from pi: the default `tempFilePrefix` is `"openhammer"`
  * (was `"pi-output"`) so persisted temp files are attributable to this server.
+ * Spec 23 adds `tempFilePath`: `bash` routes its overflow through
+ * `backend.overflowPath("openhammer")` (identical path shape locally — prefix +
+ * 8 hex + `.log` under the tmpdir — a guest path in VM mode, spec 25); when no
+ * path is provided the internal mint from `tempFilePrefix` remains the fallback.
  */
 
 import { randomBytes } from "node:crypto";
@@ -24,6 +28,8 @@ export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
 	tempFilePrefix?: string;
+	/** Exact path for the overflow temp file (spec 23: `backend.overflowPath`). When omitted, one is minted from `tempFilePrefix` under the OS tmpdir. Used verbatim — the file is still created lazily, only if the output spills. */
+	tempFilePath?: string;
 }
 
 export interface OutputSnapshot {
@@ -53,6 +59,7 @@ export class OutputAccumulator {
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
 	private readonly tempFilePrefix: string;
+	private readonly providedTempFilePath: string | undefined;
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
@@ -75,6 +82,7 @@ export class OutputAccumulator {
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "openhammer";
+		this.providedTempFilePath = options.tempFilePath;
 	}
 
 	append(data: Buffer): void {
@@ -228,7 +236,7 @@ export class OutputAccumulator {
 		if (this.tempFilePath) {
 			return;
 		}
-		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
+		this.tempFilePath = this.providedTempFilePath ?? defaultTempFilePath(this.tempFilePrefix);
 		this.tempFileStream = createWriteStream(this.tempFilePath);
 		for (const chunk of this.rawChunks) {
 			this.tempFileStream.write(chunk);
