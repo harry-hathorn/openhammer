@@ -16,6 +16,7 @@ import {
 	sshCloseMux,
 	sshExec,
 	sshExecArgv,
+	sshTargetForPort,
 } from "./ssh.ts";
 
 // The sample session target: spec-22's measured port, the session.ts per-session pin/socket
@@ -202,6 +203,24 @@ describe("sshExecArgv", () => {
 		expect(() => sshExecArgv(TARGET, [])).toThrow(
 			"sshExecArgv: remoteArgv must have at least one element (the guest binary)",
 		);
+	});
+});
+
+describe("sshTargetForPort", () => {
+	it("completes a port-less target with the discovered port and moves nothing else", () => {
+		// 25d's join: the session's own facts arrive without a port (it does not exist yet);
+		// the discovered number is the only thing that fills the gap.
+		const base: Omit<SshTarget, "port"> = {
+			user: "sandbox",
+			host: "127.0.0.1",
+			keyPath: "/vm/secrets/id_ed25519",
+			knownHostsPath: "/vm/sessions/s1/known_hosts",
+			controlPath: "/vm/sessions/s1/cm.sock",
+		};
+		expect(sshTargetForPort(base, 40199)).toEqual({ ...base, port: 40199 });
+		// The completed target is a first-class SshTarget — the builders accept it as-is.
+		expect(sshExecArgv(sshTargetForPort(base, 40199), ["true"])).toContain("-p");
+		expect(sshExecArgv(sshTargetForPort(base, 40199), ["true"])).toContain("40199");
 	});
 });
 

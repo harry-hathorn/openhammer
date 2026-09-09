@@ -94,7 +94,9 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { FsBackend, ShellResult, ToolBackend } from "../tools/backend.ts";
 import { createSshFs } from "./fs-ssh.ts";
-import { type SshExecResult, type SshTarget, sshCloseMux, sshExec, sshExecArgv } from "./ssh.ts";
+import type { QmpClient } from "./qmp/client.ts";
+import { type SshExecResult, type SshTarget, sshCloseMux, sshExec, sshExecArgv, sshTargetForPort } from "./ssh.ts";
+import { discoverSshPort } from "./usernet.ts";
 
 /**
  * The ceiling every wrapped command runs under when the caller gave no `timeoutSec` (or a
@@ -383,4 +385,36 @@ export class VmBackend implements ToolBackend {
 /** Construct the guest backend (factory style, matching `createLocalBackend`). */
 export function createVmBackend(spec: VmBackendSpec, deps: VmBackendDeps = {}): VmBackend {
 	return new VmBackend(spec, deps);
+}
+
+/**
+ * A {@link VmBackendSpec} whose target lacks exactly the port: everything a session layer
+ * knows at build time, minus the one fact that only exists after QEMU is up (25d's discovery
+ * supplies it).
+ */
+export type VmBackendPendingSpec = Omit<VmBackendSpec, "target"> & { target: Omit<SshTarget, "port"> };
+
+/** createVmBackendFromQmp's seams: {@link VmBackendDeps} threaded through, plus the discovery override. */
+export interface VmBackendFromQmpDeps extends VmBackendDeps {
+	/** Override the port discovery. Default: {@link discoverSshPort} over the passed qmp. */
+	readonly discover?: typeof discoverSshPort;
+}
+
+/**
+ * The connection factory the session layer consumes (spec 25d's wiring): discover the
+ * slirp-assigned ephemeral port over the LIVE QMP connection (`discoverSshPort` — poll
+ * `info usernet` until the hostfwd row parses), complete the target with it
+ * (`sshTargetForPort`), and build the {@link VmBackend}. The spec deliberately takes a
+ * port-LESS target, so a caller cannot smuggle in a stale port — production always learns it
+ * here from the guest that is actually running (a fixed `MCP_VM_SSH_PORT` is a manual-debug
+ * escape hatch, never this path). Rejects with discovery's actionable error when the netdev
+ * never answers; everything else is createVmBackend's.
+ */
+export async function createVmBackendFromQmp(
+	spec: VmBackendPendingSpec,
+	qmp: Pick<QmpClient, "humanMonitorCommand">,
+	deps: VmBackendFromQmpDeps = {},
+): Promise<VmBackend> {
+	const port = await (deps.discover ?? discoverSshPort)(qmp);
+	return createVmBackend({ ...spec, target: sshTargetForPort(spec.target, port) }, deps);
 }
