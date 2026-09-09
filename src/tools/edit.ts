@@ -5,7 +5,7 @@
  * stripped of everything UI/agent-coupled: `pi-tui`, render/preview, the
  * `EditOperations` interface seam, `withFileMutationQueue`, and the
  * `details` diff/patch generation (OpenHammer has no TUI → no `diff` dep). The
- * body is the faithful pi sequence: `resolveToCwd` → `access(R_OK|W_OK)` → read
+ * body is the faithful pi sequence: `resolveToCwd` → `access` → read
  * UTF-8 → `stripBom` → `detectLineEnding` → `normalizeToLF` →
  * `applyEditsToNormalizedContent` → `restoreLineEndings` → write → report
  * `Successfully replaced ${edits.length} block(s) in ${path}.` (original arg path,
@@ -15,10 +15,10 @@
  * `err(new Error(...))`, never throws. pi's `validateEditInput` throws on an
  * empty/non-array `edits`; here it returns a `Result`, so `execute` composes it
  * with zero try/catch. `applyEditsToNormalizedContent` already returns a `Result`
- * (spec 06a). File I/O goes through `io.ts` Result-wrappers, so the body has zero
- * try/catch — the MCP `CallTool` handler (spec 12) is the single narrowing point.
+ * (spec 06a). File I/O goes through the backend seam's Result-wrapping `fs` ops
+ * (`ctx.backend.fs`, spec 23), so the body has zero try/catch — the MCP
+ * `CallTool` handler (spec 12) is the single narrowing point.
  */
-import { constants } from "node:fs";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
 import {
 	applyEditsToNormalizedContent,
@@ -28,7 +28,6 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
-import { access, readFile, writeFile } from "./io.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok, type Result } from "./result.ts";
 
@@ -154,8 +153,11 @@ export const editTool: ToolModule = {
 
 		const absolutePath = resolveToCwd(path, ctx.rootDir);
 
-		// Must be readable + writable (pi: R_OK | W_OK). On failure, mirror pi's message.
-		const accessRes = await access(absolutePath, constants.R_OK | constants.W_OK);
+		// Must be readable + writable (pi: R_OK | W_OK). The backend seam's `access`
+		// promises R_OK only (spec 23) — the interface is the contract — so a
+		// readable-but-unwritable file surfaces at the write below, which carries
+		// the same shaped message (see there). On failure, mirror pi's message.
+		const accessRes = await ctx.backend.fs.access(absolutePath);
 		if (!accessRes.ok) {
 			const code = errnoCode(accessRes.error);
 			const detail = code !== null ? `Error code: ${code}` : String(accessRes.error);
@@ -164,7 +166,7 @@ export const editTool: ToolModule = {
 
 		// Read UTF-8, strip BOM (the model won't include an invisible BOM in oldText),
 		// detect the original line ending, and normalize to LF for matching.
-		const bufferRes = await readFile(absolutePath);
+		const bufferRes = await ctx.backend.fs.readFile(absolutePath);
 		if (!bufferRes.ok) {
 			return err(bufferRes.error);
 		}
@@ -179,11 +181,18 @@ export const editTool: ToolModule = {
 			return err(applied.error);
 		}
 
-		// Restore the original line ending + BOM, then write back.
+		// Restore the original line ending + BOM, then write back. The backend takes
+		// a Buffer; UTF-8-encoding here is byte-identical to the old
+		// `writeFile(path, finalContent, "utf-8")`. A write failure (e.g. the file
+		// is not writable — the seam's `access` promises R_OK only, so writability
+		// surfaces here) gets the same shaped message as the access failure above,
+		// preserving pi's error shape.
 		const finalContent = bom + restoreLineEndings(applied.value.newContent, originalEnding);
-		const writeRes = await writeFile(absolutePath, finalContent, "utf-8");
+		const writeRes = await ctx.backend.fs.writeFile(absolutePath, Buffer.from(finalContent, "utf-8"));
 		if (!writeRes.ok) {
-			return err(writeRes.error);
+			const code = errnoCode(writeRes.error);
+			const detail = code !== null ? `Error code: ${code}` : String(writeRes.error);
+			return err(new Error(`Could not edit file: ${path}. ${detail}.`));
 		}
 
 		const toolOk: ToolOk = {

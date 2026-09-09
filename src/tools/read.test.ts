@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { readTool } from "./read.ts";
 import { DEFAULT_MAX_BYTES } from "./truncate.ts";
@@ -16,21 +17,26 @@ import { DEFAULT_MAX_BYTES } from "./truncate.ts";
 const backend = createLocalBackend();
 
 let workdir: string;
-
-beforeAll(() => {
-	workdir = mkdtempSync(join(tmpdir(), "openhammer-read-"));
-});
-
-afterAll(() => {
-	rmSync(workdir, { recursive: true, force: true });
-});
-
 let rootDir: string;
 
-beforeEach(() => {
-	// Each test gets an isolated subdir as `rootDir`.
-	rootDir = mkdtempSync(join(workdir, "t-"));
-});
+/**
+ * Register the real-fs hooks for a LocalBackend describe: one throwaway workdir
+ * per describe, a fresh isolated subdir as `rootDir` per test. Scoped to the
+ * real-fs describes (not module level) so the FakeBackend suite below runs with
+ * zero real-fs access and zero process spawns.
+ */
+function useRealFsRoot(): void {
+	beforeAll(() => {
+		workdir = mkdtempSync(join(tmpdir(), "openhammer-read-"));
+	});
+	afterAll(() => {
+		rmSync(workdir, { recursive: true, force: true });
+	});
+	beforeEach(() => {
+		// Each test gets an isolated subdir as `rootDir`.
+		rootDir = mkdtempSync(join(workdir, "t-"));
+	});
+}
 
 /** Unwrap a successful Result; throw (failing the test) if it was an err. */
 function unwrap<T extends ToolOk>(r: { ok: true; value: T } | { ok: false; error: Error }): T {
@@ -70,6 +76,8 @@ function imageOf(r: { ok: true; value: ToolOk } | { ok: false; error: Error }): 
 }
 
 describe("read tool — text path", () => {
+	useRealFsRoot();
+
 	it("returns the full file with no line-number prefixes (spec acceptance)", async () => {
 		const lines = Array.from({ length: 10 }, (_, i) => `line-${i + 1}`);
 		writeFileSync(join(rootDir, "a.txt"), lines.join("\n"));
@@ -182,6 +190,8 @@ describe("read tool — text path", () => {
 });
 
 describe("read tool — image path", () => {
+	useRealFsRoot();
+
 	/** Write `bytes` to `name` under rootDir; return the Buffer written. */
 	function writeImage(name: string, bytes: number[]): Buffer {
 		const buf = Buffer.from(bytes);
@@ -237,5 +247,66 @@ describe("read tool — image path", () => {
 	it("treats an unknown extension as a text file", async () => {
 		writeFileSync(join(rootDir, "data.csv"), "a,b,c\n1,2,3");
 		expect(textOf(await readTool.execute({ path: "data.csv" }, { rootDir, backend }))).toBe("a,b,c\n1,2,3");
+	});
+});
+
+// Spec 23: the shaping suite — same tool, FakeBackend instead of LocalBackend, so
+// truncate caps, footers, the image branch, and error text are pinned with zero
+// real-fs access and zero process spawns. Seeded paths are fake-absolute; the
+// fake's errno messages match `node:fs` verbatim (backend.fake.ts fidelity rules).
+describe("read via FakeBackend", () => {
+	it("happy path: seeded file → exact content, no line-number prefixes", async () => {
+		const fake = fakeBackend({ files: { "/work/hello.txt": "line1\nline2\nline3" } });
+
+		const r = await readTool.execute({ path: "hello.txt" }, { rootDir: "/work", backend: fake });
+
+		expect(textOf(r)).toBe("line1\nline2\nline3");
+	});
+
+	it("missing file → err with the exact ENOENT access message", async () => {
+		const fake = fakeBackend({ dirs: ["/work"] });
+
+		const r = await readTool.execute({ path: "nope.txt" }, { rootDir: "/work", backend: fake });
+
+		expect(r.ok).toBe(false);
+		if (r.ok) throw new Error("unreachable");
+		expect(r.error.message).toBe("ENOENT: no such file or directory, access '/work/nope.txt'");
+	});
+
+	it("line cap: a 3000-line seed truncates at 2000 lines with the continue footer", async () => {
+		const lines = Array.from({ length: 3000 }, (_, i) => `line-${i + 1}`);
+		const fake = fakeBackend({ files: { "/work/big.txt": lines.join("\n") } });
+
+		const text = textOf(await readTool.execute({ path: "big.txt" }, { rootDir: "/work", backend: fake }));
+
+		expect(text).toContain(lines[1999]!);
+		expect(text).not.toContain(`\n${lines[2000]}`); // line 2001 not in the shown window
+		expect(text).toContain("[Showing lines 1-2000 of 3000. Use offset=2001 to continue.]");
+	});
+
+	it("byte cap: a >50KB seed truncates by bytes with the '(50.0KB limit)' footer", async () => {
+		// 300 lines × 200 bytes = 60,299 bytes total, each line far under the 50KB
+		// per-line bar, so the byte branch (not firstLineExceedsLimit) fires. Lines
+		// cost 200 (first) + 201 (rest) bytes joined → exactly 254 fit under 51,200.
+		const lines = Array.from({ length: 300 }, (_, i) => `${String(i).padStart(4, "0")}${"x".repeat(196)}`);
+		const fake = fakeBackend({ files: { "/work/wide.txt": lines.join("\n") } });
+
+		const text = textOf(await readTool.execute({ path: "wide.txt" }, { rootDir: "/work", backend: fake }));
+
+		expect(text).toContain(lines[253]!);
+		expect(text).not.toContain(`\n${lines[254]}`); // line 255 not in the shown window
+		expect(text).toContain("[Showing lines 1-254 of 300 (50.0KB limit). Use offset=255 to continue.]");
+	});
+
+	it("image branch: a PNG-magic seed → text note + base64 image content block", async () => {
+		// Detection is extension-based; the magic bytes just make the seed an honest PNG.
+		const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+		const fake = fakeBackend({ files: { "/work/pic.png": png } });
+
+		const { note, image } = imageOf(await readTool.execute({ path: "pic.png" }, { rootDir: "/work", backend: fake }));
+
+		expect(note.text).toBe("Read image file [image/png]");
+		expect(image.mimeType).toBe("image/png");
+		expect(image.data).toBe(png.toString("base64"));
 	});
 });

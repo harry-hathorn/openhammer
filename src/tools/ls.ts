@@ -4,7 +4,7 @@
  * Ports pi's `ls` execute logic, stripped of every pi-package/TUI/operations
  * seam: `pi-tui`, the render helpers (`formatLsCall`/`formatLsResult`),
  * `typebox` (→ a plain JSON-Schema literal), the `LsOperations` interface
- * (→ direct `node:fs`), the `AbortSignal` plumbing (unreachable in v1 —
+ * (→ the backend fs seam), the `AbortSignal` plumbing (unreachable in v1 —
  * `ToolModule.execute` carries no signal, mirroring `bash`/`grep`/`find`), and
  * the UI-only `LsToolDetails` side channel (truncation is surfaced as a notice
  * in the content text, not a separate field).
@@ -13,18 +13,18 @@
  * alphabetical sort, `/` suffix on subdirectories, dotfiles included, entries
  * that fail to `stat` skipped. Output is capped at `limit` entries (default
  * 500) and `DEFAULT_MAX_BYTES` (50KB) — whichever hits first — each producing
- * an actionable notice in one bracketed block. No external binary; pure
- * `node:fs` (the only tool besides `read`/`write`/`edit` that touches the fs
- * directly rather than spawning).
+ * an actionable notice in one bracketed block. No external binary; pure fs via
+ * the backend seam (the only tool besides `read`/`write`/`edit` that touches
+ * the fs directly rather than spawning).
  *
  * Expected failures (path missing, not a directory, unreadable dir) return
  * `err`, never throw — the MCP `CallTool` handler (spec 12) is the single
- * narrowing point. The fs calls go through `io.ts` Result-wrappers, so the body
- * has zero try/catch.
+ * narrowing point. The fs calls go through the backend seam's Result-wrapping
+ * ops (`ctx.backend.fs`, spec 23 — `StatShape`'s `isDir` replaces
+ * `Stats.isDirectory()`), so the body has zero try/catch.
  */
 import { join } from "node:path";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
-import { exists, readdirSync, statSync } from "./io.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok } from "./result.ts";
 import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "./truncate.ts";
@@ -56,7 +56,7 @@ export const lsTool: ToolModule = {
 
 		// Missing path → err (pi: `Path not found`). `exists` is checked before
 		// `stat` so a missing path yields the clean message rather than ENOENT.
-		const existsRes = exists(dirPath);
+		const existsRes = await ctx.backend.fs.exists(dirPath);
 		if (!existsRes.ok) {
 			return err(existsRes.error);
 		}
@@ -65,16 +65,16 @@ export const lsTool: ToolModule = {
 		}
 
 		// Not a directory → err (pi: `Not a directory`).
-		const statRes = statSync(dirPath);
+		const statRes = await ctx.backend.fs.stat(dirPath);
 		if (!statRes.ok) {
 			return err(statRes.error);
 		}
-		if (!statRes.value.isDirectory()) {
+		if (!statRes.value.isDir) {
 			return err(new Error(`Not a directory: ${dirPath}`));
 		}
 
 		// Read entries (pi: `Cannot read directory` on failure).
-		const readRes = readdirSync(dirPath);
+		const readRes = await ctx.backend.fs.readdir(dirPath);
 		if (!readRes.ok) {
 			return err(new Error(`Cannot read directory: ${readRes.error.message}`));
 		}
@@ -85,6 +85,8 @@ export const lsTool: ToolModule = {
 
 		// Format entries with a `/` suffix on subdirectories; cap at effectiveLimit.
 		// Entries that fail to stat are skipped (pi fidelity: dangling symlinks etc).
+		// Stats stay sequential like the sync original — the early `break` keeps the
+		// per-entry cost bounded by effectiveLimit, not the entry count.
 		const results: string[] = [];
 		let entryLimitReached = false;
 		for (const entry of entries) {
@@ -92,11 +94,11 @@ export const lsTool: ToolModule = {
 				entryLimitReached = true;
 				break;
 			}
-			const entryStat = statSync(join(dirPath, entry));
+			const entryStat = await ctx.backend.fs.stat(join(dirPath, entry));
 			if (!entryStat.ok) {
 				continue;
 			}
-			results.push(entry + (entryStat.value.isDirectory() ? "/" : ""));
+			results.push(entry + (entryStat.value.isDir ? "/" : ""));
 		}
 
 		if (results.length === 0) {

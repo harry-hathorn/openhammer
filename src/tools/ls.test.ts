@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { lsTool } from "./ls.ts";
 import type { Result } from "./result.ts";
@@ -107,5 +108,68 @@ describe("lsTool", () => {
 		expect(text).toContain("50.0KB limit reached");
 		// 300 entries < default 500 limit, so the entry notice must NOT fire.
 		expect(text).not.toContain("entries limit reached");
+	});
+});
+
+// Spec 23: the shaping suite — same tool, FakeBackend instead of LocalBackend, so
+// the file/dir shapes, empty dir, error messages, and the limit notice are pinned
+// with zero real-fs access and zero process spawns. Seeded files auto-register
+// their ancestor dirs, so `sub/inner.txt` implies `/work/sub` exists.
+describe("lsTool via FakeBackend", () => {
+	test("happy path: files and dirs, dotfiles included, '/' on dirs, case-insensitive sort", async () => {
+		const fake = fakeBackend({
+			files: { "/work/b.txt": "x", "/work/.dot": "", "/work/sub/inner.txt": "y" },
+			dirs: ["/work/Alpha"],
+		});
+
+		const res = await lsTool.execute({ path: "." }, { rootDir: "/work", backend: fake });
+
+		const lines = expectText(res).split("\n");
+		expect(lines).toEqual([".dot", "Alpha/", "b.txt", "sub/"]);
+	});
+
+	test("empty dir → '(empty directory)'", async () => {
+		const fake = fakeBackend({ dirs: ["/work/empty"] });
+
+		const res = await lsTool.execute({ path: "empty" }, { rootDir: "/work", backend: fake });
+
+		expect(expectText(res)).toBe("(empty directory)");
+	});
+
+	test("listing a file → err 'Not a directory' with the resolved path", async () => {
+		const fake = fakeBackend({ files: { "/work/afile": "" } });
+
+		const res = await lsTool.execute({ path: "afile" }, { rootDir: "/work", backend: fake });
+
+		expect(res.ok).toBe(false);
+		if (!res.ok) {
+			expect(res.error.message).toBe("Not a directory: /work/afile");
+		}
+	});
+
+	test("missing path → err 'Path not found' with the resolved path", async () => {
+		const fake = fakeBackend({ dirs: ["/work"] });
+
+		const res = await lsTool.execute({ path: "nope" }, { rootDir: "/work", backend: fake });
+
+		expect(res.ok).toBe(false);
+		if (!res.ok) {
+			expect(res.error.message).toBe("Path not found: /work/nope");
+		}
+	});
+
+	test("small limit → first N sorted entries + the entries-limit notice", async () => {
+		const fake = fakeBackend({
+			files: Object.fromEntries(["d", "b", "e", "a", "c"].map((name) => [`/work/${name}`, ""])),
+		});
+
+		const res = await lsTool.execute({ path: ".", limit: 3 }, { rootDir: "/work", backend: fake });
+		const text = expectText(res);
+
+		// Only the first 3 (sorted: a, b, c) are listed, then the notice.
+		const listed = text.split("\n").filter((line) => line && !line.startsWith("["));
+		expect(listed).toEqual(["a", "b", "c"]);
+		expect(text).toContain("3 entries limit reached");
+		expect(text).toContain("Use limit=6 for more");
 	});
 });

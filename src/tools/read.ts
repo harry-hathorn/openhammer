@@ -14,12 +14,11 @@
  *
  * Expected failures (missing/unreadable file, offset past EOF) return `err`, never
  * throw — the MCP `CallTool` handler (spec 12) is the single narrowing point. File
- * I/O goes through `io.ts` Result-wrappers, so the body has zero try/catch.
+ * I/O goes through the backend seam's Result-wrapping `fs` ops (`ctx.backend.fs`,
+ * spec 23), so the body has zero try/catch.
  */
-import { constants } from "node:fs";
 import { extname } from "node:path";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
-import { access, readFile } from "./io.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok } from "./result.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "./truncate.ts";
@@ -68,8 +67,9 @@ export const readTool: ToolModule = {
 
 		const absolutePath = resolveToCwd(path, ctx.rootDir);
 
-		// Missing/unreadable → err (Result from io.ts; no throw in the body).
-		const accessRes = await access(absolutePath, constants.R_OK);
+		// Missing/unreadable → err (Result from the backend's R_OK `access`; no throw
+		// in the body).
+		const accessRes = await ctx.backend.fs.access(absolutePath);
 		if (!accessRes.ok) {
 			return err(accessRes.error);
 		}
@@ -79,7 +79,7 @@ export const readTool: ToolModule = {
 		// backstop at the MCP layer (spec 12). offset/limit do not apply to images.
 		const imageMime = detectImageMimeType(absolutePath);
 		if (imageMime) {
-			const imageBufferRes = await readFile(absolutePath);
+			const imageBufferRes = await ctx.backend.fs.readFile(absolutePath);
 			if (!imageBufferRes.ok) {
 				return err(imageBufferRes.error);
 			}
@@ -93,7 +93,7 @@ export const readTool: ToolModule = {
 		}
 
 		// --- Text path (verbatim from pi: read.ts, text branch) ---
-		const bufferRes = await readFile(absolutePath);
+		const bufferRes = await ctx.backend.fs.readFile(absolutePath);
 		if (!bufferRes.ok) {
 			return err(bufferRes.error);
 		}

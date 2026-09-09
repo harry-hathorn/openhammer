@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { type FakeBackend, fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { editTool } from "./edit.ts";
 
@@ -16,23 +17,6 @@ import { editTool } from "./edit.ts";
 const backend = createLocalBackend();
 
 const BOM = "﻿";
-
-let workdir: string;
-
-beforeAll(() => {
-	workdir = mkdtempSync(join(tmpdir(), "openhammer-edit-"));
-});
-
-afterAll(() => {
-	rmSync(workdir, { recursive: true, force: true });
-});
-
-let rootDir: string;
-
-beforeEach(() => {
-	// Each test gets an isolated subdir as `rootDir`.
-	rootDir = mkdtempSync(join(workdir, "t-"));
-});
 
 /** Unwrap a successful Result; throw (failing the test) if it was an err. */
 function unwrap<T extends ToolOk>(r: { ok: true; value: T } | { ok: false; error: Error }): T {
@@ -54,6 +38,24 @@ function textOf(r: { ok: true; value: ToolOk } | { ok: false; error: Error }): s
 }
 
 describe("edit tool", () => {
+	// Real-fs hooks scoped to this describe (not module level) so the FakeBackend
+	// suite below runs with zero real-fs access and zero process spawns.
+	let workdir: string;
+	let rootDir: string;
+
+	beforeAll(() => {
+		workdir = mkdtempSync(join(tmpdir(), "openhammer-edit-"));
+	});
+
+	afterAll(() => {
+		rmSync(workdir, { recursive: true, force: true });
+	});
+
+	beforeEach(() => {
+		// Each test gets an isolated subdir as `rootDir`.
+		rootDir = mkdtempSync(join(workdir, "t-"));
+	});
+
 	it("applies a single exact edit and reports the block count (spec acceptance)", async () => {
 		const file = join(rootDir, "f.txt");
 		writeFileSync(file, "foo bar baz");
@@ -266,5 +268,78 @@ describe("edit tool", () => {
 		expect(text).toBe("Successfully replaced 1 block(s) in msg.txt.");
 		expect(text).not.toContain(rootDir);
 		expect(readFileSync(file, "utf-8")).toBe("bbb");
+	});
+});
+
+// Spec 23: the shaping suite — same tool, FakeBackend instead of LocalBackend, so
+// the success message, edit-diff validation errors, and the access-failure
+// message are pinned with zero real-fs access and zero process spawns. The fake's
+// files map is private; read-back (and unchanged-ness) goes through the same
+// backend instance's `readFile`.
+describe("edit via FakeBackend", () => {
+	/** Read a file back through the same fake (assert writes / unchanged-ness). */
+	async function readBack(fake: FakeBackend, path: string): Promise<string> {
+		const r = await fake.fs.readFile(path);
+		if (!r.ok) throw new Error(`readBack(${path}) failed: ${r.error.message}`);
+		return r.value.toString("utf-8");
+	}
+
+	it("happy path: seeded file → edit applied + reported, content read back", async () => {
+		const fake = fakeBackend({ files: { "/work/f.txt": "foo bar baz" } });
+
+		const r = await editTool.execute(
+			{ path: "f.txt", edits: [{ oldText: "bar", newText: "qux" }] },
+			{ rootDir: "/work", backend: fake },
+		);
+
+		expect(textOf(r)).toBe("Successfully replaced 1 block(s) in f.txt.");
+		expect(await readBack(fake, "/work/f.txt")).toBe("foo qux baz");
+	});
+
+	it("non-unique oldText → the exact pi-faithful message, file unchanged", async () => {
+		const fake = fakeBackend({ files: { "/work/dup.txt": "foo foo foo" } });
+
+		const r = await editTool.execute(
+			{ path: "dup.txt", edits: [{ oldText: "foo", newText: "bar" }] },
+			{ rootDir: "/work", backend: fake },
+		);
+
+		expect(r.ok).toBe(false);
+		if (r.ok) throw new Error("unreachable");
+		expect(r.error.message).toBe(
+			"Found 3 occurrences of the text in dup.txt. The text must be unique. Please provide more context to make it unique.",
+		);
+		expect(await readBack(fake, "/work/dup.txt")).toBe("foo foo foo");
+	});
+
+	it("missing file → the pi-faithful access-failure message with the errno code", async () => {
+		const fake = fakeBackend();
+
+		const r = await editTool.execute(
+			{ path: "missing.txt", edits: [{ oldText: "x", newText: "y" }] },
+			{ rootDir: "/work", backend: fake },
+		);
+
+		expect(r.ok).toBe(false);
+		if (r.ok) throw new Error("unreachable");
+		expect(r.error.message).toBe("Could not edit file: missing.txt. Error code: ENOENT.");
+	});
+
+	it("write failure (unwritable file) → the same shaped message, file unchanged", async () => {
+		// The in-memory fs has no permission bits, so the fake simulates denial via
+		// `failWritesFor`: the read succeeds, the write errs EACCES — the case the
+		// seam's R_OK-only `access` can no longer pre-check (spec 23), pinned here
+		// to the same shaped message pi's R_OK|W_OK pre-check used to produce.
+		const fake = fakeBackend({ files: { "/work/ro.txt": "foo" }, failWritesFor: ["/work/ro.txt"] });
+
+		const r = await editTool.execute(
+			{ path: "ro.txt", edits: [{ oldText: "foo", newText: "bar" }] },
+			{ rootDir: "/work", backend: fake },
+		);
+
+		expect(r.ok).toBe(false);
+		if (r.ok) throw new Error("unreachable");
+		expect(r.error.message).toBe("Could not edit file: ro.txt. Error code: EACCES.");
+		expect(await readBack(fake, "/work/ro.txt")).toBe("foo");
 	});
 });

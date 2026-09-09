@@ -22,6 +22,8 @@
  *   parent exists as a file → `ENOTDIR … open`, target is a directory →
  *   `EISDIR … open` (verbatim `node:fs` messages). Runtime writes never create
  *   implicit directories.
+ * - `failWritesFor` seeds simulate write-permission denial (the in-memory fs has
+ *   no real permission bits): those paths' `writeFile` errs `EACCES … open`.
  * - Seeded files are trusted world-building sugar: they auto-`mkdir -p` their
  *   ancestor dirs, so `fakeBackend({ files: { "/work/a/b.txt": "…" } })` reads
  *   as "this tree exists".
@@ -46,6 +48,7 @@ import { err, ok } from "./result.ts";
 /** Real `node:fs` errno message fragments, matched so error-path assertions see LocalBackend's shapes. */
 const ERRNO_MESSAGES = {
 	ENOENT: "no such file or directory",
+	EACCES: "permission denied",
 	ENOTDIR: "not a directory",
 	EISDIR: "illegal operation on a directory",
 } as const;
@@ -107,6 +110,8 @@ export interface FakeBackendSeed {
 	probeResults?: Record<string, boolean>;
 	/** Keyed `"<bin> <flag>"`. */
 	probeFlagResults?: Record<string, boolean>;
+	/** Paths whose `writeFile` errs `EACCES` — write-permission denial (no real permission bits to clear). */
+	failWritesFor?: string[];
 	homedir?: string;
 }
 
@@ -123,6 +128,7 @@ export class FakeBackend implements ToolBackend {
 	private readonly script: ShellScriptEntry[];
 	private readonly probeTable: Record<string, boolean>;
 	private readonly probeFlagTable: Record<string, boolean>;
+	private readonly failWritesFor: Set<string>;
 	private readonly fakeHome: string;
 	private overflowCount = 0;
 	private isClosed = false;
@@ -140,6 +146,7 @@ export class FakeBackend implements ToolBackend {
 		this.script = [...(seed.script ?? [])];
 		this.probeTable = seed.probeResults ?? {};
 		this.probeFlagTable = seed.probeFlagResults ?? {};
+		this.failWritesFor = new Set(seed.failWritesFor ?? []);
 		this.fakeHome = seed.homedir ?? "/home/fake";
 		for (const [path, data] of Object.entries(seed.files ?? {})) {
 			this.registerDirChain(dirname(path));
@@ -207,6 +214,7 @@ export class FakeBackend implements ToolBackend {
 			return ok([...entries].sort());
 		},
 		writeFile: async (path, data) => {
+			if (this.failWritesFor.has(path)) return err(errnoError("EACCES", `open '${path}'`));
 			if (this.dirs.has(path)) return err(errnoError("EISDIR", `open '${path}'`));
 			const parent = dirname(path);
 			if (this.files.has(parent)) return err(errnoError("ENOTDIR", `open '${path}'`));

@@ -4,23 +4,24 @@
  * Ports pi's `write` execute logic verbatim, stripping everything that is
  * UI/agent-coupled: `pi-tui`, `ToolDefinition`/render, `withFileMutationQueue`
  * (pi's per-file serialization), and the `WriteOperations` interface. The body
- * is two steps — `resolveToCwd` → `mkdir(dir, { recursive: true })` →
- * `writeFile(path, content, "utf-8")` — and reports `Successfully wrote
- * ${content.length} bytes to ${path}` on success, where `path` is the original
- * argument (relative or absolute), not the resolved absolute path (matches pi).
+ * is two steps — `resolveToCwd` → `ctx.backend.fs.mkdir(dir)` (`-p` semantics,
+ * spec 23) → `ctx.backend.fs.writeFile(path, Buffer.from(content, "utf-8"))` — and
+ * reports `Successfully wrote ${content.length} bytes to ${path}` on success, where
+ * `path` is the original argument (relative or absolute), not the resolved absolute
+ * path (matches pi).
  *
  * Expected failures (uncreatable parent, permission, target is a directory)
  * return `err`, never throw — the MCP `CallTool` handler (spec 12) is the single
- * narrowing point. File I/O goes through `io.ts` Result-wrappers, so the body
- * has zero try/catch. `fs.writeFile` is already atomic for full overwrites, so
- * the dropped `withFileMutationQueue` is a low-risk edge case (spec 05 decisions).
+ * narrowing point. File I/O goes through the backend seam's Result-wrapping `fs`
+ * ops (`ctx.backend.fs`, spec 23), so the body has zero try/catch. `fs.writeFile`
+ * is already atomic for full overwrites, so the dropped `withFileMutationQueue` is
+ * a low-risk edge case (spec 05 decisions).
  *
  * Note: the byte count is the string's UTF-16 length (`content.length`), not its
  * UTF-8 byte length — this is pi fidelity, ported unchanged.
  */
 import { dirname } from "node:path";
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
-import { mkdir, writeFile } from "./io.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { err, ok } from "./result.ts";
 
@@ -50,14 +51,17 @@ export const writeTool: ToolModule = {
 		const absolutePath = resolveToCwd(path, ctx.rootDir);
 		const dir = dirname(absolutePath);
 
-		// Create parent directories if needed (no-op if they already exist).
-		const mkdirRes = await mkdir(dir, { recursive: true });
+		// Create parent directories if needed (no-op if they already exist) — the
+		// backend's `mkdir` carries `-p` semantics (spec 23).
+		const mkdirRes = await ctx.backend.fs.mkdir(dir);
 		if (!mkdirRes.ok) {
 			return err(mkdirRes.error);
 		}
 
-		// Write the file contents (overwrites if it exists).
-		const writeRes = await writeFile(absolutePath, content, "utf-8");
+		// Write the file contents (overwrites if it exists). The backend takes a
+		// Buffer; UTF-8-encoding here is byte-identical to the old
+		// `writeFile(path, content, "utf-8")`.
+		const writeRes = await ctx.backend.fs.writeFile(absolutePath, Buffer.from(content, "utf-8"));
 		if (!writeRes.ok) {
 			return err(writeRes.error);
 		}
