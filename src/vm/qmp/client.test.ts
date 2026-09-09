@@ -308,6 +308,38 @@ describe("QmpClient — async events", () => {
 	});
 });
 
+describe("QmpClient — onExchange (the capture wire tap)", () => {
+	it("fires for every outbound command and every inbound frame, in wire order, terminator-free", async () => {
+		const lines: string[] = [];
+		const socket = fakeQmpSocket();
+		const pending = connectQmp("/run/qmp.sock", {
+			connect: fakeConnect(socket),
+			handshakeMs: 250,
+			commandTimeoutMs: 250,
+			onExchange: (line) => lines.push(line),
+		});
+		socket.emitData(`${GREETING}\n`);
+		await untilWritten(socket, 1); // the qmp_capabilities request is out
+		socket.emitData('{"return": {}, "id": 1}\n');
+		const client = await pending;
+		const status = client.execute("query-status");
+		await tick(); // execute writes synchronously; just let microtasks settle
+		socket.emitData('{"event": "SHUTDOWN", "data": {}}\n');
+		socket.emitData('{"return": "running", "id": 2}\n');
+		expect(await status).toBe("running");
+		// Outbound lines carry no trailing newline; inbound are framing's trimmed lines. The
+		// greeting and async events are included — teardown evidence, not just responses.
+		expect(lines).toEqual([
+			GREETING,
+			'{"execute":"qmp_capabilities","arguments":{},"id":1}',
+			'{"return": {}, "id": 1}',
+			'{"execute":"query-status","arguments":{},"id":2}',
+			'{"event": "SHUTDOWN", "data": {}}',
+			'{"return": "running", "id": 2}',
+		]);
+	});
+});
+
 describe("QmpClient — close()/closed", () => {
 	it("close() ends the duplex gracefully; closed resolves once the peer closes", async () => {
 		const { client, peer } = await connectFake();

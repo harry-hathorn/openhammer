@@ -64,6 +64,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 
 - `src/{tools,mcp,auth,tunnel}`, `src/config.ts`, `src/server.ts`, `src/main.ts`, `src/startup-print.ts`.
   **Not** feature-first — layer-based to mirror pi for verbatim porting. `src/tools/` is the project's standard library (`result`/`io`/`path-utils`/`truncate`/`output-accumulator`/`edit-diff`/`bin`).
+- `src/vm/` — VM sandbox core: qemu process/session, QMP client, teardown capture. VM modes are operator-only; there is no client-facing lifecycle.
 - Co-locate `*.test.ts` next to the source. No circular imports; no wide barrel files.
 - **`ToolBackend` (src/tools/backend.ts) is the one sanctioned execution seam** (spec 23 supersedes spec 04:54; zero behavior change) — every tool's fs/spawn goes through it, and no other `Operations`-style interface seams are added.
 
@@ -91,6 +92,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 ## Toolchain notes
 
 - `rg` + `fd` required at runtime (presence-checked via `isToolAvailable`, graceful `err`/`null` if missing — no auto-download, no Node fallback). `cloudflared` optional (`--tunnel`).
+- `qemu-system-x86_64`/`qemu-img`/OVMF optional (VM sandbox): presence-checked like `cloudflared` (`qemuAvailable`/`qemuImgAvailable`, `missingBinaryHint` — Arch: `sudo pacman -S qemu-desktop qemu-img edk2`).
 - Auth = opaque bearer token in `~/.openhammer/credential.json` (0600); `MCP_AUTH_TOKEN` overrides. No OAuth AS — only a `/.well-known/oauth-protected-resource` pointer.
 
 ## Naming

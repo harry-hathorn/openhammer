@@ -21,6 +21,13 @@ export interface QmpClientOptions {
 	readonly commandTimeoutMs?: number;
 	/** Async QMP events are dropped by default (the spike dropped them); set this to observe. */
 	readonly onEvent?: (event: Record<string, unknown>) => void;
+	/**
+	 * Every QMP wire line, in order, terminator-free: outbound commands as sent plus every
+	 * inbound frame (greeting, async events, responses). Absent by default — exactly
+	 * today's traffic-dropping behavior; capture.ts feeds this an exchange ring so the
+	 * teardown debug log keeps the last exchanges.
+	 */
+	readonly onExchange?: (line: string) => void;
 }
 
 export interface QmpClient {
@@ -117,6 +124,9 @@ export function connectQmp(socketPath: string, options: QmpClientOptions = {}): 
 		};
 
 		const dispatch = (message: Inbound, line: string): void => {
+			// Fires for EVERY inbound frame, not just responses: greeting and async events are
+			// teardown evidence too (a SHUTDOWN event is exactly the fact capture exists to keep).
+			options.onExchange?.(line);
 			if ("QMP" in message) {
 				greetingLine = line;
 				resolveGreeting?.();
@@ -168,7 +178,12 @@ export function connectQmp(socketPath: string, options: QmpClientOptions = {}): 
 					reject(new Error(`qmp ${command}: no reply within ${commandTimeoutMs} ms`));
 				}, commandTimeoutMs);
 				pending.set(id, { command, resolve, reject, timer });
-				socket.write(encodeQmpCommand(command, args, id));
+				const frame = encodeQmpCommand(command, args, id);
+				// The exchange log's unit is the LINE, both directions: inbound lines arrive
+				// terminator-free (framing.ts trims), so the outbound frame's single trailing
+				// "\n" (encodeQmpCommand's invariant) is dropped here for a uniform fire.
+				options.onExchange?.(frame.slice(0, -1));
+				socket.write(frame);
 			});
 
 		void (async () => {
