@@ -3,12 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { readTool } from "./read.ts";
 import { DEFAULT_MAX_BYTES } from "./truncate.ts";
 
 // The read tool is a `ToolModule`; tests drive `execute` directly (Tier-0). Fixtures
 // are real files under a throwaway tmpdir used as `rootDir` — `resolveToCwd` resolves
 // relative paths under it, and absolute paths pass through (acceptance criteria).
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 let workdir: string;
 
@@ -69,7 +74,7 @@ describe("read tool — text path", () => {
 		const lines = Array.from({ length: 10 }, (_, i) => `line-${i + 1}`);
 		writeFileSync(join(rootDir, "a.txt"), lines.join("\n"));
 
-		const r = await readTool.execute({ path: "a.txt" }, rootDir);
+		const r = await readTool.execute({ path: "a.txt" }, { rootDir, backend });
 
 		// Raw content, exactly the 10 lines joined by \n — no `1\t`/`cat -n` prefixes.
 		expect(textOf(r)).toBe(lines.join("\n"));
@@ -79,7 +84,7 @@ describe("read tool — text path", () => {
 		const lines = Array.from({ length: 3000 }, (_, i) => `line-${i + 1}`);
 		writeFileSync(join(rootDir, "big.txt"), lines.join("\n"));
 
-		const r = await readTool.execute({ path: "big.txt" }, rootDir);
+		const r = await readTool.execute({ path: "big.txt" }, { rootDir, backend });
 		const text = textOf(r);
 
 		// First 2000 lines present, line 2001 absent from the body.
@@ -96,7 +101,7 @@ describe("read tool — text path", () => {
 		writeFileSync(join(rootDir, "x.txt"), lines.join("\n"));
 
 		// offset 5 (1-indexed) → array index 4; limit 3 → lines L5,L6,L7.
-		const r = await readTool.execute({ path: "x.txt", offset: 5, limit: 3 }, rootDir);
+		const r = await readTool.execute({ path: "x.txt", offset: 5, limit: 3 }, { rootDir, backend });
 		const text = textOf(r);
 
 		expect(text.startsWith("L5\nL6\nL7")).toBe(true);
@@ -108,7 +113,7 @@ describe("read tool — text path", () => {
 		const lines = Array.from({ length: 10 }, (_, i) => `L${i + 1}`);
 		writeFileSync(join(rootDir, "x.txt"), lines.join("\n"));
 
-		const r = await readTool.execute({ path: "x.txt", offset: 8, limit: 3 }, rootDir);
+		const r = await readTool.execute({ path: "x.txt", offset: 8, limit: 3 }, { rootDir, backend });
 		const text = textOf(r);
 
 		expect(text).toBe("L8\nL9\nL10");
@@ -118,7 +123,7 @@ describe("read tool — text path", () => {
 	it("errors when offset is past EOF (spec acceptance)", async () => {
 		writeFileSync(join(rootDir, "x.txt"), "only one line");
 
-		const r = await readTool.execute({ path: "x.txt", offset: 99999 }, rootDir);
+		const r = await readTool.execute({ path: "x.txt", offset: 99999 }, { rootDir, backend });
 
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
@@ -127,7 +132,7 @@ describe("read tool — text path", () => {
 	});
 
 	it("errors on a missing file (spec acceptance)", async () => {
-		const r = await readTool.execute({ path: "nope.txt" }, rootDir);
+		const r = await readTool.execute({ path: "nope.txt" }, { rootDir, backend });
 
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");
@@ -135,16 +140,16 @@ describe("read tool — text path", () => {
 	});
 
 	it("errors when path is absent or not a string", async () => {
-		const noPath = await readTool.execute({}, rootDir);
+		const noPath = await readTool.execute({}, { rootDir, backend });
 		expect(noPath.ok).toBe(false);
 
-		const badPath = await readTool.execute({ path: 42 }, rootDir);
+		const badPath = await readTool.execute({ path: 42 }, { rootDir, backend });
 		expect(badPath.ok).toBe(false);
 	});
 
 	it("resolves relative paths under rootDir (spec acceptance)", async () => {
 		writeFileSync(join(rootDir, "rel.txt"), "relative");
-		const r = await readTool.execute({ path: "rel.txt" }, rootDir);
+		const r = await readTool.execute({ path: "rel.txt" }, { rootDir, backend });
 		expect(textOf(r)).toBe("relative");
 	});
 
@@ -152,7 +157,7 @@ describe("read tool — text path", () => {
 		const abs = join(rootDir, "abs.txt");
 		writeFileSync(abs, "absolute");
 		// Pass a different rootDir to prove the absolute path is used as-is.
-		const r = await readTool.execute({ path: abs }, "/somewhere/else");
+		const r = await readTool.execute({ path: abs }, { rootDir: "/somewhere/else", backend });
 		expect(textOf(r)).toBe("absolute");
 	});
 
@@ -161,7 +166,7 @@ describe("read tool — text path", () => {
 		const huge = "x".repeat(DEFAULT_MAX_BYTES + 1000);
 		writeFileSync(join(rootDir, "huge.txt"), huge);
 
-		const r = await readTool.execute({ path: "huge.txt" }, rootDir);
+		const r = await readTool.execute({ path: "huge.txt" }, { rootDir, backend });
 		const text = textOf(r);
 
 		expect(text).toContain("exceeds");
@@ -171,7 +176,7 @@ describe("read tool — text path", () => {
 	it("reads a file under a subdirectory of rootDir", async () => {
 		mkdirSync(join(rootDir, "sub"));
 		writeFileSync(join(rootDir, "sub", "nested.txt"), "nested");
-		const r = await readTool.execute({ path: "sub/nested.txt" }, rootDir);
+		const r = await readTool.execute({ path: "sub/nested.txt" }, { rootDir, backend });
 		expect(textOf(r)).toBe("nested");
 	});
 });
@@ -187,7 +192,7 @@ describe("read tool — image path", () => {
 	it("returns a text note + base64 image block for a .png (spec acceptance)", async () => {
 		// Bytes are arbitrary — detection is extension-based, so the file need not be a valid PNG.
 		const buf = writeImage("pic.png", [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
-		const { note, image } = imageOf(await readTool.execute({ path: "pic.png" }, rootDir));
+		const { note, image } = imageOf(await readTool.execute({ path: "pic.png" }, { rootDir, backend }));
 
 		expect(note.text).toBe("Read image file [image/png]");
 		expect(image.mimeType).toBe("image/png");
@@ -201,7 +206,7 @@ describe("read tool — image path", () => {
 		["drawing.webp", "image/webp"],
 	])("maps extension %s → %s", async (name, mime) => {
 		const buf = writeImage(name, [1, 2, 3, 4, 5]);
-		const { image } = imageOf(await readTool.execute({ path: name }, rootDir));
+		const { image } = imageOf(await readTool.execute({ path: name }, { rootDir, backend }));
 
 		expect(image.mimeType).toBe(mime);
 		expect(image.data).toBe(buf.toString("base64"));
@@ -209,14 +214,14 @@ describe("read tool — image path", () => {
 
 	it("detects image extensions case-insensitively", async () => {
 		const buf = writeImage("UPPER.PNG", [9, 9, 9]);
-		const { image } = imageOf(await readTool.execute({ path: "UPPER.PNG" }, rootDir));
+		const { image } = imageOf(await readTool.execute({ path: "UPPER.PNG" }, { rootDir, backend }));
 
 		expect(image.mimeType).toBe("image/png");
 		expect(image.data).toBe(buf.toString("base64"));
 	});
 
 	it("gates the image path behind the access check (missing image → err)", async () => {
-		const r = await readTool.execute({ path: "missing.png" }, rootDir);
+		const r = await readTool.execute({ path: "missing.png" }, { rootDir, backend });
 
 		expect(r.ok).toBe(false);
 	});
@@ -224,13 +229,13 @@ describe("read tool — image path", () => {
 	it("ignores offset/limit on images", async () => {
 		writeImage("pic.png", [1, 2, 3, 4]);
 		// offset 99999 would error on a text file's line count; images bypass the text path.
-		const result = unwrap(await readTool.execute({ path: "pic.png", offset: 99999, limit: 5 }, rootDir));
+		const result = unwrap(await readTool.execute({ path: "pic.png", offset: 99999, limit: 5 }, { rootDir, backend }));
 
 		expect(result.content).toHaveLength(2);
 	});
 
 	it("treats an unknown extension as a text file", async () => {
 		writeFileSync(join(rootDir, "data.csv"), "a,b,c\n1,2,3");
-		expect(textOf(await readTool.execute({ path: "data.csv" }, rootDir))).toBe("a,b,c\n1,2,3");
+		expect(textOf(await readTool.execute({ path: "data.csv" }, { rootDir, backend }))).toBe("a,b,c\n1,2,3");
 	});
 });

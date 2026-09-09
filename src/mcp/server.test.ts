@@ -20,9 +20,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { createLocalBackend } from "../tools/backend.ts";
 import { createMcpServer } from "./server.ts";
 
 const TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"];
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Connect a real SDK `Client` to `server` over a linked in-memory transport. */
 async function connectClient(server: ReturnType<typeof createMcpServer>): Promise<Client> {
@@ -42,7 +47,7 @@ async function withServer<T>(
 	maxResponseBytes: number,
 	fn: (client: Client) => Promise<T>,
 ): Promise<T> {
-	const server = createMcpServer(rootDir, maxResponseBytes);
+	const server = createMcpServer(rootDir, maxResponseBytes, backend);
 	const client = await connectClient(server);
 	try {
 		return await fn(client);

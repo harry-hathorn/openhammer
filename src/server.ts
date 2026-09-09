@@ -18,6 +18,8 @@ import type { Config } from "./config.ts";
 import { mcpHttpRoutes } from "./mcp/http-transport.ts";
 import type { RequestRecorder } from "./mcp/telemetry.ts";
 import { registerWellKnown } from "./mcp/well-known.ts";
+import type { ToolBackend } from "./tools/backend.ts";
+import { createLocalBackend } from "./tools/backend.ts";
 
 /**
  * Build the OpenHammer Fastify app: CORS, `/health`, well-known discovery, the
@@ -26,6 +28,11 @@ import { registerWellKnown } from "./mcp/well-known.ts";
  *
  * `oauth` (spec 20d), when supplied, enables the JWT acceptance path in the
  * `/mcp` auth gate (resolved at boot by `main.ts`); omit it for opaque-only.
+ *
+ * `backend` (spec 23) is the boot-scoped tool backend threaded into
+ * `mcpHttpRoutes`; it defaults to a fresh `LocalBackend` (local is the default
+ * mode) so direct builders that never spawn tools need not construct one —
+ * `main.ts` always passes its process-wide backend explicitly.
  */
 export async function buildFastify(
 	config: Config,
@@ -34,6 +41,7 @@ export async function buildFastify(
 	recorder?: RequestRecorder,
 	oauth?: OauthMiddlewareOptions,
 	publicBaseUrl?: string,
+	backend: ToolBackend = createLocalBackend(),
 ): Promise<FastifyInstance> {
 	// pino-pretty only in development (`NODE_ENV=development`) — production gets
 	// raw JSON for structured log shipping; tests run with `NODE_ENV=test`, so
@@ -96,7 +104,7 @@ export async function buildFastify(
 	// wired inside `mcpHttpRoutes`. Called directly (it is an async arity-2
 	// function shaped for this) so the routes land on the parent scope alongside
 	// `/health` + well-known, with no plugin wrapper or `fastify-plugin` dep.
-	await mcpHttpRoutes(fastify, { token, config, allowedClients, recorder, oauth });
+	await mcpHttpRoutes(fastify, { token, config, backend, allowedClients, recorder, oauth });
 
 	// Global error handler — preserves Fastify's `statusCode` (e.g. 400 on a
 	// malformed JSON body) and otherwise 500s. The `/mcp` POST handler calls

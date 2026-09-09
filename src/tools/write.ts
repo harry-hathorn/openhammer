@@ -36,7 +36,7 @@ export const writeTool: ToolModule = {
 		},
 		required: ["path", "content"],
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Validate external args at the boundary (no zod; hand-narrowed).
 		const path = args.path;
 		const content = args.content;
@@ -47,7 +47,7 @@ export const writeTool: ToolModule = {
 			return err(new Error("write requires a string 'content' argument"));
 		}
 
-		const absolutePath = resolveToCwd(path, rootDir);
+		const absolutePath = resolveToCwd(path, ctx.rootDir);
 		const dir = dirname(absolutePath);
 
 		// Create parent directories if needed (no-op if they already exist).

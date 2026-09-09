@@ -57,7 +57,7 @@ export const readTool: ToolModule = {
 		},
 		required: ["path"],
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Validate external args at the boundary (no zod; hand-narrowed).
 		const path = args.path;
 		if (typeof path !== "string") {
@@ -66,7 +66,7 @@ export const readTool: ToolModule = {
 		const offset = typeof args.offset === "number" ? args.offset : undefined;
 		const limit = typeof args.limit === "number" ? args.limit : undefined;
 
-		const absolutePath = resolveToCwd(path, rootDir);
+		const absolutePath = resolveToCwd(path, ctx.rootDir);
 
 		// Missing/unreadable → err (Result from io.ts; no throw in the body).
 		const accessRes = await access(absolutePath, constants.R_OK);

@@ -133,7 +133,7 @@ export const bashTool: ToolModule = {
 		},
 		required: ["command"],
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Validate external args at the boundary (no zod; hand-narrowed).
 		const command = args.command;
 		if (typeof command !== "string") {
@@ -141,15 +141,15 @@ export const bashTool: ToolModule = {
 		}
 		const timeout = typeof args.timeout === "number" ? args.timeout : undefined;
 
-		if (!existsSync(rootDir)) {
-			return err(new Error(`Working directory does not exist: ${rootDir}\nCannot execute bash commands.`));
+		if (!existsSync(ctx.rootDir)) {
+			return err(new Error(`Working directory does not exist: ${ctx.rootDir}\nCannot execute bash commands.`));
 		}
 
 		const shell = process.env.SHELL || "bash";
 		const output = new OutputAccumulator({ tempFilePrefix: "openhammer" });
 
 		try {
-			const exitCode = await runShell(shell, command, rootDir, timeout, output);
+			const exitCode = await runShell(shell, command, ctx.rootDir, timeout, output);
 			const snapshot = await finishOutput(output);
 			const text = formatOutput(snapshot, output);
 			if (exitCode !== 0 && exitCode !== null) {

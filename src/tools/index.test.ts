@@ -2,21 +2,26 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createLocalBackend } from "./backend.ts";
 import { createAllTools } from "./index.ts";
 
 const EXPECTED_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 describe("createAllTools", () => {
 	it("returns exactly 8 entries named guide,read,bash,edit,write,grep,find,ls (in order)", () => {
 		// `/srv` is the spec's nominal root — the names/order are rootDir-independent;
 		// rootDir only flows into the handler closure, not the tool descriptors.
-		const entries = createAllTools("/srv");
+		const entries = createAllTools({ rootDir: "/srv", backend });
 		expect(entries).toHaveLength(8);
 		expect(entries.map((e) => e.tool.name)).toEqual([...EXPECTED_NAMES]);
 	});
 
 	it("lifts name/description/inputSchema onto each entry's tool descriptor", () => {
-		const entries = createAllTools("/srv");
+		const entries = createAllTools({ rootDir: "/srv", backend });
 		for (const entry of entries) {
 			// Every descriptor carries the three MCP-visible fields (no cast needed —
 			// ToolModule.inputSchema is already Tool["inputSchema"], the single source).
@@ -33,7 +38,7 @@ describe("createAllTools", () => {
 		// and the handler closing over rootDir end-to-end (the bash tool spawns the
 		// configured shell). This is the same local-exec path bash.test.ts exercises.
 		const rootDir = mkdtempSync(join(tmpdir(), "openhammer-index-"));
-		const entries = createAllTools(rootDir);
+		const entries = createAllTools({ rootDir, backend });
 		const bash = entries.find((e) => e.tool.name === "bash");
 		if (!bash) throw new Error("bash entry missing");
 
@@ -50,7 +55,7 @@ describe("createAllTools", () => {
 	});
 
 	it("handler defaults missing args to {} (a no-arg call still returns a Result)", async () => {
-		const entries = createAllTools(mkdtempSync(join(tmpdir(), "openhammer-index-")));
+		const entries = createAllTools({ rootDir: mkdtempSync(join(tmpdir(), "openhammer-index-")), backend });
 		// `read` with no path -> an expected failure encoded as err, never a throw.
 		const read = entries.find((e) => e.tool.name === "read");
 		if (!read) throw new Error("read entry missing");

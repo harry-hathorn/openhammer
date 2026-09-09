@@ -44,14 +44,14 @@ export const lsTool: ToolModule = {
 			},
 		},
 	},
-	async execute(args, rootDir) {
+	async execute(args, ctx) {
 		// Validate external args at the boundary (no zod; hand-narrowed). Both
 		// `path` and `limit` are optional — non-strings fall back to the defaults,
 		// matching pi's `Type.Optional`.
 		const pathArg = typeof args.path === "string" ? args.path : undefined;
 		const limit = typeof args.limit === "number" ? args.limit : undefined;
 
-		const dirPath = resolveToCwd(pathArg || ".", rootDir);
+		const dirPath = resolveToCwd(pathArg || ".", ctx.rootDir);
 		const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
 		// Missing path → err (pi: `Path not found`). `exists` is checked before

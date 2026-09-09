@@ -3,12 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { readTool } from "./read.ts";
 import { writeTool } from "./write.ts";
 
 // The write tool is a `ToolModule`; tests drive `execute` directly (Tier-0). Fixtures
 // are real files under a throwaway tmpdir used as `rootDir` — `resolveToCwd` resolves
 // relative paths under it, and absolute paths pass through (acceptance criteria).
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 let workdir: string;
 
@@ -48,7 +53,7 @@ function textOf(r: { ok: true; value: ToolOk } | { ok: false; error: Error }): s
 
 describe("write tool", () => {
 	it("creates parent directories and writes the file (spec acceptance)", async () => {
-		const r = await writeTool.execute({ path: "sub/dir/new.txt", content: "hi" }, rootDir);
+		const r = await writeTool.execute({ path: "sub/dir/new.txt", content: "hi" }, { rootDir, backend });
 
 		expect(textOf(r)).toBe("Successfully wrote 2 bytes to sub/dir/new.txt");
 		expect(readFileSync(join(rootDir, "sub", "dir", "new.txt"), "utf-8")).toBe("hi");
@@ -56,7 +61,7 @@ describe("write tool", () => {
 
 	it("overwrites an existing file (spec acceptance)", async () => {
 		writeFileSync(join(rootDir, "exists.txt"), "old content");
-		const r = await writeTool.execute({ path: "exists.txt", content: "new content" }, rootDir);
+		const r = await writeTool.execute({ path: "exists.txt", content: "new content" }, { rootDir, backend });
 
 		expect(textOf(r)).toBe("Successfully wrote 11 bytes to exists.txt");
 		expect(readFileSync(join(rootDir, "exists.txt"), "utf-8")).toBe("new content");
@@ -64,14 +69,14 @@ describe("write tool", () => {
 
 	it("round-trips: write then read returns the same content (spec acceptance)", async () => {
 		const content = "first line\nsecond line\nthird";
-		await writeTool.execute({ path: "rt.txt", content }, rootDir);
+		await writeTool.execute({ path: "rt.txt", content }, { rootDir, backend });
 
-		const readRes = await readTool.execute({ path: "rt.txt" }, rootDir);
+		const readRes = await readTool.execute({ path: "rt.txt" }, { rootDir, backend });
 		expect(unwrap(readRes).content[0]).toMatchObject({ type: "text", text: content });
 	});
 
 	it("resolves relative paths under rootDir (spec acceptance)", async () => {
-		await writeTool.execute({ path: "rel.txt", content: "relative" }, rootDir);
+		await writeTool.execute({ path: "rel.txt", content: "relative" }, { rootDir, backend });
 
 		expect(readFileSync(join(rootDir, "rel.txt"), "utf-8")).toBe("relative");
 	});
@@ -79,13 +84,13 @@ describe("write tool", () => {
 	it("passes absolute paths through (spec acceptance)", async () => {
 		const abs = join(rootDir, "abs.txt");
 		// Pass a different rootDir to prove the absolute path is used as-is.
-		await writeTool.execute({ path: abs, content: "absolute" }, "/somewhere/else");
+		await writeTool.execute({ path: abs, content: "absolute" }, { rootDir: "/somewhere/else", backend });
 
 		expect(readFileSync(abs, "utf-8")).toBe("absolute");
 	});
 
 	it("writes empty content and reports zero bytes", async () => {
-		const r = await writeTool.execute({ path: "empty.txt", content: "" }, rootDir);
+		const r = await writeTool.execute({ path: "empty.txt", content: "" }, { rootDir, backend });
 
 		expect(textOf(r)).toBe("Successfully wrote 0 bytes to empty.txt");
 		expect(readFileSync(join(rootDir, "empty.txt"), "utf-8")).toBe("");
@@ -93,7 +98,7 @@ describe("write tool", () => {
 
 	it("preserves UTF-8 content and counts UTF-16 length in the message (pi fidelity)", async () => {
 		const content = "héllo 🌍 wörld";
-		const r = await writeTool.execute({ path: "utf8.txt", content }, rootDir);
+		const r = await writeTool.execute({ path: "utf8.txt", content }, { rootDir, backend });
 
 		expect(readFileSync(join(rootDir, "utf8.txt"), "utf-8")).toBe(content);
 		// The byte count is the string's UTF-16 length (content.length), not its
@@ -102,7 +107,7 @@ describe("write tool", () => {
 	});
 
 	it("reports the original path in the success message, not the resolved absolute path", async () => {
-		const r = await writeTool.execute({ path: "msg.txt", content: "x" }, rootDir);
+		const r = await writeTool.execute({ path: "msg.txt", content: "x" }, { rootDir, backend });
 		const text = textOf(r);
 
 		expect(text).toBe("Successfully wrote 1 bytes to msg.txt");
@@ -110,24 +115,24 @@ describe("write tool", () => {
 	});
 
 	it("errors when path is absent or not a string", async () => {
-		const noPath = await writeTool.execute({ content: "x" }, rootDir);
+		const noPath = await writeTool.execute({ content: "x" }, { rootDir, backend });
 		expect(noPath.ok).toBe(false);
 
-		const badPath = await writeTool.execute({ path: 42, content: "x" }, rootDir);
+		const badPath = await writeTool.execute({ path: 42, content: "x" }, { rootDir, backend });
 		expect(badPath.ok).toBe(false);
 	});
 
 	it("errors when content is absent or not a string", async () => {
-		const noContent = await writeTool.execute({ path: "x.txt" }, rootDir);
+		const noContent = await writeTool.execute({ path: "x.txt" }, { rootDir, backend });
 		expect(noContent.ok).toBe(false);
 
-		const badContent = await writeTool.execute({ path: "x.txt", content: 42 }, rootDir);
+		const badContent = await writeTool.execute({ path: "x.txt", content: 42 }, { rootDir, backend });
 		expect(badContent.ok).toBe(false);
 	});
 
 	it("errors when the target path is an existing directory", async () => {
 		mkdirSync(join(rootDir, "adir"));
-		const r = await writeTool.execute({ path: "adir", content: "x" }, rootDir);
+		const r = await writeTool.execute({ path: "adir", content: "x" }, { rootDir, backend });
 
 		expect(r.ok).toBe(false);
 		if (r.ok) throw new Error("unreachable");

@@ -7,6 +7,7 @@
  * structural drift until real tool modules (specs 03–09) and the registry land.
  */
 import { describe, expect, it } from "vitest";
+import { createLocalBackend } from "../tools/backend.ts";
 import { err, ok } from "../tools/result.ts";
 import type { McpToolEntry, ToolContent, ToolModule, ToolOk } from "./types.ts";
 
@@ -32,19 +33,20 @@ describe("types: ToolContent", () => {
 });
 
 describe("types: ToolModule + McpToolEntry", () => {
+	const backend = createLocalBackend();
 	// A minimal stand-in for a real tool module (specs 03–09 export these).
 	const module: ToolModule = {
 		name: "read",
 		description: "read a file",
 		inputSchema: { type: "object", properties: { path: { type: "string" } } },
-		async execute(_args, _rootDir) {
+		async execute(_args, _ctx) {
 			const value: ToolOk = { content: [{ type: "text", text: "ok" }] };
 			return ok(value);
 		},
 	};
 
 	it("execute returns a Result<ToolOk> success", async () => {
-		const result = await module.execute({}, "/srv");
+		const result = await module.execute({}, { rootDir: "/srv", backend });
 		expect(result.ok).toBe(true);
 		if (result.ok) {
 			expect(result.value.content[0]).toMatchObject({ type: "text", text: "ok" });
@@ -58,7 +60,7 @@ describe("types: ToolModule + McpToolEntry", () => {
 				return err(new Error("boom"));
 			},
 		};
-		const result = await failing.execute({}, "/srv");
+		const result = await failing.execute({}, { rootDir: "/srv", backend });
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
 			expect(result.error).toBeInstanceOf(Error);
@@ -69,7 +71,7 @@ describe("types: ToolModule + McpToolEntry", () => {
 	it("the registry entry shape binds a module to rootDir via handler", async () => {
 		const entry: McpToolEntry = {
 			tool: { name: module.name, description: module.description, inputSchema: module.inputSchema },
-			handler: (args) => module.execute(args ?? {}, "/srv"),
+			handler: (args) => module.execute(args ?? {}, { rootDir: "/srv", backend }),
 		};
 		expect(entry.tool.name).toBe("read");
 		// handler defaults args to {} when called bare, and threads rootDir.

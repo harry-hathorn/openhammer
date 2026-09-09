@@ -12,6 +12,7 @@
  * (text + image is the whole surface across the 7 capability tools + `guide`).
  */
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { ToolBackend } from "../tools/backend.ts";
 import type { Result } from "../tools/result.ts";
 
 /** A content block in a successful tool result — text or a base64 image. */
@@ -35,7 +36,17 @@ export interface ToolModule {
 	// tool's inline literal satisfies it, and `createAllTools` lifts it onto
 	// `tool.inputSchema` with no cast. See spec 10 decision note.
 	inputSchema: Tool["inputSchema"];
-	execute: (args: Record<string, unknown>, rootDir: string) => Promise<Result<ToolOk>>;
+	execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<Result<ToolOk>>;
+}
+
+/**
+ * The execution context every tool runs against (spec 23): the working root
+ * (`MCP_ROOT_DIR`, already resolved absolute) plus the boot-scoped backend
+ * (local today; a VM backend swaps the target without touching tool bodies).
+ */
+export interface ToolContext {
+	rootDir: string;
+	backend: ToolBackend;
 }
 
 /**

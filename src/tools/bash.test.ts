@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { bashTool } from "./bash.ts";
 import type { Result } from "./result.ts";
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -45,14 +50,14 @@ describe("bashTool", () => {
 	});
 
 	test("runs a command and returns stdout (echo hello && pwd)", async () => {
-		const res = await bashTool.execute({ command: "echo hello && pwd" }, rootDir);
+		const res = await bashTool.execute({ command: "echo hello && pwd" }, { rootDir, backend });
 		const text = expectText(res);
 		expect(text).toContain("hello");
 		expect(text).toContain(rootDir);
 	}, 15000);
 
 	test("non-zero exit -> err carrying the exit code", async () => {
-		const res = await bashTool.execute({ command: "exit 3" }, rootDir);
+		const res = await bashTool.execute({ command: "exit 3" }, { rootDir, backend });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toContain("Command exited with code 3");
@@ -60,7 +65,7 @@ describe("bashTool", () => {
 	}, 15000);
 
 	test("large output is tail-truncated with a Full output footer", async () => {
-		const res = await bashTool.execute({ command: "yes | head -c 2000000" }, rootDir);
+		const res = await bashTool.execute({ command: "yes | head -c 2000000" }, { rootDir, backend });
 		const text = expectText(res);
 		expect(text).toContain("Full output:");
 		// The spilled full output should exist on disk (proves temp-file spill).
@@ -73,7 +78,10 @@ describe("bashTool", () => {
 	}, 30000);
 
 	test("merges stdout and stderr into one stream", async () => {
-		const res = await bashTool.execute({ command: "echo OUT_TO_STDOUT; echo ERR_TO_STDERR >&2" }, rootDir);
+		const res = await bashTool.execute(
+			{ command: "echo OUT_TO_STDOUT; echo ERR_TO_STDERR >&2" },
+			{ rootDir, backend },
+		);
 		const text = expectText(res);
 		expect(text).toContain("OUT_TO_STDOUT");
 		expect(text).toContain("ERR_TO_STDERR");
@@ -82,7 +90,10 @@ describe("bashTool", () => {
 	test("timeout kills the process tree (no orphan)", async () => {
 		// Background a long sleep in bash's process group, print its PID, then block
 		// on a foreground sleep so the timeout fires and the group is SIGKILLed.
-		const res = await bashTool.execute({ command: "sleep 60 & echo BG_PID=$!; sleep 30", timeout: 1 }, rootDir);
+		const res = await bashTool.execute(
+			{ command: "sleep 60 & echo BG_PID=$!; sleep 30", timeout: 1 },
+			{ rootDir, backend },
+		);
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toContain("Command timed out after 1 seconds");

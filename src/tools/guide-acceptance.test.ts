@@ -28,12 +28,17 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { createAllTools } from "./index.ts";
 
 // The root is purely an interpolation target (guide) / a resolution base (the
 // fs errors) — nothing is written or read, so a constant non-existent path is
 // fine and keeps the suite hermetic without temp-dir machinery.
 const ROOT = "/srv/openhammer-root";
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Unwrap a successful Result; throw (failing the test) if it was an err. */
 function unwrap<T extends ToolOk>(r: { ok: true; value: T } | { ok: false; error: Error }): T {
@@ -82,7 +87,7 @@ const WORKING_ROOT_TOKENS = ["working root", "does not persist", "resets to the 
 describe("spec 18 — guide + working-root contract (cross-cutting acceptance)", () => {
 	describe("guide tool", () => {
 		it("returns the resolved working root + the contract through the registry", async () => {
-			const entries = createAllTools(ROOT);
+			const entries = createAllTools({ rootDir: ROOT, backend });
 			const guide = entries.find((e) => e.tool.name === "guide");
 			if (!guide) throw new Error("guide entry missing");
 
@@ -98,7 +103,7 @@ describe("spec 18 — guide + working-root contract (cross-cutting acceptance)",
 
 	describe("tools/list (registry) shape", () => {
 		it("includes guide first, then the 7 capability tools", () => {
-			const entries = createAllTools(ROOT);
+			const entries = createAllTools({ rootDir: ROOT, backend });
 			expect(entries).toHaveLength(8);
 			// `guide` leads — "read this first" is the list order (spec 18 line 16).
 			expect(entries[0]?.tool.name).toBe("guide");
@@ -111,7 +116,7 @@ describe("spec 18 — guide + working-root contract (cross-cutting acceptance)",
 		// `entry.tool.description` is the SDK `Tool.description` (optional), so
 		// narrow it to `string` at the boundary — the modules always set one.
 		const descriptionOf = (name: string): string => {
-			const entry = createAllTools(ROOT).find((e) => e.tool.name === name);
+			const entry = createAllTools({ rootDir: ROOT, backend }).find((e) => e.tool.name === name);
 			if (!entry) throw new Error(`missing ${name} entry`);
 			const desc = entry.tool.description;
 			if (typeof desc !== "string") throw new Error(`missing description for ${name}`);
@@ -119,7 +124,7 @@ describe("spec 18 — guide + working-root contract (cross-cutting acceptance)",
 		};
 
 		it("the registry surfaces exactly the 7 capability tools, pinned to the v1 baseline", () => {
-			const names = createAllTools(ROOT)
+			const names = createAllTools({ rootDir: ROOT, backend })
 				.filter((e) => e.tool.name !== "guide")
 				.map((e) => e.tool.name);
 			expect(names).toEqual([...CAPABILITY_NAMES]);
@@ -140,7 +145,7 @@ describe("spec 18 — guide + working-root contract (cross-cutting acceptance)",
 
 	describe("fs results surface the absolute resolved path", () => {
 		it("ls: a missing relative path resolves under the root in the error", async () => {
-			const ls = createAllTools(ROOT).find((e) => e.tool.name === "ls");
+			const ls = createAllTools({ rootDir: ROOT, backend }).find((e) => e.tool.name === "ls");
 			if (!ls) throw new Error("ls entry missing");
 
 			const r = await ls.handler({ path: "no-such-dir" });
@@ -154,7 +159,7 @@ describe("spec 18 — guide + working-root contract (cross-cutting acceptance)",
 		});
 
 		it("grep: a missing relative path resolves under the root in the error", async () => {
-			const grep = createAllTools(ROOT).find((e) => e.tool.name === "grep");
+			const grep = createAllTools({ rootDir: ROOT, backend }).find((e) => e.tool.name === "grep");
 			if (!grep) throw new Error("grep entry missing");
 
 			const r = await grep.handler({ pattern: "zzz", path: "no-such-dir" });

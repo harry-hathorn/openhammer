@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { createLocalBackend } from "./backend.ts";
 import { lsTool } from "./ls.ts";
 import type { Result } from "./result.ts";
+
+// One local backend per file (spec 23) — LocalBackend is stateless, matching the
+// boot-scoped seam without per-test machinery.
+const backend = createLocalBackend();
 
 /** Assert a successful result and return its first text block's text. */
 function expectText(res: Result<ToolOk, Error>): string {
@@ -33,7 +38,7 @@ describe("lsTool", () => {
 		writeFileSync(join(rootDir, ".dotfile"), ""); // dotfile — must appear
 		mkdirSync(join(rootDir, ".hiddendir")); // hidden dir — must appear with '/'
 
-		const res = await lsTool.execute({ path: "." }, rootDir);
+		const res = await lsTool.execute({ path: "." }, { rootDir, backend });
 		const text = expectText(res);
 		const lines = text.split("\n");
 
@@ -49,13 +54,13 @@ describe("lsTool", () => {
 	});
 
 	test("empty directory -> '(empty directory)'", async () => {
-		const res = await lsTool.execute({ path: "." }, rootDir);
+		const res = await lsTool.execute({ path: "." }, { rootDir, backend });
 		expect(expectText(res)).toBe("(empty directory)");
 	});
 
 	test("listing a file -> err 'Not a directory'", async () => {
 		writeFileSync(join(rootDir, "afile"), "");
-		const res = await lsTool.execute({ path: "afile" }, rootDir);
+		const res = await lsTool.execute({ path: "afile" }, { rootDir, backend });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toBe(`Not a directory: ${join(rootDir, "afile")}`);
@@ -63,7 +68,7 @@ describe("lsTool", () => {
 	});
 
 	test("missing path -> err 'Path not found'", async () => {
-		const res = await lsTool.execute({ path: "nope" }, rootDir);
+		const res = await lsTool.execute({ path: "nope" }, { rootDir, backend });
 		expect(res.ok).toBe(false);
 		if (!res.ok) {
 			expect(res.error.message).toBe(`Path not found: ${join(rootDir, "nope")}`);
@@ -78,7 +83,7 @@ describe("lsTool", () => {
 			writeFileSync(join(rootDir, name), "");
 		}
 
-		const res = await lsTool.execute({ path: ".", limit: 3 }, rootDir);
+		const res = await lsTool.execute({ path: ".", limit: 3 }, { rootDir, backend });
 		const text = expectText(res);
 
 		// Only the first 3 (sorted: a, b, c) are listed, then the notice.
@@ -96,7 +101,7 @@ describe("lsTool", () => {
 			writeFileSync(join(rootDir, `${"x".repeat(200)}-${i}`), "");
 		}
 
-		const res = await lsTool.execute({ path: "." }, rootDir);
+		const res = await lsTool.execute({ path: "." }, { rootDir, backend });
 		const text = expectText(res);
 
 		expect(text).toContain("50.0KB limit reached");
