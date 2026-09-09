@@ -38,7 +38,8 @@
  * - `runShell` never spawns and runs no timer: responses come from the
  *   consumed script (timeouts included), `opts` are recorded for assertions,
  *   and an unscripted command resolves `127` plus a loud `unexpectedCalls`
- *   entry.
+ *   entry. `runArgv` shares that script and those rules, with streams split
+ *   per its own contract (`argvCalls` records the exact bin/args pair).
  */
 
 import { basename, dirname } from "node:path";
@@ -84,7 +85,14 @@ function splitChunks(text: string): string[] {
 	return chunks;
 }
 
-/** One scripted shell response. The first *unconsumed* entry whose `match` tests against the command is consumed by that call. */
+/**
+ * One scripted shell response. The first *unconsumed* entry whose `match` tests
+ * against the command is consumed by that call. The matching key is a command
+ * string: `runShell` tests against `cmd` verbatim; `runArgv` tests against the
+ * joined form `` `${bin} ${args.join(" ")}` `` — a lossless rendering for the
+ * flag-shaped argvs the tools build (no argument ever contains a space in a
+ * scripted test; assert exact argvs via the recorded `argvCalls` instead).
+ */
 export interface ShellScriptEntry {
 	/** String → substring test (`cmd.includes`); RegExp → `.test(cmd)`. */
 	match: string | RegExp;
@@ -99,6 +107,21 @@ export interface ShellScriptEntry {
 export interface ShellCall {
 	cmd: string;
 	cwd: string;
+	timeoutSec?: number;
+}
+
+/**
+ * A recorded `runArgv` call — `ShellCall`'s shape (with `cwd` optional:
+ * `runArgv`'s argv carries the absolute search path, so the argv tools pass no
+ * cwd today) plus the exact `bin`/`args` pair; arg-array hygiene is the point
+ * of `runArgv`, so the split form is recorded verbatim, and `cmd` carries the
+ * joined form the script matched.
+ */
+export interface ArgvCall {
+	bin: string;
+	args: string[];
+	cmd: string;
+	cwd?: string;
 	timeoutSec?: number;
 }
 
@@ -135,7 +158,9 @@ export class FakeBackend implements ToolBackend {
 
 	/** Every `runShell` call, in order — assert exact command construction. */
 	readonly calls: ShellCall[] = [];
-	/** Commands that matched no script entry — a missing script must be loud in test failures. */
+	/** Every `runArgv` call, in order — assert exact bin/argv construction. */
+	readonly argvCalls: ArgvCall[] = [];
+	/** Commands (or joined argvs) that matched no script entry — a missing script must be loud in test failures. */
 	readonly unexpectedCalls: string[] = [];
 	/** Every `probe(bin)` call, in order. */
 	readonly probeCalls: string[] = [];
@@ -270,6 +295,58 @@ export class FakeBackend implements ToolBackend {
 					if (i > 0) await sleep(entry.chunkDelayMs);
 					onChunk(Buffer.from(piece));
 				}
+			}
+		}
+		return { exitCode: entry.result.exitCode, timedOut: entry.result.timedOut ?? false };
+	}
+
+	/**
+	 * The `runArgv` twin of `runShell`: same shared script, same consumption and
+	 * emission rules (stdout then stderr, `chunkDelayMs` splits each stream into
+	 * 1–3 delayed chunks), same 127 + `unexpectedCalls` for an unscripted call —
+	 * but the streams stay **split** (`onStdout`/`onStderr`, never interleaved)
+	 * and the call is recorded in `argvCalls` with the exact `bin`/`args` pair.
+	 * `signal` is accepted and ignored: there is no child to kill, so an aborting
+	 * caller (grep's match cap) simply gets the scripted result after emission —
+	 * the abort side of the contract is LocalBackend's to prove.
+	 */
+	async runArgv(
+		bin: string,
+		args: readonly string[],
+		opts: {
+			cwd?: string;
+			timeoutSec?: number;
+			signal?: AbortSignal;
+			onStdout?: (b: Buffer) => void;
+			onStderr?: (b: Buffer) => void;
+		},
+	): Promise<ShellResult> {
+		const cmd = `${bin} ${args.join(" ")}`;
+		this.argvCalls.push({ cmd, bin, args: [...args], cwd: opts.cwd, timeoutSec: opts.timeoutSec });
+		const index = this.script.findIndex((entry) =>
+			typeof entry.match === "string" ? cmd.includes(entry.match) : entry.match.test(cmd),
+		);
+		if (index === -1) {
+			this.unexpectedCalls.push(cmd);
+			opts.onStderr?.(Buffer.from(`fake-backend: no script for: ${cmd}`));
+			return { exitCode: 127, timedOut: false };
+		}
+		const [entry] = this.script.splice(index, 1);
+		const out = entry.stdout ?? "";
+		const errorOut = entry.stderr ?? "";
+		if (entry.chunkDelayMs === undefined) {
+			if (out !== "") opts.onStdout?.(Buffer.from(out));
+			if (errorOut !== "") opts.onStderr?.(Buffer.from(errorOut));
+		} else {
+			// Split streams split separately: all stdout chunks, then all stderr
+			// chunks (never interleaved — the defining difference from runShell).
+			for (const [i, piece] of splitChunks(out).entries()) {
+				if (i > 0) await sleep(entry.chunkDelayMs);
+				opts.onStdout?.(Buffer.from(piece));
+			}
+			for (const [i, piece] of splitChunks(errorOut).entries()) {
+				if (i > 0) await sleep(entry.chunkDelayMs);
+				opts.onStderr?.(Buffer.from(piece));
 			}
 		}
 		return { exitCode: entry.result.exitCode, timedOut: entry.result.timedOut ?? false };
