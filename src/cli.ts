@@ -11,8 +11,8 @@
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
  * - `auth { add-client | list | remove <id> }` — manage OAuth clients (spec 20e).
- * - `vm { install }` — manage the local VM sandbox (spec 26; later boxes add
- *   provision/snapshot/list/reset/gc/status).
+ * - `vm { install | provision }` — manage the local VM sandbox (spec 26; later boxes add
+ *   snapshot/list/reset/gc/status).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  * - `monitor` — stream live client + tool-call activity over the status socket (17t).
  *
@@ -34,6 +34,7 @@ import { addChannel, CHANNEL_SELECT_PROMPT, type ProbeRunner, registryProviders 
 import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
 import { listChannels, removeChannel, setDefaultChannel } from "./tunnel/manage.ts";
 import { DEFAULT_BUDGET_MINUTES, runInstall } from "./vm/provision/install.ts";
+import { runProvision } from "./vm/provision/provision.ts";
 
 /** Injection seam for {@link runCli}'s side effects, so the banner/diagnostic behavior is unit-testable without a TTY. */
 export interface CliDeps {
@@ -531,20 +532,22 @@ async function setConfigFieldCmd(target: string, value: string | undefined, io: 
 // ---- `vm` subcommands -------------------------------------------------------
 
 /**
- * `vm` (spec 26): the VM-sandbox command tree. ONLY `install` exists in this box —
- * `provision`/`snapshot`/`list`/`reset`/`gc`/`status` are the later spec-26/27 boxes and
- * are deliberately absent from the usage string (advertising an unimplemented subcommand
+ * `vm` (spec 26): the VM-sandbox command tree. `install` + `provision` exist —
+ * `snapshot`/`list`/`reset`/`gc`/`status` are the later spec-26/27 boxes and are
+ * deliberately absent from the usage string (advertising an unimplemented subcommand
  * would just route the operator into an error).
  */
 async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo): Promise<number> {
 	switch (sub) {
 		case "install":
 			return await vmInstallCmd(rest, io);
+		case "provision":
+			return await vmProvisionCmd(rest, io);
 		case undefined:
 			io.stderr.write(`${VM_USAGE}\n`);
 			return 2;
 		default:
-			io.stderr.write(`vm: unknown subcommand '${sub}' (available: install)\n\n${VM_USAGE}\n`);
+			io.stderr.write(`vm: unknown subcommand '${sub}' (available: install, provision)\n\n${VM_USAGE}\n`);
 			return 2;
 	}
 }
@@ -591,6 +594,34 @@ async function vmInstallCmd(rest: string[], io: CommandIo): Promise<number> {
 	}
 }
 
+/**
+ * `vm provision` — the thin CLI boundary over 26d's {@link runProvision}: progress lines
+ * to stdout, the checks/prewarm summary on success, and the thrown actionable error on
+ * stderr with exit 1 (the provision runner owns every decision; this only parses flags —
+ * none exist yet — and prints). Flag-less by design: the pass always targets the most
+ * recent install session and is idempotent, so there is nothing to configure.
+ */
+async function vmProvisionCmd(rest: string[], io: CommandIo): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const unexpected = [...Object.keys(flags.values), ...flags.bools, ...flags.unknown, ...flags.positionals];
+	if (unexpected.length > 0) {
+		io.stderr.write(`Usage: openhammer vm provision\n`);
+		return 2;
+	}
+	try {
+		const result = await runProvision({ log: (line) => io.stdout.write(`${line}\n`) });
+		const passed = result.checks.filter((check) => check.ok).length;
+		io.stdout.write(
+			`vm provision: done — wall-clock ${result.wallClockSeconds.toFixed(1)} s, ${passed}/${result.checks.length} ` +
+				`checks passed, agent prewarm: ${result.agentPrewarm}, session ${result.sessionDir}\n`,
+		);
+		return 0;
+	} catch (error) {
+		io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+}
+
 // ---- usage text -------------------------------------------------------------
 
 const USAGE = `Usage: openhammer [command] [options]
@@ -629,6 +660,9 @@ Commands:
     install               Build the golden Omarchy image unattended
                            (pinned-ISO download on first run; headless boot,
                            ssh readiness gate, clean poweroff)
+    provision             Provision the installed build over ssh (idempotent,
+                           rerunnable): packages, SDDM autologin, agent
+                           defaults, env rc lines, boot hook, host-key capture
   doctor                 Run diagnostics checks
   monitor                Stream live client + tool-call activity
 
@@ -642,7 +676,7 @@ const CHANNEL_USAGE = `Usage: openhammer channel { add | list | remove <id> | us
 const CONFIG_USAGE = `Usage: openhammer config { get | set [section] }`;
 
 /** The vm tree's usage line — only the implemented subcommands are advertised (see vmCommand). */
-const VM_USAGE = `Usage: openhammer vm { install }`;
+const VM_USAGE = `Usage: openhammer vm { install | provision }`;
 
 // Auto-run only when invoked as the entrypoint (the `openhammer` bin), not when
 // imported by tests. Matches the T-canary guard: under vitest `process.argv[1]`

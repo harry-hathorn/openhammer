@@ -543,7 +543,7 @@ describe("dispatch — non-interactive flag mode (spec 20g)", () => {
 	});
 });
 
-describe("dispatch — `vm` subcommands (spec 26c)", () => {
+describe("dispatch — `vm` subcommands (spec 26c/26d)", () => {
 	it("routes `vm install` to the vm handler with sub + trailing rest", async () => {
 		const vm = fakeHandler();
 		await dispatch(parsed("vm", ["install"]), { vm: vm.handler });
@@ -556,12 +556,27 @@ describe("dispatch — `vm` subcommands (spec 26c)", () => {
 		expect(vm.calls).toEqual([{ sub: "install", rest: ["--budget-minutes", "5"] }]);
 	});
 
+	it("routes `vm provision` to the vm handler with sub + trailing rest", async () => {
+		const vm = fakeHandler();
+		await dispatch(parsed("vm", ["provision"]), { vm: vm.handler });
+		expect(vm.calls).toEqual([{ sub: "provision", rest: [] }]);
+	});
+
+	it("`vm provision` with any flag/positional is a usage error before anything runs (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["provision", "--nope"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Usage: openhammer vm provision\n");
+		});
+	});
+
 	it("`vm` with no subcommand is a usage error (exit 2)", async () => {
 		await withTempHome(async () => {
 			const err = recordingStream();
 			const code = await dispatch(parsed("vm"), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("Usage: openhammer vm { install }");
+			expect(err.text()).toContain("Usage: openhammer vm { install | provision }");
 		});
 	});
 
@@ -570,7 +585,7 @@ describe("dispatch — `vm` subcommands (spec 26c)", () => {
 			const err = recordingStream();
 			const code = await dispatch(parsed("vm", ["snapshot"]), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("vm: unknown subcommand 'snapshot' (available: install)");
+			expect(err.text()).toContain("vm: unknown subcommand 'snapshot' (available: install, provision)");
 		});
 	});
 
@@ -598,6 +613,7 @@ describe("dispatch — `vm` subcommands (spec 26c)", () => {
 		const text = out.text();
 		expect(text).toContain("vm <subcommand>");
 		expect(text).toContain("install");
+		expect(text).toContain("provision");
 	});
 });
 
