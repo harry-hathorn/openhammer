@@ -11,8 +11,8 @@
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
  * - `auth { add-client | list | remove <id> }` — manage OAuth clients (spec 20e).
- * - `vm { install | provision | snapshot }` — manage the local VM sandbox (spec 26; later
- *   boxes add list/reset/gc/status).
+ * - `vm { install | provision | snapshot | list | reset | gc }` — manage the local VM
+ *   sandbox (spec 26; later boxes add status).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  * - `monitor` — stream live client + tool-call activity over the status socket (17t).
  *
@@ -34,6 +34,7 @@ import { addChannel, CHANNEL_SELECT_PROMPT, type ProbeRunner, registryProviders 
 import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
 import { listChannels, removeChannel, setDefaultChannel } from "./tunnel/manage.ts";
 import { DEFAULT_BUDGET_MINUTES, runInstall } from "./vm/provision/install.ts";
+import { DEFAULT_KEEP_GOLDENS, type GoldenSummary, vmGc, vmList, vmReset } from "./vm/provision/manage.ts";
 import { runProvision } from "./vm/provision/provision.ts";
 import { runSnapshot } from "./vm/provision/snapshot.ts";
 
@@ -533,8 +534,8 @@ async function setConfigFieldCmd(target: string, value: string | undefined, io: 
 // ---- `vm` subcommands -------------------------------------------------------
 
 /**
- * `vm` (spec 26): the VM-sandbox command tree. `install` + `provision` + `snapshot` exist —
- * `list`/`reset`/`gc`/`status` are the later spec-26/27 boxes and are deliberately absent
+ * `vm` (spec 26): the VM-sandbox command tree. `install` + `provision` + `snapshot` +
+ * `list`/`reset`/`gc` exist — `status` is the later spec-27 box and is deliberately absent
  * from the usage string (advertising an unimplemented subcommand would just route the
  * operator into an error).
  */
@@ -546,11 +547,19 @@ async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo)
 			return await vmProvisionCmd(rest, io);
 		case "snapshot":
 			return await vmSnapshotCmd(rest, io);
+		case "list":
+			return await vmListCmd(io);
+		case "reset":
+			return await vmResetCmd(rest, io);
+		case "gc":
+			return await vmGcCmd(rest, io);
 		case undefined:
 			io.stderr.write(`${VM_USAGE}\n`);
 			return 2;
 		default:
-			io.stderr.write(`vm: unknown subcommand '${sub}' (available: install, provision, snapshot)\n\n${VM_USAGE}\n`);
+			io.stderr.write(
+				`vm: unknown subcommand '${sub}' (available: install, provision, snapshot, list, reset, gc)\n\n${VM_USAGE}\n`,
+			);
 			return 2;
 	}
 }
@@ -652,6 +661,117 @@ async function vmSnapshotCmd(rest: string[], io: CommandIo): Promise<number> {
 	}
 }
 
+/**
+ * `vm list` — the thin CLI boundary over 26f's {@link vmList}: prints one row per golden
+ * (newest first) with the drift notes, and — the spec's edge case surfaced — a `corrupt:`
+ * row for a golden whose manifest failed validation, with the WARNING on stderr. Exit 0
+ * even with corrupt rows: a degraded tree is exactly what `list` exists to report.
+ */
+async function vmListCmd(io: CommandIo): Promise<number> {
+	let rows: GoldenSummary[];
+	try {
+		rows = await vmList();
+	} catch (error) {
+		io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+	if (rows.length === 0) {
+		io.stdout.write("No goldens — run openhammer vm install, vm provision, vm snapshot to build one.\n");
+		return 0;
+	}
+	io.stdout.write("Goldens (newest first):\n");
+	for (const row of rows) {
+		if (!row.manifestOk) {
+			io.stdout.write(`  corrupt: ${row.id} — manifest.json missing or invalid\n`);
+			io.stderr.write(
+				`vm list: WARNING: golden ${row.id}: manifest.json is missing or invalid — rebuild with vm install\n`,
+			);
+			continue;
+		}
+		const actual = row.diskActualBytes > 0 ? `${row.diskActualBytes} B` : "unmeasured";
+		io.stdout.write(
+			`  ${row.id}  flavor ${row.flavor ?? "?"}  user ${row.guestUser ?? "?"}  built ${row.builtAt ?? "?"}` +
+				`  iso ${row.isoVersion ?? "?"}  virtual ${row.diskVirtualSizeBytes ?? "?"} B  actual ${actual}\n`,
+		);
+		if (row.note !== null) io.stdout.write(`    note: ${row.note}\n`);
+	}
+	return 0;
+}
+
+/**
+ * `vm reset [--yes]` — the thin CLI boundary over 26f's {@link vmReset} (the manage.ts
+ * confirm precedent: dry run by default, `--yes` removes). Only the `--yes` bool flag is
+ * valid; anything else is a usage error before anything runs.
+ */
+async function vmResetCmd(rest: string[], io: CommandIo): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const unexpected = [
+		...Object.keys(flags.values), // `--yes=…` is rejected too — the bool has no value form
+		...[...flags.bools].filter((name) => name !== "yes"),
+		...flags.unknown,
+		...flags.positionals,
+	];
+	if (unexpected.length > 0) {
+		io.stderr.write(`Usage: openhammer vm reset [--yes]\n`);
+		return 2;
+	}
+	try {
+		const report = await vmReset({ log: (line) => io.stdout.write(`${line}\n`) }, { yes: flags.bools.has("yes") });
+		io.stdout.write(
+			`vm reset: done — ${report.sessions.count} session dir(s), ${report.sessions.bytes} B` +
+				`${report.dryRun ? " (dry run — rerun with --yes to remove)" : " removed"}\n`,
+		);
+		return 0;
+	} catch (error) {
+		io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+}
+
+/**
+ * `vm gc [--yes] [--keep-goldens <n>]` — the thin CLI boundary over 26f's {@link vmGc}
+ * (the manage.ts confirm precedent: dry run by default, `--yes` reclaims). The keep
+ * count must be an integer >= 1 — the newest golden is ALWAYS kept (it is the active
+ * one), so keeping zero is a usage error, not a valid reclaim-everything request.
+ */
+async function vmGcCmd(rest: string[], io: CommandIo): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const unexpected = [
+		...Object.keys(flags.values).filter((name) => name !== "keep-goldens"),
+		...[...flags.bools].filter((name) => name !== "yes"),
+		...flags.unknown,
+		...flags.positionals,
+	];
+	if (unexpected.length > 0) {
+		io.stderr.write(`Usage: openhammer vm gc [--yes] [--keep-goldens <n>]\n`);
+		return 2;
+	}
+	let keepGoldens = DEFAULT_KEEP_GOLDENS;
+	const raw = flags.values["keep-goldens"];
+	if (raw !== undefined) {
+		keepGoldens = Number(raw);
+		if (!Number.isInteger(keepGoldens) || keepGoldens < 1) {
+			io.stderr.write(`vm gc: --keep-goldens must be an integer >= 1 (got "${raw}")\n`);
+			return 2;
+		}
+	}
+	try {
+		const report = await vmGc(
+			{ log: (line) => io.stdout.write(`${line}\n`) },
+			{ yes: flags.bools.has("yes"), keepGoldens },
+		);
+		const totals =
+			`sessions ${report.sessions.count} (${report.sessions.bytes} B), ` +
+			`cidata ${report.cidata.count} (${report.cidata.bytes} B), ` +
+			`goldens ${report.goldens.count} (${report.goldens.bytes} B)`;
+		io.stdout.write(`vm gc: done — ${totals}${report.dryRun ? " (dry run — rerun with --yes to reclaim)" : ""}\n`);
+		return 0;
+	} catch (error) {
+		io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+}
+
 // ---- usage text -------------------------------------------------------------
 
 const USAGE = `Usage: openhammer [command] [options]
@@ -697,6 +817,18 @@ Commands:
                            (disk + installed OVMF VARS moved into images/,
                            host pin copied, 0600 manifest written — a personal
                            artifact)
+    list                  List the golden images (disk sizes; a note when
+                           guest.json changed since a golden was baked — edits
+                           apply on the next vm install; corrupt manifests
+                           surfaced, exit 0)
+    reset [--yes]         Discard stale (dead-pid) session dirs, keeping live
+                           and unverifiable ones (dry run by default; --yes
+                           removes; refuses while a session is live)
+    gc [--yes] [--keep-goldens <n>]
+                           Reclaim stale sessions + orphaned cidata builds +
+                           old goldens, with a footprint report (dry run by
+                           default; keeps the newest <n> goldens, default 2;
+                           refuses while a session is live)
   doctor                 Run diagnostics checks
   monitor                Stream live client + tool-call activity
 
@@ -710,7 +842,7 @@ const CHANNEL_USAGE = `Usage: openhammer channel { add | list | remove <id> | us
 const CONFIG_USAGE = `Usage: openhammer config { get | set [section] }`;
 
 /** The vm tree's usage line — only the implemented subcommands are advertised (see vmCommand). */
-const VM_USAGE = `Usage: openhammer vm { install | provision | snapshot }`;
+const VM_USAGE = `Usage: openhammer vm { install | provision | snapshot | list | reset | gc }`;
 
 // Auto-run only when invoked as the entrypoint (the `openhammer` bin), not when
 // imported by tests. Matches the T-canary guard: under vitest `process.argv[1]`
