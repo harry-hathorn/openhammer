@@ -112,7 +112,7 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("runSnapshot — the promote (happy path)", () => {
-	it("moves disk + installed VARS, copies known_hosts 0600, and the session's logs survive", async () => {
+	it("moves disk + installed VARS, copies known_hosts (all three 0600), and the session's logs survive", async () => {
 		const h = harness();
 		try {
 			const result = await runSnapshot(h.deps);
@@ -128,7 +128,11 @@ describe("runSnapshot — the promote (happy path)", () => {
 			// The one COPY: the session KEEPS its pin (the evidence stays), the golden gets a 0600 twin.
 			expect(readFileSync(join(h.sessionDir, "known_hosts"), "utf8")).toBe(HOST_KEY);
 			expect(readFileSync(join(goldenDir, "known_hosts"), "utf8")).toBe(HOST_KEY);
-			expect(statSync(join(goldenDir, "known_hosts")).mode & 0o777).toBe(0o600);
+			// Every landed file is 0600 — the moved pair too (the harness seeds the session
+			// files at umask-default 0644, so this genuinely pins the promote's chmod).
+			for (const file of [GOLDEN_DISK_FILE, "OVMF_VARS.4m.fd", "known_hosts"]) {
+				expect(statSync(join(goldenDir, file)).mode & 0o777, file).toBe(0o600);
+			}
 			// Only disk + VARS move — the session's logs survive untouched.
 			expect(readFileSync(join(h.sessionDir, "install.log"), "utf8")).toBe("install evidence\n");
 			expect(readFileSync(join(h.sessionDir, "provision.log"), "utf8")).toBe("provision evidence\n");

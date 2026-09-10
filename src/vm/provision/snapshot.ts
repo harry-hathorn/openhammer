@@ -5,14 +5,17 @@
  * actually baked (the spec's edge case: guest.json edits after a golden exists apply to the
  * NEXT build — this doc is the truth about the existing one).
  *
- * THE PROMOTE SEMANTICS — what moves and what copies:
- * - `disk.qcow2` → `images/<id>/golden.qcow2` — MOVED. After promotion the build session is
- *   no longer bootable, and that is the point: the golden is the ONE true copy of the disk,
- *   and a direct `vm provision` boot of it is exactly what the overlay discipline (spec 27)
- *   forbids. Every later session boots an overlay backed onto this file.
- * - `OVMF_VARS.4m.fd` → `images/<id>/OVMF_VARS.4m.fd` — MOVED. The INSTALLED VARS carry the
- *   Limine boot entry (spike-proven: the pristine template VARS find no boot option); every
- *   later session copies THESE as its writable pflash (24a's prepareSession).
+ * THE PROMOTE SEMANTICS — what moves and what copies (every landed file 0600; the dir 0700):
+ * - `disk.qcow2` → `images/<id>/golden.qcow2` — MOVED, then chmod 0600 (rename preserves the
+ *   source's umask-default 0644; spec 26's every-artifact perms are enforced at the promote).
+ *   After promotion the build session is no longer bootable, and that is the point: the
+ *   golden is the ONE true copy of the disk, and a direct `vm provision` boot of it is
+ *   exactly what the overlay discipline (spec 27) forbids. Every later session boots an
+ *   overlay backed onto this file.
+ * - `OVMF_VARS.4m.fd` → `images/<id>/OVMF_VARS.4m.fd` — MOVED, chmod 0600 likewise. The
+ *   INSTALLED VARS carry the Limine boot entry (spike-proven: the pristine template VARS
+ *   find no boot option); every later session copies THESE as its writable pflash (24a's
+ *   prepareSession).
  * - `known_hosts` → `images/<id>/known_hosts` — COPIED, 0600. The 26d keyscan output is the
  *   pin source: future pinned sessions verify against the golden's copy, while the session
  *   dir keeps its own evidence (install.log, provision.log, the recovery password).
@@ -371,14 +374,18 @@ export async function runSnapshot(deps: SnapshotDeps = {}, options: SnapshotOpti
 	}
 	mkdirSync(goldenDir, { recursive: true, mode: 0o700 });
 
-	// ---- the promote: two moves + one 0600 copy (the module header's table) ----
+	// ---- the promote: two moves + one 0600 copy (the module header's table). Each moved
+	// file is chmod'd 0600 AFTER the move: rename(2) preserves the source mode, and the
+	// session's disk/VARS were created at umask default (0644) — spec 26's every-artifact
+	// 0600/0700 rule is enforced HERE, at the boundary where they become golden artifacts. ----
 	const promote = (from: string, to: string, what: string): void => {
 		try {
 			rename(from, to);
+			chmodSync(to, 0o600);
 		} catch (error) {
 			throw new Error(`vm snapshot: promote failed moving ${from} → ${to} (${what}): ${messageOf(error)}`);
 		}
-		log(`snapshot: moved ${what}`);
+		log(`snapshot: moved ${what} (0600)`);
 	};
 	promote(diskPath, join(goldenDir, GOLDEN_DISK_FILE), `${DISK_FILE} → ${GOLDEN_DISK_FILE}`);
 	promote(join(sessionDir, VARS_FILE), join(goldenDir, VARS_FILE), `${VARS_FILE} (the installed VARS)`);
