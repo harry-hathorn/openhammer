@@ -11,6 +11,8 @@
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
  * - `auth { add-client | list | remove <id> }` — manage OAuth clients (spec 20e).
+ * - `vm { install }` — manage the local VM sandbox (spec 26; later boxes add
+ *   provision/snapshot/list/reset/gc/status).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  * - `monitor` — stream live client + tool-call activity over the status socket (17t).
  *
@@ -31,6 +33,7 @@ import { flagIo } from "./tui/prompts.ts";
 import { addChannel, CHANNEL_SELECT_PROMPT, type ProbeRunner, registryProviders } from "./tui/wizards/channel.ts";
 import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
 import { listChannels, removeChannel, setDefaultChannel } from "./tunnel/manage.ts";
+import { DEFAULT_BUDGET_MINUTES, runInstall } from "./vm/provision/install.ts";
 
 /** Injection seam for {@link runCli}'s side effects, so the banner/diagnostic behavior is unit-testable without a TTY. */
 export interface CliDeps {
@@ -105,6 +108,8 @@ export interface DispatchDeps {
 	config?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `auth` subcommand handler (defaults to {@link authCommand}). */
 	auth?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
+	/** `vm` subcommand handler (defaults to {@link vmCommand}). */
+	vm?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `doctor` handler (defaults to {@link doctorCommand}). */
 	doctor?: (io: CommandIo) => Promise<number>;
 	/** `monitor` handler (defaults to {@link monitorCommand}). */
@@ -140,6 +145,7 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 	const auth = deps.auth ?? authCommand;
 	const doctor = deps.doctor ?? doctorCommand;
 	const monitor = deps.monitor ?? monitorCommand;
+	const vm = deps.vm ?? vmCommand;
 
 	if (parsed.help) {
 		io.stdout.write(`${USAGE}\n`);
@@ -165,6 +171,8 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 			return config(parsed.rest[0], parsed.rest.slice(1), io);
 		case "auth":
 			return auth(parsed.rest[0], parsed.rest.slice(1), io);
+		case "vm":
+			return vm(parsed.rest[0], parsed.rest.slice(1), io);
 		case "doctor":
 			return doctor(io);
 		case "monitor":
@@ -520,6 +528,69 @@ async function setConfigFieldCmd(target: string, value: string | undefined, io: 
 	return 0;
 }
 
+// ---- `vm` subcommands -------------------------------------------------------
+
+/**
+ * `vm` (spec 26): the VM-sandbox command tree. ONLY `install` exists in this box —
+ * `provision`/`snapshot`/`list`/`reset`/`gc`/`status` are the later spec-26/27 boxes and
+ * are deliberately absent from the usage string (advertising an unimplemented subcommand
+ * would just route the operator into an error).
+ */
+async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo): Promise<number> {
+	switch (sub) {
+		case "install":
+			return await vmInstallCmd(rest, io);
+		case undefined:
+			io.stderr.write(`${VM_USAGE}\n`);
+			return 2;
+		default:
+			io.stderr.write(`vm: unknown subcommand '${sub}' (available: install)\n\n${VM_USAGE}\n`);
+			return 2;
+	}
+}
+
+/**
+ * `vm install [--budget-minutes <n>]` — the thin CLI boundary over 26c's
+ * {@link runInstall}: progress lines to stdout, the result summary on success, and the
+ * thrown actionable error on stderr with exit 1 (the install runner owns every decision;
+ * this only parses flags and prints).
+ */
+async function vmInstallCmd(rest: string[], io: CommandIo): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const known = new Set(["budget-minutes"]);
+	const unknownFlags = [
+		...Object.keys(flags.values).filter((name) => !known.has(name)),
+		...flags.bools,
+		...flags.unknown,
+		...flags.positionals,
+	];
+	if (unknownFlags.length > 0) {
+		io.stderr.write(`Usage: openhammer vm install [--budget-minutes <n>]\n`);
+		return 2;
+	}
+	let budgetMinutes = DEFAULT_BUDGET_MINUTES;
+	const raw = flags.values["budget-minutes"];
+	if (raw !== undefined) {
+		budgetMinutes = Number(raw);
+		if (!Number.isFinite(budgetMinutes) || budgetMinutes <= 0) {
+			io.stderr.write(`vm install: --budget-minutes must be a positive number (got "${raw}")\n`);
+			return 2;
+		}
+	}
+	try {
+		const result = await runInstall({ log: (line) => io.stdout.write(`${line}\n`) }, { budgetMinutes });
+		io.stdout.write(
+			`vm install: done — wall-clock ${result.wallClockSeconds.toFixed(1)} s, ` +
+				`disk ${result.diskActualBytes} B actual in ${result.diskVirtualBytes} B virtual, ` +
+				`shutdown ${result.shutdownPath}, session ${result.sessionDir}\n`,
+		);
+		return 0;
+	} catch (error) {
+		io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+}
+
 // ---- usage text -------------------------------------------------------------
 
 const USAGE = `Usage: openhammer [command] [options]
@@ -554,6 +625,10 @@ Commands:
                            Set the operator login non-interactively
     list                   List registered clients
     remove <client_id>     Remove a client by id
+  vm <subcommand>        Manage the local VM sandbox (needs qemu + KVM)
+    install               Build the golden Omarchy image unattended
+                           (pinned-ISO download on first run; headless boot,
+                           ssh readiness gate, clean poweroff)
   doctor                 Run diagnostics checks
   monitor                Stream live client + tool-call activity
 
@@ -565,6 +640,9 @@ Options:
 const CHANNEL_USAGE = `Usage: openhammer channel { add | list | remove <id> | use <id> }`;
 
 const CONFIG_USAGE = `Usage: openhammer config { get | set [section] }`;
+
+/** The vm tree's usage line — only the implemented subcommands are advertised (see vmCommand). */
+const VM_USAGE = `Usage: openhammer vm { install }`;
 
 // Auto-run only when invoked as the entrypoint (the `openhammer` bin), not when
 // imported by tests. Matches the T-canary guard: under vitest `process.argv[1]`

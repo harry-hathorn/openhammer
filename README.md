@@ -191,6 +191,8 @@ openhammer auth list             List OAuth clients
 openhammer auth remove <id>      Remove an OAuth client
 openhammer doctor                Run health checks (config, channels, credentials, rg/fd)
 openhammer monitor               Stream live client + tool-call activity (Ctrl-C to stop)
+openhammer vm install            Build the sandbox's golden Omarchy VM unattended (qemu + KVM,
+                                 pinned-ISO download on first run)
 ```
 
 Interactive commands print the OpenHammer banner first.

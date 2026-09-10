@@ -543,6 +543,64 @@ describe("dispatch — non-interactive flag mode (spec 20g)", () => {
 	});
 });
 
+describe("dispatch — `vm` subcommands (spec 26c)", () => {
+	it("routes `vm install` to the vm handler with sub + trailing rest", async () => {
+		const vm = fakeHandler();
+		await dispatch(parsed("vm", ["install"]), { vm: vm.handler });
+		expect(vm.calls).toEqual([{ sub: "install", rest: [] }]);
+	});
+
+	it("routes `vm install --budget-minutes 5` with the flag tokens passed through", async () => {
+		const vm = fakeHandler();
+		await dispatch(parsed("vm", ["install", "--budget-minutes", "5"]), { vm: vm.handler });
+		expect(vm.calls).toEqual([{ sub: "install", rest: ["--budget-minutes", "5"] }]);
+	});
+
+	it("`vm` with no subcommand is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm"), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Usage: openhammer vm { install }");
+		});
+	});
+
+	it("`vm <unknown>` names the unknown subcommand and what exists (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["snapshot"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("vm: unknown subcommand 'snapshot' (available: install)");
+		});
+	});
+
+	it("`vm install` with an unknown flag is a usage error before any install runs (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["install", "--nope"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Usage: openhammer vm install [--budget-minutes <n>]");
+		});
+	});
+
+	it("`vm install --budget-minutes <not-a-number>` is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["install", "--budget-minutes", "soon"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain('--budget-minutes must be a positive number (got "soon")');
+		});
+	});
+
+	it("--help lists the vm command tree", async () => {
+		const out = recordingStream();
+		await dispatch(parsed(null, [], { help: true }), { stdout: out.stream });
+		const text = out.text();
+		expect(text).toContain("vm <subcommand>");
+		expect(text).toContain("install");
+	});
+});
+
 /** A fresh default settings doc seeded with one channel (the default), for the `--default` / preserve tests. */
 function homeWithChannel(channel: ChannelEntry): Settings {
 	return { ...defaultSettings(), channels: [channel], defaultChannel: channel.id };
