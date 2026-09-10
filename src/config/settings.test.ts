@@ -11,8 +11,18 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ChannelEntry, Settings } from "./settings.ts";
-import { CHANNEL_KINDS, CHANNEL_MODES, defaultSettings, loadSettings, saveSettings, settingsPath } from "./settings.ts";
+import type { ChannelEntry, Settings, VmSettings } from "./settings.ts";
+import {
+	CHANNEL_KINDS,
+	CHANNEL_MODES,
+	defaultSettings,
+	defaultVmSettings,
+	isVmSettings,
+	loadSettings,
+	normalizeSettings,
+	saveSettings,
+	settingsPath,
+} from "./settings.ts";
 
 describe("settingsPath", () => {
 	it("resolves <homeDir>/.openhammer/config.json", () => {
@@ -37,7 +47,151 @@ describe("defaultSettings", () => {
 			channels: [],
 			defaultChannel: null,
 			mcp: { allowedClients: [] },
+			vm: {
+				mode: "off",
+				memoryMb: 4096,
+				cpus: 4,
+				persist: "auto",
+				idleTimeoutMs: 0,
+				agentCmd: "claude",
+				secretsDir: null,
+			},
 		});
+	});
+});
+
+describe("defaultVmSettings", () => {
+	it("returns the spec-27 + 22-measured defaults (off, 4096 MiB / 4 cpus, auto, never reap)", () => {
+		expect(defaultVmSettings()).toEqual({
+			mode: "off",
+			memoryMb: 4096,
+			cpus: 4,
+			persist: "auto",
+			idleTimeoutMs: 0,
+			agentCmd: "claude",
+			secretsDir: null,
+		});
+	});
+});
+
+describe("isVmSettings", () => {
+	it("accepts the defaults and a fully custom section", () => {
+		expect(isVmSettings(defaultVmSettings())).toBe(true);
+		expect(
+			isVmSettings({
+				mode: "agent",
+				memoryMb: 6144,
+				cpus: 2,
+				persist: "retain",
+				idleTimeoutMs: 3_600_000,
+				agentCmd: "claude -p --dangerously-skip-permissions",
+				secretsDir: "/srv/openhammer-secrets",
+			}),
+		).toBe(true);
+	});
+
+	it("accepts every mode and persist literal", () => {
+		for (const mode of ["off", "vm", "agent"]) {
+			expect(isVmSettings({ ...defaultVmSettings(), mode }), `mode=${mode}`).toBe(true);
+		}
+		for (const persist of ["auto", "retain", "discard"]) {
+			expect(isVmSettings({ ...defaultVmSettings(), persist }), `persist=${persist}`).toBe(true);
+		}
+	});
+
+	it("rejects non-sections and each malformed member", () => {
+		const rejects: unknown[] = [
+			undefined,
+			null,
+			"off",
+			42,
+			[],
+			{},
+			{ ...defaultVmSettings(), mode: "local" }, // not one of the three literals
+			{ ...defaultVmSettings(), mode: 1 },
+			{ ...defaultVmSettings(), memoryMb: -4096 }, // negative memory
+			{ ...defaultVmSettings(), memoryMb: 0 },
+			{ ...defaultVmSettings(), memoryMb: 4096.5 }, // fractional
+			{ ...defaultVmSettings(), cpus: 0 }, // zero cpus
+			{ ...defaultVmSettings(), cpus: -2 },
+			{ ...defaultVmSettings(), persist: "keep" }, // not one of the three literals
+			{ ...defaultVmSettings(), idleTimeoutMs: -1 }, // negative idle
+			{ ...defaultVmSettings(), agentCmd: "" }, // empty command
+			{ ...defaultVmSettings(), agentCmd: 7 },
+			{ ...defaultVmSettings(), secretsDir: 42 }, // number, not string|null
+			{ ...defaultVmSettings(), secretsDir: undefined }, // absent member ≠ null
+		];
+		for (const v of rejects) {
+			expect(isVmSettings(v), `rejects ${JSON.stringify(v)}`).toBe(false);
+		}
+	});
+});
+
+describe("normalizeSettings — vm default-fill (breakage-critical)", () => {
+	/** A valid pre-spec-27 doc: everything but the vm key. */
+	const preVmDoc = {
+		version: 1,
+		channels: [{ id: "abc", kind: "ngrok", mode: "live", options: { region: "us" } }],
+		defaultChannel: "abc",
+		mcp: { allowedClients: ["claude-code"] },
+	};
+
+	it("fills defaults when vm is absent", () => {
+		expect(normalizeSettings(preVmDoc)?.vm).toEqual(defaultVmSettings());
+	});
+
+	it("preserves a valid vm field-for-field", () => {
+		const vm: VmSettings = {
+			mode: "vm",
+			memoryMb: 6144,
+			cpus: 2,
+			persist: "retain",
+			idleTimeoutMs: 3_600_000,
+			agentCmd: "claude -p",
+			secretsDir: "/srv/keys",
+		};
+		expect(normalizeSettings({ ...preVmDoc, vm })?.vm).toEqual(vm);
+	});
+
+	it("default-fills a wrong-shape vm while the rest of the doc survives (channel intact in every row)", () => {
+		const badVms: unknown[] = [
+			null,
+			"off",
+			42,
+			[],
+			{},
+			{ ...defaultVmSettings(), mode: "container" }, // wrong mode
+			{ ...defaultVmSettings(), memoryMb: -4096 }, // negative memory
+			{ ...defaultVmSettings(), cpus: 0 }, // zero cpus
+			{ ...defaultVmSettings(), persist: "keep" }, // bad persist
+			{ ...defaultVmSettings(), idleTimeoutMs: -1 }, // negative idle
+			{ ...defaultVmSettings(), agentCmd: "" }, // empty agentCmd
+			{ ...defaultVmSettings(), secretsDir: 42 }, // secretsDir as number
+		];
+		for (const vm of badVms) {
+			const s = normalizeSettings({ ...preVmDoc, vm });
+			expect(s, `doc survives vm=${JSON.stringify(vm)}`).not.toBeNull();
+			expect(s?.vm, `vm defaults for vm=${JSON.stringify(vm)}`).toEqual(defaultVmSettings());
+			// The rest of the doc is preserved — a mangled vm never wipes the channels.
+			expect(s?.channels).toEqual(preVmDoc.channels);
+			expect(s?.defaultChannel).toBe("abc");
+			expect(s?.mcp).toEqual({ allowedClients: ["claude-code"] });
+		}
+	});
+
+	it("never throws on vm garbage", () => {
+		for (const vm of [
+			undefined,
+			null,
+			"off",
+			42,
+			[],
+			{},
+			{ mode: "off" },
+			{ ...defaultVmSettings(), secretsDir: {} },
+		]) {
+			expect(() => normalizeSettings({ ...preVmDoc, vm })).not.toThrow();
+		}
 	});
 });
 
@@ -101,7 +255,37 @@ describe("loadSettings", () => {
 		expect(loadSettings(path)).toEqual(defaultSettings());
 	});
 
-	it("loads a fully valid document (live + static channels)", () => {
+	it("loads a pre-VM config.json with every channel intact and vm defaulted (the breakage-critical regression)", () => {
+		// A REAL pre-spec-27 doc: channels + mcp + defaultChannel set, NO vm key. A
+		// required `vm` member (or a whole-doc-strict vm check) would null this doc
+		// and `loadSettings` would reset the user's saved channels to defaults — the
+		// exact regression spec 27's migration note calls breakage-critical. vm must
+		// default-fill; everything else must survive byte-for-byte.
+		const live: ChannelEntry = { id: "abc", kind: "ngrok", mode: "live", options: { region: "us" } };
+		const deployed: ChannelEntry = {
+			id: "def",
+			kind: "nginx",
+			mode: "static",
+			label: "prod box",
+			options: { publicUrl: "https://oh.example.com" },
+		};
+		seedDoc(
+			JSON.stringify({
+				version: 1,
+				channels: [live, deployed],
+				defaultChannel: "abc",
+				mcp: { allowedClients: ["claude-code", "cursor"] },
+			}),
+		);
+		const loaded = loadSettings(path);
+		expect(loaded.channels).toEqual([live, deployed]); // every channel field, both entries
+		expect(loaded.defaultChannel).toBe("abc");
+		expect(loaded.mcp).toEqual({ allowedClients: ["claude-code", "cursor"] });
+		expect(loaded.version).toBe(1);
+		expect(loaded.vm).toEqual(defaultVmSettings());
+	});
+
+	it("loads a fully valid document (live + static channels + vm)", () => {
 		const live: ChannelEntry = { id: "abc", kind: "ngrok", mode: "live", options: { region: "us" } };
 		const deployed: ChannelEntry = {
 			id: "def",
@@ -115,6 +299,15 @@ describe("loadSettings", () => {
 			channels: [live, deployed],
 			defaultChannel: "abc",
 			mcp: { allowedClients: ["claude-code"] },
+			vm: {
+				mode: "vm",
+				memoryMb: 6144,
+				cpus: 2,
+				persist: "retain",
+				idleTimeoutMs: 3_600_000,
+				agentCmd: "claude -p",
+				secretsDir: "/srv/keys",
+			},
 		};
 		seedDoc(JSON.stringify(s));
 		expect(loadSettings(path)).toEqual(s);
@@ -139,12 +332,21 @@ describe("saveSettings", () => {
 		return readdirSync(dirname(path)).filter((f) => f.endsWith(".tmp"));
 	}
 
-	it("round-trips a document through loadSettings", () => {
+	it("round-trips a document (with a vm section set) through loadSettings", () => {
 		const s: Settings = {
 			version: 1,
 			channels: [{ id: "abc", kind: "cloudflare", mode: "live", options: {} }],
 			defaultChannel: "abc",
 			mcp: { allowedClients: [] },
+			vm: {
+				mode: "agent",
+				memoryMb: 6144,
+				cpus: 2,
+				persist: "discard",
+				idleTimeoutMs: 1_800_000,
+				agentCmd: "claude --agent",
+				secretsDir: null,
+			},
 		};
 		saveSettings(path, s);
 		expect(loadSettings(path)).toEqual(s);
@@ -174,6 +376,7 @@ describe("saveSettings", () => {
 			channels: [{ id: "z", kind: "static-url", mode: "static", options: { publicUrl: "https://x.invalid" } }],
 			defaultChannel: "z",
 			mcp: { allowedClients: ["*"] },
+			vm: defaultVmSettings(),
 		};
 		saveSettings(path, next);
 

@@ -1,6 +1,7 @@
 import type { Terminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { Settings } from "../config/settings.ts";
+import { defaultVmSettings } from "../config/settings.ts";
 import { ok, type Result } from "../tools/result.ts";
 import { type DashboardDeps, runDashboard } from "./dashboard.ts";
 
@@ -50,7 +51,13 @@ class FakeTerminal implements Terminal {
 	}
 }
 
-const seed: Settings = { version: 1, channels: [], defaultChannel: null, mcp: { allowedClients: [] } };
+const seed: Settings = {
+	version: 1,
+	channels: [],
+	defaultChannel: null,
+	mcp: { allowedClients: [] },
+	vm: defaultVmSettings(),
+};
 
 /** Build deps with a fake terminal + no-op persist + the given seams. */
 function deps(opts: {

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { credentialsPath, deleteCredentials, getCredentials, setCredentials } from "./credentials.ts";
-import { loadSettings, type Settings, saveSettings } from "./settings.ts";
+import { defaultVmSettings, loadSettings, type Settings, saveSettings } from "./settings.ts";
 
 describe("credentialsPath", () => {
 	it("resolves <homeDir>/.openhammer/credentials.json", () => {
@@ -243,6 +243,7 @@ describe("isolation from config.json", () => {
 			channels: [{ id: "abc", kind: "ngrok", mode: "live", options: { region: "us" } }],
 			defaultChannel: "abc",
 			mcp: { allowedClients: [] },
+			vm: defaultVmSettings(),
 		};
 		saveSettings(cfgPath, settings);
 		const cfgBefore = readFileSync(cfgPath, "utf-8");

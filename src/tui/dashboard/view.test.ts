@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
+import { defaultVmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
 import {
 	channelDetailRows,
@@ -143,7 +144,13 @@ describe("view — monitorRows + settingsRows", () => {
 	});
 
 	it("settingsRows: allowed clients (any) + default channel", () => {
-		const s: Settings = { version: 1, channels: [], defaultChannel: "c1", mcp: { allowedClients: [] } };
+		const s: Settings = {
+			version: 1,
+			channels: [],
+			defaultChannel: "c1",
+			mcp: { allowedClients: [] },
+			vm: defaultVmSettings(),
+		};
 		const map = Object.fromEntries(settingsRows(s).map((r) => [r.label, r.value]));
 		expect(map["allowed clients"]).toBe("(any)");
 		expect(map["default channel"]).toBe("c1");
@@ -153,6 +160,7 @@ describe("view — monitorRows + settingsRows", () => {
 			channels: [],
 			defaultChannel: null,
 			mcp: { allowedClients: ["claude-code", "*"] },
+			vm: defaultVmSettings(),
 		};
 		const map2 = Object.fromEntries(settingsRows(s2).map((r) => [r.label, r.value]));
 		expect(map2["allowed clients"]).toBe("(any)"); // "*" => any

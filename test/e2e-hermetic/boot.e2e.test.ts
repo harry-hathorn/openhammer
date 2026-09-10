@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import type { Credential } from "../../src/auth/token.ts";
-import { type Settings, saveSettings, settingsPath } from "../../src/config/settings.ts";
+import { defaultVmSettings, type Settings, saveSettings, settingsPath } from "../../src/config/settings.ts";
 import { isToolAvailable } from "../../src/tools/bin.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -293,6 +293,7 @@ describe("Tier-2 boot: real entrypoint via tsx", () => {
 			channels: [{ id: "deployed", kind: "static-url", mode: "static", options: { publicUrl } }],
 			defaultChannel: "deployed",
 			mcp: { allowedClients: [] },
+			vm: defaultVmSettings(),
 		};
 		saveSettings(settingsPath(home), settings);
 		const { child, baseUrl, stdout } = await boot({ home, rootDir });
