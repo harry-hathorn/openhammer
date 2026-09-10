@@ -478,8 +478,11 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 			throw new Error("vm provision: ready without a host port — impossible state");
 		}
 
-		// ---- (a) packages: --needed is the idempotency (pacman skips what is installed) ----
-		const packagesCommand = `pacman -S --needed --noconfirm ${PROVISION_PACKAGES.join(" ")}`;
+		// ---- (a) packages: `-y` refreshes the sync databases (the fresh install from the
+		// offline-mirror ISO has NONE — 26g's manual gate: bare -S fails "database file for
+		// 'core' does not exist"; the spike's 22c grim install hit the same and retried with
+		// -Sy), and `--needed` skips what is already installed — both idempotent. ----
+		const packagesCommand = `pacman -Sy --needed --noconfirm ${PROVISION_PACKAGES.join(" ")}`;
 		must(await sudo(packagesCommand), packagesCommand);
 
 		// ---- (b) SDDM autologin (finding 3 — REQUIRED): conf via stdin + `sudo install`,

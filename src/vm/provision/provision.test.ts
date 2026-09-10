@@ -62,7 +62,7 @@ function statefulGuest(options: GuestOptions = {}) {
 			poweroffHolder.current = { code: 0, signal: null }; // the guest powers off when told
 			return ok();
 		}
-		if (command === "sudo -S -p '' pacman -S --needed --noconfirm ripgrep fd tmux") {
+		if (command === "sudo -S -p '' pacman -Sy --needed --noconfirm ripgrep fd tmux") {
 			if (!options.skipRipgrep) installed.add("ripgrep");
 			installed.add("fd");
 			installed.add("tmux");
@@ -228,7 +228,7 @@ function happyCalls(password: string): Array<readonly [string, string | undefine
 	return [
 		["true", undefined],
 		["true", undefined],
-		["sudo -S -p '' pacman -S --needed --noconfirm ripgrep fd tmux", sudoStdin],
+		["sudo -S -p '' pacman -Sy --needed --noconfirm ripgrep fd tmux", sudoStdin],
 		["cat > /tmp/openhammer-sddm-autologin.conf", "[Autologin]\nUser=sandbox\nSession=hyprland\n"],
 		[
 			"sudo -S -p '' install -D -m 644 /tmp/openhammer-sddm-autologin.conf /etc/sddm.conf.d/99-openhammer-autologin.conf",
@@ -306,7 +306,7 @@ describe("runProvision — happy path", () => {
 			expect(runLog).toContain(`# ${SESSION} (direct boot of ${h.sessionDir})`);
 			expect(runLog).toContain("result: PASS");
 			expect(runLog).toContain(
-				`step| sudo -S -p '' pacman -S --needed --noconfirm ripgrep fd tmux ` +
+				`step| sudo -S -p '' pacman -Sy --needed --noconfirm ripgrep fd tmux ` +
 					`[${`${PASSWORD}\n`.length} B stdin] → rc 0`,
 			);
 			expect(runLog).toContain("shutdown: guest-poweroff");
@@ -371,8 +371,9 @@ describe("runProvision — idempotency (the rerun story)", () => {
 				const content = h.guest.files.get(rc) ?? "";
 				expect(content.split(ENV_LINE).length - 1).toBe(1);
 			}
-			// Packages still run (--needed is the idempotency, not skipping the step).
-			expect(secondCommands).toContain("sudo -S -p '' pacman -S --needed --noconfirm ripgrep fd tmux");
+			// Packages still run, same -Sy form (-y + --needed are the idempotency, not
+			// skipping the step).
+			expect(secondCommands).toContain("sudo -S -p '' pacman -Sy --needed --noconfirm ripgrep fd tmux");
 			// The hook rewrite is identical bytes, re-chmodded.
 			expect(h.guest.files.get(BOOT_HOOK_PATH)).toBe("#!/bin/bash\necho one\necho two\n");
 			expect(secondCommands).toContain(`cat > ${BOOT_HOOK_PATH}`);
