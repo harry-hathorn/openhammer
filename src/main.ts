@@ -23,6 +23,19 @@
  * source of truth for binding + lifecycle. The module-level auto-run below fires
  * only when this file is the direct entrypoint (`npm start` / `node dist/main.js`),
  * so importing `main` from the CLI (or a test) does **not** boot a server.
+ *
+ * VM boot modes (spec 27, wired in 27f): a VM mode (`--vm`/`--vm-agent`/
+ * `MCP_VM_MODE`/settings) runs the fail-fatal preflight SYNCHRONOUSLY after
+ * config resolution — before the credential mint — and a miss throws
+ * preflight's ONE actionable line into the same boot-failure path below
+ * (the deliberate deviation from the channel null-safe pattern, argued in the
+ * spec). The boot-scoped backend is then the delegating VM backend (every tool
+ * call gates on the sandbox's readiness; not-ready calls get the actionable
+ * booting err), and the QEMU boot is kicked off EAGER-ASYNC the moment
+ * `listen()` succeeds — never blocking it, so `/health` serves immediately
+ * (server health ≠ VM health). The shutdown slot stops the guest AFTER Fastify
+ * has stopped serving (`backend.close()` IS the VM stop). Mode `off` (the
+ * default) is byte-for-byte today's local path.
  */
 import { resolveJwtSecret } from "./auth/oauth/clients.ts";
 import { oauthIssuerAudience } from "./auth/oauth/token.ts";
@@ -37,14 +50,40 @@ import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
 import { createLocalBackend } from "./tools/backend.ts";
 import { resolveChannelHandle } from "./tunnel/boot.ts";
+import { type PrepareVmBootDeps, prepareVmBoot } from "./vm/boot-backend.ts";
 
-export async function main(): Promise<void> {
-	// `--channel <id>` / `--tunnel` come from argv (re-parsed here because `npm
-	// start` / `node dist/main.js` bypass the CLI dispatcher). `resolveConfig`
-	// folds `--channel` over `settings.defaultChannel` (§3.4: flag > file).
+/**
+ * Injection seams for main's VM boot wiring (spec 27f) — the repo's box contract:
+ * the defaults are the real implementations, so the Tier-2 boot E2E drives
+ * vm-mode boots through a scripted gate (test/e2e-hermetic/vm-boot-driver.ts)
+ * without KVM/QEMU ever being required. Nothing else in the boot is injectable:
+ * the token, channel, and server stay production-real in every tier.
+ */
+export interface MainDeps {
+	/** The VM boot seams threaded into `prepareVmBoot` (preflight verdict + service factory). */
+	readonly vm?: PrepareVmBootDeps;
+}
+
+export async function main(deps: MainDeps = {}): Promise<void> {
+	// `--channel <id>` / `--tunnel` / `--vm` / `--vm-agent` come from argv
+	// (re-parsed here because `npm start` / `node dist/main.js` bypass the CLI
+	// dispatcher). `resolveConfig` folds `--channel` over
+	// `settings.defaultChannel` (§3.4: flag > file) and `vmMode` over
+	// `MCP_VM_MODE`/`settings.vm.mode` (27b's same precedence, later flag wins).
 	const argv = parseArgs(process.argv.slice(2));
 	const settings = loadSettings();
-	const config = resolveConfig({ channel: argv.channel }, process.env, settings);
+	const config = resolveConfig({ channel: argv.channel, vmMode: argv.vmMode }, process.env, settings);
+
+	// VM boot posture (spec 27, wired 27f): mode `off` (the default) assembles
+	// NOTHING — `prepareVmBoot` returns null before any VM dep resolves, and the
+	// boot below is byte-for-byte today's local path (the off-mode boot E2E is
+	// the pin). A VM mode runs the fail-fatal preflight SYNCHRONOUSLY here —
+	// before anything else VM-ish and before `ensureToken` mints a credential: a
+	// miss throws preflight's ONE actionable line, and this module's boot-failure
+	// path prints it (`OpenHammer failed to start: <msg>` + exit 1). The service
+	// is constructed but NOT started here — see the eager spawn below `listen()`.
+	const vmBoot = prepareVmBoot(config, deps.vm);
+
 	const { token } = await ensureToken(config);
 
 	// Live activity capture (17s): one recorder feeds the transport's `onRequest`
@@ -87,9 +126,24 @@ export async function main(): Promise<void> {
 	const oauth = jwtSecret !== undefined ? { jwtSecret, issuer, audience } : undefined;
 	// The boot-scoped tool backend (spec 23): one per server process, threaded
 	// through buildFastify → the /mcp routes → every per-request MCP server.
-	const backend = createLocalBackend();
+	// Mode `off` keeps today's LocalBackend exactly; a VM mode gets the
+	// delegating backend whose every method gates on the service's readiness
+	// (27f — not-ready tool calls get the actionable booting err).
+	const backend = vmBoot === null ? createLocalBackend() : vmBoot.backend;
 	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth, baseUrl, backend);
 	await fastify.listen({ port: config.port, host: config.host });
+
+	// The eager-async QEMU spawn (spec 27's boot posture): kicked off the moment
+	// the LAST fallible boot step has passed, never blocking `listen()` —
+	// `/health` serves from here on regardless of VM state (server health ≠ VM
+	// health). Starting any earlier would orphan the guest on a later boot
+	// failure (`ensureToken`/`EADDRINUSE` exit through the boot-failure path,
+	// which never runs the shutdown slot). `start()` resolves when the boot
+	// SETTLES (ready or failed) and never rejects — failures surface through
+	// `ensureReady`, never here.
+	if (vmBoot !== null) {
+		void vmBoot.service.start();
+	}
 
 	if (notice !== null) {
 		fastify.log.warn(notice);
@@ -144,8 +198,12 @@ export async function main(): Promise<void> {
 			await stop().catch(() => {});
 		}
 		// The boot-scoped tool backend's teardown (spec 23) — LocalBackend's
-		// `close` is a documented no-op today; a VM backend shuts its guest down
-		// here (spec 25). The discipline starts now.
+		// `close` is a documented no-op; the VM delegating backend's `close` IS
+		// the session stop (mux close → ACPI powerdown → stop ladder → persist
+		// teardown, spec 27e). ORDER, deliberately: `fastify.close()` above has
+		// already stopped the server from ACCEPTING tool calls and drained what
+		// was in flight, so the guest powers down with no call mid-flight
+		// against it — stop serving first, THEN stop the sandbox.
 		await backend.close().catch(() => {});
 		process.exit(0);
 	};

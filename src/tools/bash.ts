@@ -91,10 +91,18 @@ export const bashTool: ToolModule = {
 		}
 		const timeout = typeof args.timeout === "number" ? args.timeout : undefined;
 
-		// `exists` errs only on invalid argument types (unreachable for a resolved
-		// rootDir string) — folding that into not-exists keeps the message set unchanged.
+		// The precheck errs through only when the CHECK itself failed. Locally that
+		// is unreachable for a resolved rootDir string (`existsSync` folds fs errors
+		// into `false`), so the message set is unchanged off-mode; a VM-mode backend
+		// (27f) errs `exists` with the actionable not-ready line, and folding THAT
+		// into "does not exist" would misreport a booting sandbox as a missing
+		// directory — spec 27's "tool calls before readiness get a fast actionable
+		// err" demands the error ride through verbatim.
 		const dirExists = await ctx.backend.fs.exists(ctx.rootDir);
-		if (!dirExists.ok || !dirExists.value) {
+		if (!dirExists.ok) {
+			return err(dirExists.error);
+		}
+		if (!dirExists.value) {
 			return err(new Error(`Working directory does not exist: ${ctx.rootDir}\nCannot execute bash commands.`));
 		}
 
