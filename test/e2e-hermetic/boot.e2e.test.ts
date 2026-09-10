@@ -23,6 +23,8 @@ import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, it } from "vitest";
 
 import type { Credential } from "../../src/auth/token.ts";
@@ -32,6 +34,9 @@ import { isToolAvailable } from "../../src/tools/bin.ts";
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TSX = join(REPO_ROOT, "node_modules/.bin/tsx");
 const MAIN_TS = join(REPO_ROOT, "src/main.ts");
+// 27f's VM driver: the REAL main() with the VM boot seams injected (a scripted
+// gate + a scripted-ssh guest) — see the driver's module header.
+const VM_DRIVER_TS = join(REPO_ROOT, "test/e2e-hermetic/vm-boot-driver.ts");
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -303,6 +308,235 @@ describe("Tier-2 boot: real entrypoint via tsx", () => {
 			expect(stdout()).toContain(`Tunnel URL:         ${publicUrl}/mcp`);
 			child.kill("SIGTERM");
 			expect(await awaitExit(child)).toBe(0);
+		} finally {
+			await ensureDead(child);
+			rmSync(home, { recursive: true, force: true });
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
+});
+
+// ---- vm modes (spec 27f) — the REAL main() over an injected scripted gate ----
+
+/** One scripted VM posture the driver can boot into (vm-boot-driver.ts's OH_TEST_VM_MODE). */
+type VmDriverMode = "preflight-fail" | "never-ready" | "ready";
+
+interface VmDriverOptions {
+	home: string;
+	/** The GUEST root main resolves (a guest absolute path in vm modes — 27b). */
+	rootDir: string;
+	mode: VmDriverMode;
+	/** The not-ready message the gate answers (never-ready mode). */
+	message?: string;
+	/** The scripted runShell stdout (ready mode). */
+	output?: string;
+}
+
+/**
+ * Spawn the VM driver WITHOUT waiting for readiness — the preflight-fail posture
+ * exits before it ever listens, so its test needs the raw child + buffers. Env is
+ * curated like `boot()` (isolated HOME, free port, quiet logs, MCP_AUTH_TOKEN
+ * stripped) plus the whole `MCP_VM_*` surface removed: the driver is the single
+ * source of the vm-mode story, so a stray runner env var can never change the boot
+ * under test.
+ */
+function spawnVmDriver(opts: VmDriverOptions, port: number): BootResult {
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	delete env.MCP_AUTH_TOKEN;
+	for (const key of Object.keys(env)) {
+		if (key.startsWith("MCP_VM_")) delete env[key];
+	}
+	env.PORT = String(port);
+	env.HOST = "127.0.0.1";
+	env.MCP_ROOT_DIR = opts.rootDir;
+	env.LOG_LEVEL = "warn";
+	env.HOME = opts.home;
+	env.OH_TEST_VM_MODE = opts.mode;
+	if (opts.message !== undefined) env.OH_TEST_VM_MESSAGE = opts.message;
+	if (opts.output !== undefined) env.OH_TEST_VM_OUTPUT = opts.output;
+
+	const child = spawn(TSX, [VM_DRIVER_TS], { env, cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] });
+	let stdoutBuf = "";
+	let stderrBuf = "";
+	child.stdout?.setEncoding("utf8");
+	child.stderr?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk: string) => {
+		stdoutBuf += chunk;
+	});
+	child.stderr?.on("data", (chunk: string) => {
+		stderrBuf += chunk;
+	});
+	return {
+		child,
+		baseUrl: `http://127.0.0.1:${port}`,
+		port,
+		stdout: () => stdoutBuf,
+		stderr: () => stderrBuf,
+	};
+}
+
+/** Boot the VM driver to /health-readiness (the listening postures). */
+async function bootVm(opts: VmDriverOptions): Promise<BootResult> {
+	const port = await getFreePort();
+	const result = spawnVmDriver(opts, port);
+	await waitForReady(result.child, result.baseUrl, result.stdout, result.stderr);
+	return result;
+}
+
+/** The first content block's text out of a `callTool` result (the mcp.e2e narrowing, "" on none). */
+function firstText(result: unknown): string {
+	if (typeof result !== "object" || result === null || !("content" in result)) return "";
+	const { content } = result;
+	if (!Array.isArray(content)) return "";
+	const block = content[0];
+	if (
+		block !== null &&
+		typeof block === "object" &&
+		"type" in block &&
+		block.type === "text" &&
+		"text" in block &&
+		typeof block.text === "string"
+	) {
+		return block.text;
+	}
+	return "";
+}
+
+/** Drive one `bash` tools/call over the FULL HTTP stack (the mcp.e2e client pattern). */
+async function callBash(baseUrl: string, token: string, command: string): Promise<{ isError: boolean; text: string }> {
+	const client = new Client({ name: "vm-boot-e2e", version: "0.0.0" }, { capabilities: {} });
+	// The bearer rides every request via `requestInit` headers — no authProvider,
+	// so the SDK never tries the OAuth discovery flow.
+	const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+		requestInit: { headers: { authorization: `Bearer ${token}` } },
+	});
+	await client.connect(transport);
+	try {
+		const result: unknown = await client.callTool({ name: "bash", arguments: { command } });
+		const isError = typeof result === "object" && result !== null && "isError" in result && result.isError === true;
+		return { isError, text: firstText(result) };
+	} finally {
+		await client.close();
+	}
+}
+
+describe("Tier-2 boot: vm modes (spec 27f — real main, scripted gate, zero KVM/QEMU)", () => {
+	it("preflight miss → exit 1 with preflight's ONE line on stderr (no stack)", { timeout: 30_000 }, async () => {
+		const { home, rootDir } = tempDirs();
+		const port = await getFreePort();
+		const driver = spawnVmDriver({ home, rootDir, mode: "preflight-fail" }, port);
+		try {
+			// The driver owns main's entrypoint contract: the catch prints the
+			// one-liner + exits 1 — exactly src/main.ts's auto-run block.
+			expect(await awaitExit(driver.child)).toBe(1);
+			const lines = driver.stderr().trim().split("\n");
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toBe(
+				"OpenHammer failed to start: vm driver: preflight refused (the scripted miss — 27f's one-line exit pin)",
+			);
+		} finally {
+			await ensureDead(driver.child);
+			rmSync(home, { recursive: true, force: true });
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
+
+	it("real entrypoint, real preflight: a vm boot without the prerequisites is the one-line non-zero failure", {
+		timeout: 30_000,
+	}, async () => {
+		const { home, rootDir } = tempDirs();
+		const port = await getFreePort();
+		const env: NodeJS.ProcessEnv = { ...process.env };
+		delete env.MCP_AUTH_TOKEN;
+		for (const key of Object.keys(env)) {
+			if (key.startsWith("MCP_VM_")) delete env[key];
+		}
+		env.PORT = String(port);
+		env.HOST = "127.0.0.1";
+		env.MCP_ROOT_DIR = rootDir; // a host temp path, reinterpreted as the guest root (27b)
+		env.LOG_LEVEL = "warn";
+		env.HOME = home; // an empty HOME: no goldens can exist under it
+		env.MCP_VM_MODE = "vm";
+		const child = spawn(TSX, [MAIN_TS], { env, cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] });
+		let stderrBuf = "";
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderrBuf += chunk;
+		});
+		try {
+			expect(await awaitExit(child)).toBe(1);
+			const lines = stderrBuf.trim().split("\n");
+			// WHICH preflight row fires depends on the machine (qemu present or
+			// not — under an empty HOME the golden row is the usual first miss);
+			// every row is one of preflight's actionable one-liners.
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toMatch(/^OpenHammer failed to start: /);
+			expect(lines[0]).toMatch(/(qemu|OVMF|KVM|golden image|MCP_VM_)/);
+		} finally {
+			await ensureDead(child);
+			rmSync(home, { recursive: true, force: true });
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
+
+	it("booting sandbox: /health serves instantly; a bash call gets the actionable booting err through the full stack", {
+		timeout: 30_000,
+	}, async () => {
+		const { home, rootDir } = tempDirs();
+		const message = "sandbox booting, 3s of 180s — retry";
+		const { child, baseUrl, stdout } = await bootVm({ home, rootDir, mode: "never-ready", message });
+		try {
+			// Server health ≠ VM health (spec 27): the eager-async spawn never
+			// blocked listen(), so /health answers while no guest exists.
+			const res = await fetch(`${baseUrl}/health`);
+			expect(res.status).toBe(200);
+			expect(await res.json()).toMatchObject({ status: "ok" });
+			expect(stdout()).toContain("vm-driver: start (mode=never-ready)"); // the spawn was kicked off
+
+			const token = await waitForToken(stdout);
+			const call = await callBash(baseUrl, token, "uname -a");
+			expect(call.isError).toBe(true);
+			expect(call.text).toContain(message);
+		} finally {
+			await ensureDead(child);
+			rmSync(home, { recursive: true, force: true });
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
+
+	it("ready sandbox: a bash call executes against the guest backend through the full stack", {
+		timeout: 30_000,
+	}, async () => {
+		const { home, rootDir } = tempDirs();
+		const { child, baseUrl, stdout } = await bootVm({
+			home,
+			rootDir,
+			mode: "ready",
+			output: "hello-from-the-fake-guest",
+		});
+		try {
+			const token = await waitForToken(stdout);
+			const call = await callBash(baseUrl, token, "echo guest");
+			expect(call.isError).toBe(false);
+			expect(call.text).toBe("hello-from-the-fake-guest");
+			// The delegation reached the scripted guest with the command verbatim.
+			expect(stdout()).toContain("vm-driver: guest runShell: echo guest");
+		} finally {
+			await ensureDead(child);
+			rmSync(home, { recursive: true, force: true });
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
+
+	it("SIGINT teardown: stop serving FIRST, then stop the sandbox — exit 0", { timeout: 30_000 }, async () => {
+		const { home, rootDir } = tempDirs();
+		const { child, stdout } = await bootVm({ home, rootDir, mode: "ready" });
+		try {
+			child.kill("SIGINT");
+			expect(await awaitExit(child)).toBe(0);
+			// The VM stop observed the HTTP server already refusing connections —
+			// fastify.close() ran BEFORE the backend's close() reached the gate.
+			expect(stdout()).toContain("vm-driver: stop: health=closed");
 		} finally {
 			await ensureDead(child);
 			rmSync(home, { recursive: true, force: true });
