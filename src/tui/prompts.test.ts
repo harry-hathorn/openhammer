@@ -172,6 +172,17 @@ describe("prompts — flagIo (non-interactive seam, spec 20g)", () => {
 		await expect(io.select({ message: "Channel type", options: [] })).resolves.toBeNull();
 	});
 
+	it("`select` falls back to the seeded initialValue so an unspecified select field keeps its current value", async () => {
+		// The single-field `config set vm.mode vm` shape: the target select is
+		// answered by its flag, the section's OTHER select never is — and a null
+		// there used to cancel the whole write (the 27b bug).
+		const io = flagIo({ "Boot mode": "vm" });
+		// The target field resolves to its flag value…
+		await expect(io.select({ message: "Boot mode", options: [], initialValue: "off" })).resolves.toBe("vm");
+		// …an unspecified select keeps its seeded current value (initialValue), not null.
+		await expect(io.select({ message: "Overlay persist", options: [], initialValue: "auto" })).resolves.toBe("auto");
+	});
+
 	it("`password` returns null when the message is absent (a required secret missing its flag)", async () => {
 		const io = flagIo({});
 		await expect(io.password({ message: "ngrok authtoken" })).resolves.toBeNull();

@@ -293,7 +293,8 @@ describe("vmSection — round-trip", () => {
 describe("`config set vm` — the section wizard reaches the vm section", () => {
 	it("setSection picks vm from the registry and applies the answers (the `config set vm` engine path)", async () => {
 		// flagIo keys answers by prompt message: the section picker + the two select
-		// fields' labels (an absent select answer cancels — see prompts.ts flagIo).
+		// fields' labels (an absent select answer falls back to its seeded current
+		// value — see prompts.ts flagIo).
 		const io = flagIo({
 			[SECTION_SELECT_PROMPT]: "vm",
 			"Boot mode": "vm",
@@ -305,6 +306,22 @@ describe("`config set vm` — the section wizard reaches the vm section", () => 
 			ok: true,
 			value: {
 				vm: { mode: "vm", memoryMb: 8192, persist: "retain", cpus: 4 }, // unspecified fields unchanged
+			},
+		});
+	});
+
+	it("setSection with only ONE field answered still applies — the `config set vm.mode` engine path (27b)", async () => {
+		// The single-field shape: the picker + the target field's label. The
+		// section's OTHER select ("Overlay persist") is never answered; flagIo's
+		// initialValue fallback keeps it at the seeded current value instead of a
+		// null cancelling the whole write.
+		const io = flagIo({ [SECTION_SELECT_PROMPT]: "vm", "Boot mode": "vm" });
+		const s = withVm({ mode: "agent", memoryMb: 6144, cpus: 8, persist: "retain" });
+		const result = await setSection(s, { io, stream: silentStream });
+		expect(result).toMatchObject({
+			ok: true,
+			value: {
+				vm: { mode: "vm", memoryMb: 6144, cpus: 8, persist: "retain" }, // only mode changed
 			},
 		});
 	});
