@@ -835,6 +835,10 @@ Commands:
 Options:
   --tunnel               Start the cloudflared quick-tunnel at boot
   --channel <id>         Resolve a persisted channel at boot
+  --vm                   Boot in VM sandbox mode "vm" — tools execute in the
+                         guest (overrides MCP_VM_MODE and the settings doc)
+  --vm-agent             Boot in VM sandbox mode "agent" (spec 29); when both
+                         --vm and --vm-agent are given, the later flag wins
   -h, --help             Show this help`;
 
 const CHANNEL_USAGE = `Usage: openhammer channel { add | list | remove <id> | use <id> }`;

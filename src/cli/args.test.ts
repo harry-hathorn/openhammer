@@ -72,6 +72,38 @@ describe("parseArgs", () => {
 			expect(parseArgs(["--channel=abc-123"]).channel).toBe("abc-123");
 		});
 
+		it("parses `--vm` and `--vm-agent` (spec 27)", () => {
+			expect(parseArgs(["--vm"]).vmMode).toBe("vm");
+			expect(parseArgs(["--vm-agent"]).vmMode).toBe("agent");
+			expect(parseArgs([]).vmMode).toBeUndefined();
+		});
+
+		it("later flag wins when both --vm and --vm-agent appear", () => {
+			expect(parseArgs(["--vm", "--vm-agent"]).vmMode).toBe("agent");
+			expect(parseArgs(["--vm-agent", "--vm"]).vmMode).toBe("vm");
+		});
+
+		it("repeats of one vm flag are idempotent, no diagnostics", () => {
+			const r = parseArgs(["--vm", "--vm"]);
+			expect(r.vmMode).toBe("vm");
+			expect(r.diagnostics).toEqual([]);
+		});
+
+		it("`--vm` is a boolean flag — it does not consume the next token as a value", () => {
+			const r = parseArgs(["--vm", "start"]);
+			expect(r.vmMode).toBe("vm");
+			expect(r.command).toBe("start");
+			expect(r.diagnostics).toEqual([]);
+		});
+
+		it("vm flags are top-level: extracted even after the command word (like --tunnel)", () => {
+			const r = parseArgs(["start", "--vm-agent"]);
+			expect(r.command).toBe("start");
+			expect(r.vmMode).toBe("agent");
+			expect(r.rest).toEqual([]);
+			expect(r.diagnostics).toEqual([]);
+		});
+
 		it("parses `--help` and `-h`", () => {
 			expect(parseArgs(["--help"]).help).toBe(true);
 			expect(parseArgs(["-h"]).help).toBe(true);

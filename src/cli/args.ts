@@ -4,7 +4,7 @@
  * are collected into `diagnostics` for the dispatcher to surface, not raised.
  *
  * The parser knows OpenHammer's **top-level** flags (`--tunnel`, `--channel <id>`,
- * `--help`) and treats the first positional as the `command` word; every positional
+ * `--vm`/`--vm-agent`, `--help`) and treats the first positional as the `command` word; every positional
  * after it is `rest` (subcommand + operands). It deliberately does **not** validate
  * the command set — the dispatcher (17o) owns that mapping, so adding a command
  * needs no parser edit. `deps: none` — this module imports nothing.
@@ -33,6 +33,14 @@ export interface ParsedArgs {
 	tunnel: boolean;
 	/** `--channel <id>` — resolve a persisted channel at boot. */
 	channel: string | undefined;
+	/**
+	 * `--vm` / `--vm-agent` — the boot-scoped VM sandbox mode (`"vm"` / `"agent"`,
+	 * spec 27; `resolveConfig` folds it over `MCP_VM_MODE` and `settings.vm.mode`).
+	 * Both flags map onto this one field and a LATER occurrence wins, so
+	 * `--vm --vm-agent` boots agent and `--vm-agent --vm` boots vm. `undefined` =
+	 * neither flag (env/settings decide).
+	 */
+	vmMode?: "vm" | "agent";
 	/** `--help` / `-h` — the dispatcher prints help. */
 	help: boolean;
 	/** Unknown options / missing values. Never throws. */
@@ -49,6 +57,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 		rest: [],
 		tunnel: false,
 		channel: undefined,
+		vmMode: undefined,
 		help: false,
 		diagnostics: [],
 	};
@@ -77,6 +86,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
 		if (arg === "--tunnel") {
 			result.tunnel = true;
+			continue;
+		}
+		// Sequential assignment = later flag wins (both flags map to `vmMode`, spec 27).
+		if (arg === "--vm") {
+			result.vmMode = "vm";
+			continue;
+		}
+		if (arg === "--vm-agent") {
+			result.vmMode = "agent";
 			continue;
 		}
 		if (arg === "--help" || arg === "-h") {
