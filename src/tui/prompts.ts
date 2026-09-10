@@ -226,8 +226,13 @@ export const defaultIo: PromptIo = createDefaultIo();
  * field's `label`, both of which the wizard passes verbatim as `message`). A prompt
  * whose message is present resolves to the flag value; one that is absent falls back
  * so the wizard keeps driving instead of cancelling:
- * - `select` — the provider/section picker. Absent → `null` (cancel); the flag
- *   handler always supplies the picker, so this is defensive.
+ * - `select` — the provider/section picker OR a select field. Absent with an
+ *   `initialValue` (the seeded current value, via `seedDefaults`) → that value,
+ *   so an unspecified select field is **left unchanged** exactly like a text
+ *   field — the single-field `config set vm.mode vm` path depends on it (the
+ *   section's OTHER selects are never answered, and a `null` there would cancel
+ *   the whole write). Absent without one (the pickers pass none) → `null`
+ *   (cancel); the flag handler always supplies the picker, so that is defensive.
  * - `text` — a field. Absent → the seeded `defaultValue` (the current value, via
  *   `seedDefaults`) or `""`, so an unspecified field is **left unchanged** rather
  *   than aborting the wizard (a required field is pre-checked by the handler).
@@ -247,7 +252,7 @@ export function flagIo(answers: Record<string, string>): PromptIo {
 		Object.hasOwn(answers, message) ? answers[message] : undefined;
 	return {
 		async select(o) {
-			return lookup(o.message) ?? null;
+			return lookup(o.message) ?? o.initialValue ?? null;
 		},
 		async text(o) {
 			const v = lookup(o.message);

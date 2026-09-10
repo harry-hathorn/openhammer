@@ -5,7 +5,13 @@ import { describe, expect, it } from "vitest";
 import type { ParsedArgs } from "./cli/args.ts";
 import { type CommandIo, dispatch, runCli } from "./cli.ts";
 import { getCredentials } from "./config/credentials.ts";
-import { type ChannelEntry, defaultSettings, loadSettings, type Settings } from "./config/settings.ts";
+import {
+	type ChannelEntry,
+	defaultSettings,
+	defaultVmSettings,
+	loadSettings,
+	type Settings,
+} from "./config/settings.ts";
 import { BANNER } from "./tui/banner.ts";
 import { defaultGuestConfig, saveGuestConfig } from "./vm/provision/guest-config.ts";
 import { resolveVmDirs } from "./vm/session.ts";
@@ -514,6 +520,72 @@ describe("dispatch — non-interactive flag mode (spec 20g)", () => {
 			expect(after.channels.map((c) => c.id)).toEqual([channelA.id]);
 			expect(after.defaultChannel).toBe(channelA.id);
 			expect(after.mcp.allowedClients).toEqual(["claude-code"]);
+		});
+	});
+
+	it("`config set vm.mode vm` sets ONLY mode — the persist select (never answerable by this command) keeps its value", async () => {
+		// The 27b invariant: a section with a second select used to cancel the whole
+		// write (flagIo returned null for the unanswered persist prompt → "Settings
+		// not updated.", exit 1). Every non-target field — select AND text — must
+		// keep its seeded current value.
+		await withTempHome(async (home) => {
+			seedSettings(home, {
+				...defaultSettings(),
+				channels: [channelA, channelB],
+				defaultChannel: channelB.id,
+				vm: {
+					mode: "agent",
+					memoryMb: 6144,
+					cpus: 8,
+					persist: "retain",
+					idleTimeoutMs: 60000,
+					agentCmd: "agy",
+					secretsDir: "/vm/secrets",
+				},
+			});
+			const out = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "vm.mode", "vm"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("Set vm.mode");
+			expect(loadSettings().vm).toEqual({
+				mode: "vm", // the only change
+				memoryMb: 6144,
+				cpus: 8,
+				persist: "retain", // the unanswered select — unchanged, not cancelled
+				idleTimeoutMs: 60000,
+				agentCmd: "agy",
+				secretsDir: "/vm/secrets",
+			});
+			const after = loadSettings();
+			expect(after.channels.map((c) => c.id)).toEqual([channelA.id, channelB.id]); // channels intact
+			expect(after.defaultChannel).toBe(channelB.id);
+		});
+	});
+
+	it("`config set vm.persist retain` sets only persist (the other select — same invariant)", async () => {
+		await withTempHome(async (home) => {
+			seedSettings(home, {
+				...defaultSettings(),
+				vm: { ...defaultVmSettings(), mode: "agent", persist: "discard" },
+			});
+			const out = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "vm.persist", "retain"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("Set vm.persist");
+			// persist is the only change: mode (now the unanswered select) keeps "agent".
+			expect(loadSettings().vm).toEqual({ ...defaultVmSettings(), mode: "agent", persist: "retain" });
+		});
+	});
+
+	it("`config set vm.agentCmd codex` sets a vm text field non-interactively (the 27b-flagged path)", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("config", ["set", "vm.agentCmd", "codex"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("Set vm.agentCmd");
+			const after = loadSettings();
+			expect(after.vm.agentCmd).toBe("codex");
+			expect(after.vm.mode).toBe("off"); // untouched on a default doc
 		});
 	});
 
