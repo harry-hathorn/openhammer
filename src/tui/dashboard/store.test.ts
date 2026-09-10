@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
+import { defaultVmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
 import { DashboardStore, emptyStatus, type ServerStatusState } from "./store.ts";
 
@@ -19,7 +20,13 @@ function event(client: string): RequestEvent {
 }
 
 function settingsWith(channels: ChannelEntry[]): Settings {
-	return { version: 1, channels, defaultChannel: channels[0]?.id ?? null, mcp: { allowedClients: [] } };
+	return {
+		version: 1,
+		channels,
+		defaultChannel: channels[0]?.id ?? null,
+		mcp: { allowedClients: [] },
+		vm: defaultVmSettings(),
+	};
 }
 
 describe("DashboardStore — construction & views", () => {

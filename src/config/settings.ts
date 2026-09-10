@@ -1,12 +1,13 @@
 /**
  * The persisted settings document (spec 17d).
  *
- * `~/.openhammer/config.json` holds the two wizard-editable config families:
+ * `~/.openhammer/config.json` holds the wizard-editable config families:
  * **channels** (how OpenHammer is reached — live tunnels plus static/deployed
- * URLs) and the **mcp** settings section (an allowed-client list). Both families
- * share the `ConfigField` wizard engine (`src/tui/`); this doc is simply where
- * their answers live. The doc, the schema, and the wizard are domain-agnostic —
- * this is the "configure other things later" seam.
+ * URLs), the **mcp** settings section (an allowed-client list), and the **vm**
+ * section (spec 27 — the sandbox's operator-set knobs). All families share the
+ * `ConfigField` wizard engine (`src/tui/`); this doc is simply where their answers
+ * live. The doc, the schema, and the wizard are domain-agnostic — this is the
+ * "configure other things later" seam.
  *
  * **Secrets never live here** — only non-secret `options` (a channel's declared
  * URL, labels, …). A channel's `id` doubles as the credentials-store key; the
@@ -75,17 +76,65 @@ export interface McpSettings {
 	allowedClients: string[];
 }
 
+/**
+ * The `vm` settings section (spec 27) — the VM sandbox's operator-set knobs. `mode`
+ * picks the backend posture (`off` = local, today's behavior; `vm` = guest-bound
+ * tools; `agent` = spec 29); `memoryMb`/`cpus` size the guest (the 22-measured
+ * defaults); `persist` picks the overlay teardown policy (`auto`: vm→retain,
+ * agent→discard); `idleTimeoutMs` is the opt-in reaper (`0` = never); `agentCmd` is
+ * the in-guest agent command; `secretsDir` overrides where provisioned secrets land
+ * (`null` = the default `~/.openhammer/vm/secrets`). A *path*, never a secret value.
+ */
+export interface VmSettings {
+	mode: "off" | "vm" | "agent";
+	memoryMb: number;
+	cpus: number;
+	persist: "auto" | "retain" | "discard";
+	idleTimeoutMs: number;
+	agentCmd: string;
+	secretsDir: string | null;
+}
+
 /** The whole settings document. `version` is the on-disk schema version. */
 export interface Settings {
 	version: number;
 	channels: ChannelEntry[];
 	defaultChannel: string | null;
 	mcp: McpSettings;
+	/**
+	 * Always present on the *normalized* doc — normalization (and
+	 * {@link defaultSettings}) default-fill it; see {@link normalizeSettings} for
+	 * why the on-disk key stays optional.
+	 */
+	vm: VmSettings;
+}
+
+/**
+ * Fresh VM-section defaults (spec 27 + 22-measured): mode `off` (zero VM code runs),
+ * 4096 MiB / 4 cpus, `auto` persist, no idle reaper, `claude` as the agent command,
+ * secrets at the default `~/.openhammer/vm/secrets` (`null` = that default).
+ */
+export function defaultVmSettings(): VmSettings {
+	return {
+		mode: "off",
+		memoryMb: 4096,
+		cpus: 4,
+		persist: "auto",
+		idleTimeoutMs: 0,
+		agentCmd: "claude",
+		secretsDir: null,
+	};
 }
 
 /** Fresh defaults — returned by {@link loadSettings} when the doc is absent or corrupt. */
 export function defaultSettings(): Settings {
-	return { version: CURRENT_VERSION, channels: [], defaultChannel: null, mcp: { allowedClients: [] } };
+	return {
+		version: CURRENT_VERSION,
+		channels: [],
+		defaultChannel: null,
+		mcp: { allowedClients: [] },
+		vm: defaultVmSettings(),
+	};
 }
 
 /** Resolve `~/.openhammer/config.json` under a home directory (defaults to `os.homedir()`). */
@@ -117,6 +166,45 @@ function isStringRecord(v: unknown): v is Record<string, string> {
 
 function isStringArray(v: unknown): v is string[] {
 	return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+const VM_MODE_VALUES = new Set<string>(["off", "vm", "agent"]);
+const VM_PERSIST_VALUES = new Set<string>(["auto", "retain", "discard"]);
+
+/**
+ * Strict member-wise validation of a {@link VmSettings} (the `isChannelEntry`
+ * idiom, applied to the vm section; exported for 27b/27d). Numeric fields check
+ * *shape* only (integer, positive) — range policy (e.g. a sane memory floor) is
+ * preflight's (27c), not the doc loader's.
+ */
+export function isVmSettings(value: unknown): value is VmSettings {
+	if (typeof value !== "object" || value === null) return false;
+	const o = value;
+	return (
+		"mode" in o &&
+		typeof o.mode === "string" &&
+		VM_MODE_VALUES.has(o.mode) &&
+		"memoryMb" in o &&
+		typeof o.memoryMb === "number" &&
+		Number.isInteger(o.memoryMb) &&
+		o.memoryMb > 0 &&
+		"cpus" in o &&
+		typeof o.cpus === "number" &&
+		Number.isInteger(o.cpus) &&
+		o.cpus > 0 &&
+		"persist" in o &&
+		typeof o.persist === "string" &&
+		VM_PERSIST_VALUES.has(o.persist) &&
+		"idleTimeoutMs" in o &&
+		typeof o.idleTimeoutMs === "number" &&
+		Number.isInteger(o.idleTimeoutMs) &&
+		o.idleTimeoutMs >= 0 &&
+		"agentCmd" in o &&
+		typeof o.agentCmd === "string" &&
+		o.agentCmd.length > 0 &&
+		"secretsDir" in o &&
+		(o.secretsDir === null || typeof o.secretsDir === "string")
+	);
 }
 
 function isChannelEntry(v: unknown): v is ChannelEntry {
@@ -156,6 +244,14 @@ export function normalizeSettings(v: unknown): Settings | null {
 		channels: o.channels,
 		defaultChannel: o.defaultChannel,
 		mcp: { allowedClients: mcp.allowedClients },
+		// Spec 27, "Settings-doc migration (breakage-critical)": normalizeSettings is
+		// whole-doc strict — a *required* `vm` key would fail every existing
+		// config.json and reset users' saved channels to defaults. So `vm` is
+		// optional-with-default-fill on the way in: absent → defaults, WRONG SHAPE →
+		// also defaults — a hand-mangled vm section must never take the rest of the
+		// doc down with it. No CURRENT_VERSION bump, no migration entry; purely
+		// additive-with-fill.
+		vm: "vm" in o && isVmSettings(o.vm) ? o.vm : defaultVmSettings(),
 	};
 }
 

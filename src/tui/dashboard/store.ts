@@ -29,6 +29,7 @@
  */
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
+import { defaultSettings } from "../../config/settings.ts";
 import type { ClientStat, RequestEvent } from "../../mcp/telemetry.ts";
 import { MonitorState } from "../monitor-view.ts";
 
@@ -176,5 +177,5 @@ export class DashboardStore {
 
 /** Empty seed settings (no channels) for a freshly constructed store. */
 function emptySettings(): Settings {
-	return { version: 1, channels: [], defaultChannel: null, mcp: { allowedClients: [] } };
+	return defaultSettings();
 }

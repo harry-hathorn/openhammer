@@ -1,6 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { ChannelEntry } from "../../config/settings.ts";
+import { defaultVmSettings } from "../../config/settings.ts";
 import { createStyle } from "../style.ts";
 import {
 	channelDetailSpec,
@@ -26,7 +27,10 @@ const ch = (over: Partial<ChannelEntry> = {}): ChannelEntry => ({
 });
 
 function storeWith(channels: ChannelEntry[] = [], defaults: Record<string, unknown> = {}): DashboardStore {
-	const s = new DashboardStore({}, { version: 1, channels, defaultChannel: null, mcp: { allowedClients: [] } });
+	const s = new DashboardStore(
+		{},
+		{ version: 1, channels, defaultChannel: null, mcp: { allowedClients: [] }, vm: defaultVmSettings() },
+	);
 	if (defaults.status) s.setStatus(defaults.status as never);
 	return s;
 }
@@ -76,7 +80,13 @@ describe("screens — channelItems / channelDetailSpec", () => {
 		const nonDefault = channelDetailSpec(s, "a", style);
 		expect(nonDefault.items.map((i) => i.label)).toEqual(["Use as default", "Remove", "Back"]);
 
-		s.setSettings({ version: 1, channels: [ch({ id: "a" })], defaultChannel: "a", mcp: { allowedClients: [] } });
+		s.setSettings({
+			version: 1,
+			channels: [ch({ id: "a" })],
+			defaultChannel: "a",
+			mcp: { allowedClients: [] },
+			vm: defaultVmSettings(),
+		});
 		const isDefault = channelDetailSpec(s, "a", style);
 		expect(isDefault.items.map((i) => i.label)).toEqual(["Remove", "Back"]);
 		// header carries the channel detail (the kind row is present)

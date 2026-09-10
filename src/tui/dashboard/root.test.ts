@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
+import { defaultVmSettings } from "../../config/settings.ts";
 import { ok, type Result } from "../../tools/result.ts";
 import { createStyle } from "../style.ts";
 import { type DashboardActions, DashboardRoot } from "./root.ts";
@@ -60,14 +61,20 @@ function fakeActions(log: string[]): DashboardActions {
 }
 
 function seed(): Settings {
-	return { version: 1, channels: [], defaultChannel: null, mcp: { allowedClients: [] } };
+	return { version: 1, channels: [], defaultChannel: null, mcp: { allowedClients: [] }, vm: defaultVmSettings() };
 }
 
 /** A root seeded with one channel + one OAuth client, identity style. */
 function rooted(log: string[]): DashboardRoot {
 	const store = new DashboardStore(
 		{},
-		{ version: 1, channels: [ch({ id: "ch1", label: "tun" })], defaultChannel: null, mcp: { allowedClients: [] } },
+		{
+			version: 1,
+			channels: [ch({ id: "ch1", label: "tun" })],
+			defaultChannel: null,
+			mcp: { allowedClients: [] },
+			vm: defaultVmSettings(),
+		},
 	);
 	store.setOauthClients([{ clientId: "oh_1", label: "ci", createdAt: "now", grantTypes: ["client_credentials"] }]);
 	return new DashboardRoot({ store, style: createStyle(false), actions: fakeActions(log) });
