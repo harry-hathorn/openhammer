@@ -7,6 +7,8 @@ import { type CommandIo, dispatch, runCli } from "./cli.ts";
 import { getCredentials } from "./config/credentials.ts";
 import { type ChannelEntry, defaultSettings, loadSettings, type Settings } from "./config/settings.ts";
 import { BANNER } from "./tui/banner.ts";
+import { defaultGuestConfig, saveGuestConfig } from "./vm/provision/guest-config.ts";
+import { resolveVmDirs } from "./vm/session.ts";
 
 /** A recording `BannerStream` fake: collects writes as a string. */
 function recordingStream() {
@@ -603,7 +605,7 @@ describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 			const err = recordingStream();
 			const code = await dispatch(parsed("vm"), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("Usage: openhammer vm { install | provision | snapshot }");
+			expect(err.text()).toContain("Usage: openhammer vm { install | provision | snapshot | list | reset | gc }");
 		});
 	});
 
@@ -612,7 +614,9 @@ describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 			const err = recordingStream();
 			const code = await dispatch(parsed("vm", ["teleport"]), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("vm: unknown subcommand 'teleport' (available: install, provision, snapshot)");
+			expect(err.text()).toContain(
+				"vm: unknown subcommand 'teleport' (available: install, provision, snapshot, list, reset, gc)",
+			);
 		});
 	});
 
@@ -643,6 +647,133 @@ describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 		expect(text).toContain("provision");
 		expect(text).toContain("snapshot");
 		expect(text).toContain("Promote the provisioned build to the golden image");
+		expect(text).toContain("list");
+		expect(text).toContain("reset [--yes]");
+		expect(text).toContain("gc [--yes] [--keep-goldens <n>]");
+	});
+});
+
+describe("dispatch — `vm` subcommands (spec 26f: list/reset/gc)", () => {
+	/** A manifest that passes readManifest — mirrors snapshot.test.ts's canonical shape. */
+	function seedGolden(home: string, id: string, manifest: string): string {
+		const dir = join(home, ".openhammer", "vm", "images", id);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "manifest.json"), manifest);
+		writeFileSync(join(dir, "golden.qcow2"), "fake-golden-disk");
+		return dir;
+	}
+
+	const VALID_MANIFEST = JSON.stringify({
+		id: "golden-4.0.3-20260910-070809",
+		flavor: "base",
+		guestUser: "sandbox",
+		rootDir: "/home/sandbox",
+		isoVersion: "4.0.3",
+		isoUrl: "https://iso.omarchy.org/omarchy-4.0.3.iso",
+		isoSha256: "03d60bc74306dca51f96e1a84b690871d8d606826b260edd0208962da8507d14",
+		diskVirtualSizeBytes: 42_949_672_960,
+		provisionScriptHashes: null,
+		builtAt: "2026-09-10T07:08:09.000Z",
+		encrypt: false,
+	});
+
+	it("routes `vm list`/`vm reset`/`vm gc` to the vm handler with sub + trailing rest", async () => {
+		const vm = fakeHandler();
+		await dispatch(parsed("vm", ["list"]), { vm: vm.handler });
+		await dispatch(parsed("vm", ["reset", "--yes"]), { vm: vm.handler });
+		await dispatch(parsed("vm", ["gc", "--keep-goldens", "3"]), { vm: vm.handler });
+		expect(vm.calls).toEqual([
+			{ sub: "list", rest: [] },
+			{ sub: "reset", rest: ["--yes"] },
+			{ sub: "gc", rest: ["--keep-goldens", "3"] },
+		]);
+	});
+
+	it("`vm list`: one golden + one corrupt → the row and the corrupt row on stdout, the WARNING on stderr, exit 0", async () => {
+		await withTempHome(async (home) => {
+			seedGolden(home, "golden-4.0.3-20260910-070809", VALID_MANIFEST);
+			seedGolden(home, "golden-4.0.3-20260901-010101", "{not json");
+			const out = recordingStream();
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["list"]), { stdout: out.stream, stderr: err.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("golden-4.0.3-20260910-070809");
+			expect(out.text()).toContain("flavor base  user sandbox  built 2026-09-10T07:08:09.000Z  iso 4.0.3");
+			expect(out.text()).toContain("corrupt: golden-4.0.3-20260901-010101 — manifest.json missing or invalid");
+			expect(err.text()).toContain("vm list: WARNING: golden golden-4.0.3-20260901-010101");
+		});
+	});
+
+	it("`vm list`: the guest.json-drift note is printed per-row (the spec's next-build edge case)", async () => {
+		await withTempHome(async (home) => {
+			saveGuestConfig(resolveVmDirs({ homeDir: home }), { ...defaultGuestConfig(), username: "builder" });
+			seedGolden(home, "golden-4.0.3-20260910-070809", VALID_MANIFEST);
+			const out = recordingStream();
+			const code = await dispatch(parsed("vm", ["list"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain(
+				"note: guest.json changed since this golden was baked (guestUser: sandbox→builder)",
+			);
+			expect(out.text()).toContain("edits apply on the next vm install");
+		});
+	});
+
+	it("`vm list` with no goldens: the clean empty line, exit 0", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["list"]), { stdout: out.stream, stderr: err.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("No goldens");
+			expect(err.text()).toBe("");
+		});
+	});
+
+	it("`vm reset` on an empty tree: the dry-run report, exit 0, nothing removed", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("vm", ["reset"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("reset: DRY RUN — 0 session dir(s), 0 B");
+			expect(out.text()).toContain("vm reset: done — 0 session dir(s), 0 B (dry run");
+		});
+	});
+
+	it("`vm reset --nope` is a usage error before anything runs (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["reset", "--nope"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Usage: openhammer vm reset [--yes]\n");
+		});
+	});
+
+	it("`vm gc` on an empty tree: the dry-run aggregate report, exit 0", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const code = await dispatch(parsed("vm", ["gc"]), { stdout: out.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toContain("gc: DRY RUN");
+			expect(out.text()).toContain("sessions 0 (0 B), cidata 0 (0 B), goldens 0 (0 B)");
+		});
+	});
+
+	it("`vm gc --keep-goldens <not-an-integer>` is a usage error (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["gc", "--keep-goldens", "zero"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain('vm gc: --keep-goldens must be an integer >= 1 (got "zero")');
+		});
+	});
+
+	it("`vm gc --keep-goldens 0` is a usage error too (the newest golden is always kept)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["gc", "--keep-goldens", "0"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain('--keep-goldens must be an integer >= 1 (got "0")');
+		});
 	});
 });
 
