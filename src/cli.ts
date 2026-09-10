@@ -11,8 +11,8 @@
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
  * - `auth { add-client | list | remove <id> }` — manage OAuth clients (spec 20e).
- * - `vm { install | provision }` — manage the local VM sandbox (spec 26; later boxes add
- *   snapshot/list/reset/gc/status).
+ * - `vm { install | provision | snapshot }` — manage the local VM sandbox (spec 26; later
+ *   boxes add list/reset/gc/status).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  * - `monitor` — stream live client + tool-call activity over the status socket (17t).
  *
@@ -35,6 +35,7 @@ import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
 import { listChannels, removeChannel, setDefaultChannel } from "./tunnel/manage.ts";
 import { DEFAULT_BUDGET_MINUTES, runInstall } from "./vm/provision/install.ts";
 import { runProvision } from "./vm/provision/provision.ts";
+import { runSnapshot } from "./vm/provision/snapshot.ts";
 
 /** Injection seam for {@link runCli}'s side effects, so the banner/diagnostic behavior is unit-testable without a TTY. */
 export interface CliDeps {
@@ -532,10 +533,10 @@ async function setConfigFieldCmd(target: string, value: string | undefined, io: 
 // ---- `vm` subcommands -------------------------------------------------------
 
 /**
- * `vm` (spec 26): the VM-sandbox command tree. `install` + `provision` exist —
- * `snapshot`/`list`/`reset`/`gc`/`status` are the later spec-26/27 boxes and are
- * deliberately absent from the usage string (advertising an unimplemented subcommand
- * would just route the operator into an error).
+ * `vm` (spec 26): the VM-sandbox command tree. `install` + `provision` + `snapshot` exist —
+ * `list`/`reset`/`gc`/`status` are the later spec-26/27 boxes and are deliberately absent
+ * from the usage string (advertising an unimplemented subcommand would just route the
+ * operator into an error).
  */
 async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo): Promise<number> {
 	switch (sub) {
@@ -543,11 +544,13 @@ async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo)
 			return await vmInstallCmd(rest, io);
 		case "provision":
 			return await vmProvisionCmd(rest, io);
+		case "snapshot":
+			return await vmSnapshotCmd(rest, io);
 		case undefined:
 			io.stderr.write(`${VM_USAGE}\n`);
 			return 2;
 		default:
-			io.stderr.write(`vm: unknown subcommand '${sub}' (available: install, provision)\n\n${VM_USAGE}\n`);
+			io.stderr.write(`vm: unknown subcommand '${sub}' (available: install, provision, snapshot)\n\n${VM_USAGE}\n`);
 			return 2;
 	}
 }
@@ -622,6 +625,33 @@ async function vmProvisionCmd(rest: string[], io: CommandIo): Promise<number> {
 	}
 }
 
+/**
+ * `vm snapshot` — the thin CLI boundary over 26e's {@link runSnapshot}: progress lines to
+ * stdout (including the licensing note), the golden summary on success, and the thrown
+ * actionable error on stderr with exit 1 (the snapshot runner owns every decision; this
+ * only parses flags — none exist — and prints). Flag-less by design, like `vm provision`:
+ * the promote always targets the most recent provisioned build.
+ */
+async function vmSnapshotCmd(rest: string[], io: CommandIo): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const unexpected = [...Object.keys(flags.values), ...flags.bools, ...flags.unknown, ...flags.positionals];
+	if (unexpected.length > 0) {
+		io.stderr.write(`Usage: openhammer vm snapshot\n`);
+		return 2;
+	}
+	try {
+		const result = await runSnapshot({ log: (line) => io.stdout.write(`${line}\n`) });
+		io.stdout.write(
+			`vm snapshot: done — golden ${result.goldenId} (${result.diskVirtualSizeBytes} B virtual), ` +
+				`manifest ${result.manifestPath}\n`,
+		);
+		return 0;
+	} catch (error) {
+		io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+}
+
 // ---- usage text -------------------------------------------------------------
 
 const USAGE = `Usage: openhammer [command] [options]
@@ -663,6 +693,10 @@ Commands:
     provision             Provision the installed build over ssh (idempotent,
                            rerunnable): packages, SDDM autologin, agent
                            defaults, env rc lines, boot hook, host-key capture
+    snapshot              Promote the provisioned build to the golden image
+                           (disk + installed OVMF VARS moved into images/,
+                           host pin copied, 0600 manifest written — a personal
+                           artifact)
   doctor                 Run diagnostics checks
   monitor                Stream live client + tool-call activity
 
@@ -676,7 +710,7 @@ const CHANNEL_USAGE = `Usage: openhammer channel { add | list | remove <id> | us
 const CONFIG_USAGE = `Usage: openhammer config { get | set [section] }`;
 
 /** The vm tree's usage line — only the implemented subcommands are advertised (see vmCommand). */
-const VM_USAGE = `Usage: openhammer vm { install | provision }`;
+const VM_USAGE = `Usage: openhammer vm { install | provision | snapshot }`;
 
 // Auto-run only when invoked as the entrypoint (the `openhammer` bin), not when
 // imported by tests. Matches the T-canary guard: under vitest `process.argv[1]`

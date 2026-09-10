@@ -543,7 +543,7 @@ describe("dispatch — non-interactive flag mode (spec 20g)", () => {
 	});
 });
 
-describe("dispatch — `vm` subcommands (spec 26c/26d)", () => {
+describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 	it("routes `vm install` to the vm handler with sub + trailing rest", async () => {
 		const vm = fakeHandler();
 		await dispatch(parsed("vm", ["install"]), { vm: vm.handler });
@@ -562,6 +562,12 @@ describe("dispatch — `vm` subcommands (spec 26c/26d)", () => {
 		expect(vm.calls).toEqual([{ sub: "provision", rest: [] }]);
 	});
 
+	it("routes `vm snapshot` to the vm handler with sub + trailing rest", async () => {
+		const vm = fakeHandler();
+		await dispatch(parsed("vm", ["snapshot"]), { vm: vm.handler });
+		expect(vm.calls).toEqual([{ sub: "snapshot", rest: [] }]);
+	});
+
 	it("`vm provision` with any flag/positional is a usage error before anything runs (exit 2)", async () => {
 		await withTempHome(async () => {
 			const err = recordingStream();
@@ -571,21 +577,42 @@ describe("dispatch — `vm` subcommands (spec 26c/26d)", () => {
 		});
 	});
 
+	it("`vm snapshot` with any flag/positional is a usage error before anything runs (exit 2)", async () => {
+		await withTempHome(async () => {
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["snapshot", "--nope"]), { stderr: err.stream });
+			expect(code).toBe(2);
+			expect(err.text()).toContain("Usage: openhammer vm snapshot\n");
+		});
+	});
+
+	it("`vm snapshot` with no provisioned session is a handled domain failure (exit 1, the actionable error)", async () => {
+		await withTempHome(async (home) => {
+			const err = recordingStream();
+			const out = recordingStream();
+			const code = await dispatch(parsed("vm", ["snapshot"]), { stdout: out.stream, stderr: err.stream });
+			expect(code).toBe(1);
+			expect(err.text()).toContain("vm snapshot: no provisioned build session to promote");
+			expect(err.text()).toContain("run `openhammer vm install` first");
+			expect(err.text()).toContain(join(home, ".openhammer", "vm", "sessions"));
+		});
+	});
+
 	it("`vm` with no subcommand is a usage error (exit 2)", async () => {
 		await withTempHome(async () => {
 			const err = recordingStream();
 			const code = await dispatch(parsed("vm"), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("Usage: openhammer vm { install | provision }");
+			expect(err.text()).toContain("Usage: openhammer vm { install | provision | snapshot }");
 		});
 	});
 
 	it("`vm <unknown>` names the unknown subcommand and what exists (exit 2)", async () => {
 		await withTempHome(async () => {
 			const err = recordingStream();
-			const code = await dispatch(parsed("vm", ["snapshot"]), { stderr: err.stream });
+			const code = await dispatch(parsed("vm", ["teleport"]), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("vm: unknown subcommand 'snapshot' (available: install, provision)");
+			expect(err.text()).toContain("vm: unknown subcommand 'teleport' (available: install, provision, snapshot)");
 		});
 	});
 
@@ -614,6 +641,8 @@ describe("dispatch — `vm` subcommands (spec 26c/26d)", () => {
 		expect(text).toContain("vm <subcommand>");
 		expect(text).toContain("install");
 		expect(text).toContain("provision");
+		expect(text).toContain("snapshot");
+		expect(text).toContain("Promote the provisioned build to the golden image");
 	});
 });
 
