@@ -223,6 +223,19 @@ export function sandboxStateText(line: VmStateLine | null): string {
 }
 
 /**
+ * Is a sandbox session ACTIVE — the dashboard's own matrix-row-5 signal? A vm-state
+ * line with state `booting` or `ready` means a live QEMU holds the RAM and the session
+ * tree, so the Sandbox screen hides *Install sandbox* (a concurrent build is exactly
+ * the RAM-contention/file-race exclusion — the operator is never offered an action
+ * that can't run). `stopped`/`failed`/`off` and no-line-at-all are all "no live
+ * session". The vm-side single-flight scan (runInstall's) stays the race authority —
+ * a stale line's blind spot is covered by the refusal surfaced inline. Pure.
+ */
+export function vmSessionActive(line: VmStateLine | null): boolean {
+	return line !== null && (line.state === "booting" || line.state === "ready");
+}
+
+/**
  * The verbatim Sandbox state row — {@link sandboxStateText} with the
  * `Sandbox  ` head (the monitor's `VM  ` head swapped for the entry's own
  * name). e.g. `Sandbox  ready · session vm-20260911T101112Z-ab · ssh :42255`.

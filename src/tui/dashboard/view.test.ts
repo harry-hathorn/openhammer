@@ -20,6 +20,7 @@ import {
 	settingsRows,
 	statusRows,
 	VM_APPLY_HINT,
+	vmSessionActive,
 	vmSettingsEqual,
 } from "./view.ts";
 
@@ -233,6 +234,19 @@ describe("view — sandbox rows (spec 28)", () => {
 		expect(sandboxEntryVisible("off", true)).toBe(true); // the mode-flipped-at-boot escape hatch
 		expect(sandboxEntryVisible("vm", false)).toBe(true); // from settings, before any line
 		expect(sandboxEntryVisible("agent", false)).toBe(true);
+	});
+});
+
+describe("view — vmSessionActive (the row-5 Install exclusion predicate, spec 28 box 28d)", () => {
+	it("booting/ready hold a live QEMU → active; stopped/failed/off/no-line → not", () => {
+		expect(vmSessionActive(vmState())).toBe(true); // ready
+		expect(vmSessionActive(vmState({ state: "booting", phase: "prepare", sessionId: null, sshPort: null }))).toBe(
+			true,
+		);
+		expect(vmSessionActive(vmState({ state: "stopped", sessionId: null, sshPort: null }))).toBe(false);
+		expect(vmSessionActive(vmState({ state: "failed", sessionId: null, sshPort: null, error: "boom" }))).toBe(false);
+		expect(vmSessionActive(vmState({ state: "off", sessionId: null, sshPort: null }))).toBe(false);
+		expect(vmSessionActive(null)).toBe(false);
 	});
 });
 

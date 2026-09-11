@@ -280,18 +280,22 @@ export const SANDBOX_STOP_TEXT =
 
 /**
  * The Sandbox screen's action list: Stop / Restart / Configure / Serial tail,
- * then — ONLY when no bootable golden exists — Install sandbox, then Back.
- * Off-mode users never see these — the actions live inside the drill-in screen,
- * which inherits 28a's off-mode invisibility (the menu row is hidden entirely).
- * Owned-vs-unowned does NOT change the list: an unowned dashboard renders the
- * same rows and surfaces the unowned hint on activation (never a dead button).
- * The Install row is HIDDEN, not disabled, when a golden exists — the spec's
- * "shown only when no golden manifest exists" (matrix row 2's jump target);
- * visibility rides the same probe the vm write guard uses
- * (`goldenManifestExists`), so the affordance and the guard can never disagree.
- * Pure.
+ * then — ONLY when no bootable golden exists AND no session is active — Install
+ * sandbox, then Back. Off-mode users never see these — the actions live inside the
+ * drill-in screen, which inherits 28a's off-mode invisibility (the menu row is
+ * hidden entirely). Owned-vs-unowned does NOT change the list: an unowned dashboard
+ * renders the same rows and surfaces the unowned hint on activation (never a dead
+ * button). The Install row is HIDDEN, not disabled, when a golden exists — the
+ * spec's "shown only when no golden manifest exists" (matrix row 2's jump target);
+ * visibility rides the same probe the vm write guard uses (`goldenManifestExists`),
+ * so the affordance and the guard can never disagree. It is ALSO hidden while a
+ * session is active (`sessionActive` — {@link ./view.ts}'s `vmSessionActive` over
+ * the store's vm-state line; matrix row 5: install vs a live session is RAM
+ * contention + file races, and the operator should not see an action that can't
+ * run) — runInstall's own single-flight scan stays the race authority for the
+ * window a vm-state line can't see, and its refusal surfaces inline. Pure.
  */
-export function sandboxItems(hasGolden: boolean): ListItem[] {
+export function sandboxItems(hasGolden: boolean, sessionActive = false): ListItem[] {
 	const rows: ListItem[] = [
 		{ label: SANDBOX_STOP_LABEL, description: SANDBOX_STOP_TEXT },
 		{
@@ -301,7 +305,7 @@ export function sandboxItems(hasGolden: boolean): ListItem[] {
 		{ label: SANDBOX_CONFIGURE_LABEL, description: "the vm settings section — boot mode, memory, persist…" },
 		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
 	];
-	if (!hasGolden) {
+	if (!hasGolden && !sessionActive) {
 		rows.push({
 			label: SANDBOX_INSTALL_LABEL,
 			description: "no golden yet — build it here (the vm install flow; takes minutes)",

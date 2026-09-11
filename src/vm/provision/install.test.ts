@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { goldenManifestExists } from "../../config/sections.ts";
 import { qemuBootArgs } from "../qemu/args.ts";
 import type { QemuExit, QemuHandle } from "../qemu/process.ts";
 import type { QmpClient } from "../qmp/client.ts";
@@ -13,10 +14,11 @@ import {
 	DEFAULT_BUDGET_MINUTES,
 	type DiskSample,
 	type InstallDeps,
+	newestGoldenId,
 	runInstall,
 	scanActiveVmSessions,
 } from "./install.ts";
-import { ISO_NAME, ISO_SHA256 } from "./iso.ts";
+import { ISO_NAME, ISO_SHA256, ISO_URL } from "./iso.ts";
 
 const PORT = 41733;
 const PASSWORD = "test-recovery-password";
@@ -45,6 +47,8 @@ interface HarnessOptions {
 	readonly sleep?: (ms: number) => Promise<void>;
 	/** The single-flight scan result (default: no active sessions). */
 	readonly scan?: ActiveSession[];
+	/** The rebuild probe's scripted golden id (default: none — a fresh tree, no warning). */
+	readonly goldenId?: string | null;
 	/** Make the teardown capture reject (default: records + succeeds). */
 	readonly captureFails?: boolean;
 }
@@ -117,6 +121,7 @@ function harness(options: HarnessOptions = {}) {
 				clock.now += ms;
 			}),
 		scanActiveSessions: async () => options.scan ?? [],
+		newestGoldenId: () => options.goldenId ?? null,
 		ensureIso: async (d) => {
 			isoCalls.push(d);
 			return { path: join(d.isos, ISO_NAME), action: "cached", size: 6_260_654_080, sha256: ISO_SHA256 };
@@ -442,8 +447,8 @@ describe("runInstall — shutdown fallback + single-flight", () => {
 		const h = harness({ scan: [live] });
 		try {
 			await expect(runInstall(h.deps, { sessionName: "build-refused" })).rejects.toThrow(
-				"vm install: a VM session is active — stop it first (openhammer vm status) — " +
-					"/home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
+				"vm install: a VM session is active — stop the session first: mode off + restart, " +
+					"or Sandbox → Stop sandbox — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
 			);
 			expect(h.isoCalls).toEqual([]); // nothing ran: no iso, no qemu, no session dir
 			expect(h.sshCalls).toEqual([]);
@@ -528,6 +533,127 @@ describe("scanActiveVmSessions", () => {
 		const home = mkdtempSync(join(tmpdir(), "openhammer-scan-none-"));
 		try {
 			expect(await scanActiveVmSessions(resolveVmDirs({ homeDir: home }))).toEqual([]);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("runInstall — the rebuild warning (spec 28, matrix row 5)", () => {
+	it("a golden on disk logs the pre-flight WARNING and the run PROCEEDS (a rebuild is legitimate)", async () => {
+		const h = harness({ goldenId: "golden-4.0.3-20260910-070809" });
+		try {
+			const result = await runInstall(h.deps, { sessionName: "build-rebuild" });
+			expect(result.shutdownPath).toBe("guest-poweroff"); // it ran to completion — a warning, never a block
+			expect(h.logs).toContain(
+				"install: WARNING: a golden already exists (golden-4.0.3-20260910-070809) — " +
+					"rebuilding invalidates retained overlays (recovery path); consider `openhammer vm reset` first",
+			);
+			// Pre-flight: the warning lands before the FIRST side effect (the iso ensure).
+			const warningAt = h.logs.findIndex((line) => line.includes("WARNING: a golden already exists"));
+			const isoAt = h.logs.findIndex((line) => line.startsWith("iso:"));
+			expect(warningAt).toBeGreaterThanOrEqual(0);
+			expect(isoAt).toBeGreaterThan(warningAt);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("no golden on disk → no warning line (a fresh install is quiet)", async () => {
+		const h = harness();
+		try {
+			await runInstall(h.deps, { sessionName: "build-fresh" });
+			expect(h.logs.some((line) => line.includes("a golden already exists"))).toBe(false);
+		} finally {
+			h.cleanup();
+		}
+	});
+});
+
+describe("newestGoldenId — the rebuild probe (the restated twin of goldenManifestExists)", () => {
+	/** A manifest body that passes readManifest (manage.test.ts's canonical shape). */
+	function fullManifest(id: string, builtAt: string): string {
+		return `${JSON.stringify(
+			{
+				id,
+				flavor: "base",
+				guestUser: "sandbox",
+				rootDir: "/home/sandbox",
+				isoVersion: "4.0.3",
+				isoUrl: ISO_URL,
+				isoSha256: ISO_SHA256,
+				diskVirtualSizeBytes: DISK_BYTES,
+				provisionScriptHashes: null,
+				builtAt,
+				encrypt: false,
+			},
+			null,
+			2,
+		)}\n`;
+	}
+
+	/** Seed `images/<id>/` with a manifest body — or a corrupt / absent one. */
+	function seedGoldenAt(dirs: VmDirs, id: string, body: string | "corrupt" | "none"): void {
+		mkdirSync(join(dirs.images, id), { recursive: true });
+		if (body === "corrupt") {
+			writeFileSync(join(dirs.images, id, "manifest.json"), "{not json");
+		} else if (body !== "none") {
+			writeFileSync(join(dirs.images, id, "manifest.json"), body);
+		}
+	}
+
+	it("empty tree → null, agreeing with the bootability probe", () => {
+		const home = mkdtempSync(join(tmpdir(), "openhammer-golden-empty-"));
+		try {
+			expect(newestGoldenId(home)).toBeNull();
+			expect(goldenManifestExists(home)).toBe(false);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("one valid golden → its id; both probes agree the tree holds a golden", () => {
+		const home = mkdtempSync(join(tmpdir(), "openhammer-golden-one-"));
+		const id = "golden-4.0.3-20260910-070809";
+		try {
+			seedGoldenAt(resolveVmDirs({ homeDir: home }), id, fullManifest(id, "2026-09-10T07:08:09.000Z"));
+			expect(newestGoldenId(home)).toBe(id);
+			expect(goldenManifestExists(home)).toBe(true);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("two goldens → the NEWEST; a corrupt newest still orders by its id's stamp (the twin's fallback)", () => {
+		const home = mkdtempSync(join(tmpdir(), "openhammer-golden-order-"));
+		const oldest = "golden-4.0.3-20260801-000000";
+		const newest = "golden-4.0.3-20260910-070809";
+		try {
+			const dirs = resolveVmDirs({ homeDir: home });
+			seedGoldenAt(dirs, oldest, fullManifest(oldest, "2026-08-01T00:00:00.000Z"));
+			seedGoldenAt(dirs, newest, "corrupt"); // no builtAt — the id's stamp orders it (still newest)
+			expect(newestGoldenId(home)).toBe(newest);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("the deliberate divergence, pinned: a corrupt-manifest newest is a golden EXISTENCE (rebuild warns) but not bootable", () => {
+		const home = mkdtempSync(join(tmpdir(), "openhammer-golden-diverge-"));
+		const oldest = "golden-4.0.3-20260801-000000";
+		const newest = "golden-4.0.3-20260910-070809";
+		try {
+			const dirs = resolveVmDirs({ homeDir: home });
+			seedGoldenAt(dirs, oldest, fullManifest(oldest, "2026-08-01T00:00:00.000Z"));
+			seedGoldenAt(dirs, newest, "corrupt");
+			// The rebuild warning's probe answers "does a golden exist" (the doctor's
+			// dir-level notion) — the displaced-prior-golden question. The dashboard's
+			// Install-row probe answers "is a golden BOOTABLE" — on this tree it says no,
+			// so the dashboard OFFERS Install while the CLI install warns the rebuild:
+			// coherent (the rebuild is the remedy both surfaces point at), and pinned so
+			// the difference can never drift silently.
+			expect(newestGoldenId(home)).toBe(newest);
+			expect(goldenManifestExists(home)).toBe(false);
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}

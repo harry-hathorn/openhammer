@@ -65,6 +65,7 @@ import {
 	settingsRows,
 	statusRows,
 	VM_APPLY_HINT,
+	vmSessionActive,
 	vmSettingsEqual,
 } from "./view.ts";
 
@@ -271,13 +272,13 @@ export class DashboardRoot implements Component {
 				// when known (matrix row 9), then the apply-on-restart note while a vm
 				// settings write is saved-but-unapplied (matrix row 3, box 28c) — over the
 				// session action list (box 28b, extended in 28c): Stop / Restart /
-				// Configure / Serial tail / Install (only when no golden exists) / Back.
+				// Configure / Serial tail / Install (no golden AND no active session — row 5) / Back.
 				// Owned-vs-unowned does not change the list — an unowned activation
 				// surfaces the unowned hint (never a dead button).
 				if (section === "sandbox") {
 					return {
 						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
-						items: sandboxItems(this.store.hasGolden),
+						items: sandboxItems(this.store.hasGolden, vmSessionActive(this.store.latestVmState)),
 						hint: this.hint(),
 					};
 				}
