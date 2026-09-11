@@ -3,18 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import type { Settings } from "../config/settings.ts";
-import { defaultVmSettings } from "../config/settings.ts";
-import { ok, type Result } from "../tools/result.ts";
+import { NO_GOLDEN_GUARD_MESSAGE } from "../config/sections.ts";
+import { type ChannelEntry, defaultVmSettings, type Settings, type VmSettings } from "../config/settings.ts";
+import { err, ok, type Result } from "../tools/result.ts";
 import type { VmBootGate } from "../vm/boot-backend.ts";
 import type { VmStatus } from "../vm/service.ts";
 import { DashboardStore } from "./dashboard/store.ts";
 import {
 	createSandboxActions,
+	createSettingsActions,
 	type DashboardDeps,
 	readSerialLog,
 	runDashboard,
 	VM_IN_FLIGHT_HINT,
+	VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE,
 	VM_UNOWNED_HINT,
 } from "./dashboard.ts";
 
@@ -295,7 +297,7 @@ describe("createSandboxActions — owned server", () => {
 });
 
 describe("createSandboxActions — unowned server (the hint, exact)", () => {
-	it("all three actions err with the unowned hint; no service is ever touched", async () => {
+	it("every Sandbox action errs with the unowned hint; no service is ever touched", async () => {
 		let consulted = 0;
 		let read = false;
 		const actions = createSandboxActions({
@@ -312,13 +314,279 @@ describe("createSandboxActions — unowned server (the hint, exact)", () => {
 		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
 		expect(await actions.restartSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
 		expect(await actions.readSerial()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(consulted).toBe(3); // the gate was consulted; nothing behind it existed to touch
+		expect(await actions.installSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(consulted).toBe(4); // the gate was consulted; nothing behind it existed to touch
 		expect(read).toBe(false); // the unowned gate precedes the serial read
 	});
 
 	it("an absent vmService dep is unowned too (today's child-process wiring)", async () => {
 		const actions = createSandboxActions({ store: new DashboardStore() });
 		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+	});
+});
+
+describe("createSandboxActions — installSandbox (spec 28, box 28c)", () => {
+	it("owned: the install seam runs to completion and reports the session dir; the log sink is a function", async () => {
+		let sinkType = "none";
+		const actions = createSandboxActions({
+			vmService: () => scriptedGate(),
+			store: new DashboardStore(),
+			install: async (log) => {
+				sinkType = typeof log;
+				return { sessionDir: "/h/.openhammer/vm/sessions/build-1" };
+			},
+		});
+		expect(await actions.installSandbox()).toEqual({
+			ok: true,
+			value: { sessionDir: "/h/.openhammer/vm/sessions/build-1" },
+		});
+		expect(sinkType).toBe("function");
+	});
+
+	it("unowned: the exact unowned hint — the install seam is never invoked (no local vm-tree writes)", async () => {
+		let ran = false;
+		const actions = createSandboxActions({
+			store: new DashboardStore(),
+			install: async () => {
+				ran = true;
+				return { sessionDir: "x" };
+			},
+		});
+		expect(await actions.installSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(ran).toBe(false);
+	});
+
+	it("a second install while one is in flight errs inline and never reaches the seam", async () => {
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let runs = 0;
+		const actions = createSandboxActions({
+			vmService: () => scriptedGate(),
+			store: new DashboardStore(),
+			install: async () => {
+				runs += 1;
+				await blocked;
+				return { sessionDir: "x" };
+			},
+		});
+		const first = actions.installSandbox();
+		const second = await actions.installSandbox();
+		expect(second).toEqual({ ok: false, error: new Error(VM_IN_FLIGHT_HINT) });
+		expect(runs).toBe(1);
+		release();
+		expect(await first).toEqual({ ok: true, value: { sessionDir: "x" } });
+	});
+
+	it("an install failure carries the runner's actionable error (evidence paths and all)", async () => {
+		const actions = createSandboxActions({
+			vmService: () => scriptedGate(),
+			store: new DashboardStore(),
+			install: async () => {
+				throw new Error("vm install: no ssh gate within the 45 min budget");
+			},
+		});
+		expect(await actions.installSandbox()).toEqual({
+			ok: false,
+			error: new Error("vm install: no ssh gate within the 45 min budget"),
+		});
+	});
+});
+
+// ---- the settings actions: mode-select guards + restart-to-apply (spec 28, box 28c) ----
+
+/** A settings doc with a given vm mode and channel list (the guards' subject). */
+function doc(mode: VmSettings["mode"], channels: ChannelEntry[] = []): Settings {
+	return {
+		version: 1,
+		channels,
+		defaultChannel: null,
+		mcp: { allowedClients: [] },
+		vm: { ...defaultVmSettings(), mode },
+	};
+}
+
+/** A live ngrok channel (the row-1 predicate's hit). */
+const LIVE: ChannelEntry[] = [{ id: "c1", kind: "ngrok", mode: "live", options: {} }];
+
+describe("createSettingsActions — the mode-select guards + restart-to-apply (spec 28, box 28c)", () => {
+	/** The harness: recorder confirm/persist/restart, a scripted wizard, a real DashboardStore. */
+	function harness(opts: {
+		before: Settings;
+		wizard?: Result<Settings, Error> | null;
+		wizardThrows?: Error;
+		confirmResult?: boolean | null;
+		restart?: () => Promise<Result<void, Error>>;
+	}) {
+		const calls: string[] = [];
+		const persisted: Settings[] = [];
+		const store = new DashboardStore({}, opts.before);
+		const core = createSettingsActions({
+			persist: (s) => persisted.push(s),
+			store,
+			confirm: async (message) => {
+				calls.push(`confirm:${message}`);
+				return opts.confirmResult ?? true;
+			},
+			runSectionWizard: async (_before, sections) => {
+				calls.push(`wizard:${sections === undefined ? "picker" : sections.map((s) => s.id).join(",")}`);
+				if (opts.wizardThrows !== undefined) {
+					throw opts.wizardThrows;
+				}
+				return opts.wizard ?? null;
+			},
+			restartIfDefaultChanged: async (before, after) => {
+				if (before.defaultChannel !== after.defaultChannel) calls.push("channelRestart");
+			},
+			restartServer: opts.restart,
+		});
+		return { calls, persisted, store, core };
+	}
+
+	it("row 1: vm → off with a live channel asks the exact confirm; declining keeps the mode (nothing persisted)", async () => {
+		const before = doc("vm", LIVE);
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "off" } };
+		const { calls, persisted, core } = harness({ before, wizard: ok(after), confirmResult: false });
+		const result = await core.editSettings();
+		expect(result).toBeNull();
+		expect(calls).toContain(`confirm:${VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE}`);
+		expect(persisted).toEqual([]); // decline keeps the mode — nothing written, nothing restarted
+	});
+
+	it("row 1: agent → off gets the same warning", async () => {
+		const before = doc("agent", LIVE);
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "off" } };
+		const { calls, core } = harness({ before, wizard: ok(after), confirmResult: false });
+		await core.editSettings();
+		expect(calls.some((c) => c.startsWith(`confirm:${VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE}`))).toBe(true);
+	});
+
+	it("row 1: accepting persists the doc and adopts it into the store", async () => {
+		const before = doc("vm", LIVE);
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "off" } };
+		const { calls, persisted, store, core } = harness({ before, wizard: ok(after), confirmResult: true });
+		const result = await core.editSettings();
+		expect(result).toEqual({ ok: true, value: after });
+		expect(calls.some((c) => c.startsWith("confirm:"))).toBe(true);
+		expect(persisted).toEqual([after]);
+		expect(store.settings).toEqual(after);
+	});
+
+	it("row 1: vm → off WITHOUT a public channel never confirms", async () => {
+		const before = doc("vm");
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "off" } };
+		const { calls, persisted, core } = harness({ before, wizard: ok(after) });
+		const result = await core.editSettings();
+		expect(result?.ok).toBe(true);
+		expect(calls.some((c) => c.startsWith("confirm:"))).toBe(false);
+		expect(persisted).toEqual([after]);
+	});
+
+	it("row 1: off → vm never confirms (containment only increases) — even with a live channel", async () => {
+		const before = doc("off", LIVE);
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "vm" } };
+		const { calls, core } = harness({ before, wizard: ok(after) });
+		await core.editSettings();
+		expect(calls.some((c) => c.startsWith("confirm:"))).toBe(false);
+	});
+
+	it("row 1: a static LOOPBACK channel does not trigger the warning (localhost-only doesn't count)", async () => {
+		const loopback: ChannelEntry[] = [
+			{ id: "s", kind: "static-url", mode: "static", options: { publicUrl: "http://127.0.0.1:3000" } },
+		];
+		const before = doc("vm", loopback);
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "off" } };
+		const { calls, core } = harness({ before, wizard: ok(after) });
+		await core.editSettings();
+		expect(calls.some((c) => c.startsWith("confirm:"))).toBe(false);
+	});
+
+	it("row 2: the no-golden guard's write throw propagates (the root flashes it); nothing persists", async () => {
+		const { persisted, core } = harness({
+			before: doc("off"),
+			wizardThrows: new Error(NO_GOLDEN_GUARD_MESSAGE),
+		});
+		await expect(core.editSettings()).rejects.toThrow(NO_GOLDEN_GUARD_MESSAGE);
+		expect(persisted).toEqual([]);
+	});
+
+	it("row 3 owned: a vm write invokes the restart seam once and leaves the change applied (pending false)", async () => {
+		const before = doc("off");
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "vm" } };
+		let restarts = 0;
+		const { store, core } = harness({
+			before,
+			wizard: ok(after),
+			restart: async () => {
+				restarts += 1;
+				return ok(undefined);
+			},
+		});
+		const result = await core.editSettings();
+		expect(result?.ok).toBe(true);
+		expect(restarts).toBe(1);
+		expect(store.vmApplyPending).toBe(false);
+	});
+
+	it("row 3: a failed restart marks the change pending (the hint, not a dead silence)", async () => {
+		const before = doc("off");
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "vm" } };
+		const { store, core } = harness({
+			before,
+			wizard: ok(after),
+			restart: async () => err(new Error("cannot restart a server the dashboard did not start")),
+		});
+		await core.editSettings();
+		expect(store.vmApplyPending).toBe(true);
+	});
+
+	it("row 3 unowned: no restart seam → the write persists and the pending flag carries the hint", async () => {
+		const before = doc("off");
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "agent" } };
+		const { persisted, store, core } = harness({ before, wizard: ok(after) });
+		const result = await core.editSettings();
+		expect(result?.ok).toBe(true);
+		expect(persisted).toEqual([after]); // the write DID land — the hint is about applying, not saving
+		expect(store.vmApplyPending).toBe(true);
+	});
+
+	it("row 3: a write that does not touch the vm section never restarts and never pends", async () => {
+		const before = doc("off");
+		const after: Settings = { ...before, mcp: { allowedClients: ["claude-code"] } };
+		let restarts = 0;
+		const { store, core } = harness({
+			before,
+			wizard: ok(after),
+			restart: async () => {
+				restarts += 1;
+				return ok(undefined);
+			},
+		});
+		await core.editSettings();
+		expect(restarts).toBe(0);
+		expect(store.vmApplyPending).toBe(false);
+	});
+
+	it("configureVm drives the SAME core with the vm section preselected (the Configure jump)", async () => {
+		const before = doc("off");
+		const after: Settings = { ...before, vm: { ...before.vm, mode: "vm" } };
+		const { calls, core } = harness({ before, wizard: ok(after) });
+		await core.configureVm();
+		expect(calls).toContain("wizard:vm");
+	});
+
+	it("editSettings drives the section picker (no preselection)", async () => {
+		const { calls, core } = harness({ before: doc("off"), wizard: null });
+		await core.editSettings();
+		expect(calls).toContain("wizard:picker");
+	});
+
+	it("a wizard cancel passes through as null (no confirm, no persist)", async () => {
+		const { calls, persisted, core } = harness({ before: doc("off"), wizard: null });
+		expect(await core.editSettings()).toBeNull();
+		expect(calls.some((c) => c.startsWith("confirm:"))).toBe(false);
+		expect(persisted).toEqual([]);
 	});
 });
 

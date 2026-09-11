@@ -15,6 +15,8 @@ import {
 	menuSectionAt,
 	renderFieldRows,
 	renderList,
+	SANDBOX_CONFIGURE_LABEL,
+	SANDBOX_INSTALL_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SERIAL_LABEL,
 	SANDBOX_STOP_LABEL,
@@ -137,18 +139,27 @@ describe("screens — settings/doctor items", () => {
 	});
 });
 
-describe("screens — sandboxItems (spec 28, box 28b)", () => {
-	it("the Sandbox screen's rows: Stop, Restart, Serial tail, Back", () => {
-		expect(sandboxItems().map((i) => i.label)).toEqual([
+describe("screens — sandboxItems (spec 28, box 28b + 28c)", () => {
+	it("with a golden: Stop, Restart, Configure, Serial tail, Back — no Install row", () => {
+		const labels = sandboxItems(true).map((i) => i.label);
+		expect(labels).toEqual([
 			SANDBOX_STOP_LABEL,
 			SANDBOX_RESTART_LABEL,
+			SANDBOX_CONFIGURE_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);
+		expect(labels).not.toContain(SANDBOX_INSTALL_LABEL);
+	});
+
+	it("without a golden the Install row APPEARS (hidden when one exists — never a disabled row)", () => {
+		const labels = sandboxItems(false).map((i) => i.label);
+		expect(labels).toContain(SANDBOX_INSTALL_LABEL);
+		expect(labels.indexOf(SANDBOX_INSTALL_LABEL)).toBe(labels.length - 2); // just before Back
 	});
 
 	it("the stop subtitle carries the matrix-row-4 semantics (re-boots on next start; lasting stop = off + restart)", () => {
-		const stop = sandboxItems()[0];
+		const stop = sandboxItems(true)[0];
 		expect(stop?.description).toContain("re-boots the sandbox on the next server start");
 		expect(stop?.description).toContain("lasting stop: mode off + restart");
 	});

@@ -265,7 +265,9 @@ export function doctorItems(): ListItem[] {
  */
 export const SANDBOX_STOP_LABEL = "Stop sandbox…";
 export const SANDBOX_RESTART_LABEL = "Restart sandbox…";
+export const SANDBOX_CONFIGURE_LABEL = "Configure…";
 export const SANDBOX_SERIAL_LABEL = "Serial tail";
+export const SANDBOX_INSTALL_LABEL = "Install sandbox…";
 
 /**
  * The Stop row's subtitle — the matrix-row-4 semantics verbatim: a stop is a
@@ -277,23 +279,36 @@ export const SANDBOX_STOP_TEXT =
 	"power down now — the boot-scoped mode re-boots the sandbox on the next server start (lasting stop: mode off + restart)";
 
 /**
- * The Sandbox screen's action list: Stop / Restart / Serial tail, then Back.
+ * The Sandbox screen's action list: Stop / Restart / Configure / Serial tail,
+ * then — ONLY when no bootable golden exists — Install sandbox, then Back.
  * Off-mode users never see these — the actions live inside the drill-in screen,
  * which inherits 28a's off-mode invisibility (the menu row is hidden entirely).
  * Owned-vs-unowned does NOT change the list: an unowned dashboard renders the
  * same rows and surfaces the unowned hint on activation (never a dead button).
+ * The Install row is HIDDEN, not disabled, when a golden exists — the spec's
+ * "shown only when no golden manifest exists" (matrix row 2's jump target);
+ * visibility rides the same probe the vm write guard uses
+ * (`goldenManifestExists`), so the affordance and the guard can never disagree.
  * Pure.
  */
-export function sandboxItems(): ListItem[] {
-	return [
+export function sandboxItems(hasGolden: boolean): ListItem[] {
+	const rows: ListItem[] = [
 		{ label: SANDBOX_STOP_LABEL, description: SANDBOX_STOP_TEXT },
 		{
 			label: SANDBOX_RESTART_LABEL,
 			description: "stop, then a fresh boot (retain reuses the overlay, discard is fresh)",
 		},
+		{ label: SANDBOX_CONFIGURE_LABEL, description: "the vm settings section — boot mode, memory, persist…" },
 		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
-		{ label: "Back", description: "to menu" },
 	];
+	if (!hasGolden) {
+		rows.push({
+			label: SANDBOX_INSTALL_LABEL,
+			description: "no golden yet — build it here (the vm install flow; takes minutes)",
+		});
+	}
+	rows.push({ label: "Back", description: "to menu" });
+	return rows;
 }
 
 /**

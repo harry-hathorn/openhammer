@@ -40,6 +40,8 @@ import {
 	menuSectionAt,
 	renderFieldRows,
 	renderList,
+	SANDBOX_CONFIGURE_LABEL,
+	SANDBOX_INSTALL_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SERIAL_LABEL,
 	SANDBOX_STOP_LABEL,
@@ -62,6 +64,8 @@ import {
 	serialTailOf,
 	settingsRows,
 	statusRows,
+	VM_APPLY_HINT,
+	vmSettingsEqual,
 } from "./view.ts";
 
 /** A section the menu drills into (the non-Quit menu rows, in order). */
@@ -128,8 +132,33 @@ export interface DashboardActions {
 	 * "no serial yet". Owned-server only — a remote server's serial file isn't here.
 	 */
 	readSerial(): Promise<Result<SerialSource, Error>>;
+	/**
+	 * Jump into the `vm` settings section (spec 28, box 28c) — the Sandbox screen's
+	 * *Configure* row. The default runs the SAME section wizard the Settings screen
+	 * uses (`setSection`), with the `vm` section preselected (no picker drift: the
+	 * jump reuses the exact wizard engine). The mode-select guards apply per write:
+	 * the no-golden block surfaces as a thrown actionable message (flashed by the
+	 * root's activation catch), and the vm/agent → `off` public-channel confirm runs
+	 * before anything persists (decline keeps the mode, silently).
+	 */
+	configureVm(): Promise<Result<Settings, Error> | null>;
+	/**
+	 * Build the golden image — 26c's `runInstall` (spec 28, box 28c), matrix row 2's
+	 * jump target. Gated by the SAME owned/unowned model as Stop/Restart (install
+	 * needs no service handle for its work, but an unowned dashboard may be a view
+	 * over a server whose vm tree is not this one — one ownership model, one hint).
+	 * Progress is the spinner ("installing…"); the completion flash names the
+	 * session dir + the onboarding next step (Install → set mode → restart).
+	 * Owned-server only; unowned activations err with the unowned hint.
+	 */
+	installSandbox(): Promise<Result<InstallOutcome, Error> | null>;
 	/** Quit the dashboard (stops the render loop; `runDashboard`'s `onQuit` stops the server). */
 	quit(): void;
+}
+
+/** What an install run reports — `runInstall`'s result narrowed to what the completion flash names. */
+export interface InstallOutcome {
+	readonly sessionDir: string;
 }
 
 /** Injection seam for {@link DashboardRoot}. */
@@ -239,13 +268,16 @@ export class DashboardRoot implements Component {
 					};
 				}
 				// Sandbox (spec 28): the verbatim state row, then the effective guest root
-				// when known (matrix row 9), over the session action list (box 28b): Stop /
-				// Restart / Serial tail / Back. Owned-vs-unowned does not change the list —
-				// an unowned activation surfaces the unowned hint (never a dead button).
+				// when known (matrix row 9), then the apply-on-restart note while a vm
+				// settings write is saved-but-unapplied (matrix row 3, box 28c) — over the
+				// session action list (box 28b, extended in 28c): Stop / Restart /
+				// Configure / Serial tail / Install (only when no golden exists) / Back.
+				// Owned-vs-unowned does not change the list — an unowned activation
+				// surfaces the unowned hint (never a dead button).
 				if (section === "sandbox") {
 					return {
-						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot),
-						items: sandboxItems(),
+						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
+						items: sandboxItems(this.store.hasGolden),
 						hint: this.hint(),
 					};
 				}
@@ -482,9 +514,10 @@ export class DashboardRoot implements Component {
 			return;
 		}
 		if (section === "sandbox") {
-			// The session actions (spec 28, box 28b). Each wired action carries the
+			// The session actions (spec 28, box 28b + 28c). Each wired action carries the
 			// owned-server gate: an unowned activation errs with the unowned hint, which
-			// flashes here — the same inline surfacing any other failure gets.
+			// flashes here — the same inline surfacing any other failure gets. The
+			// no-golden guard (a thrown write) surfaces through the activation catch.
 			if (label === SANDBOX_STOP_LABEL) {
 				const result = await this.actions.stopSandbox();
 				if (result === null) return; // confirmation declined — silent (the modal idiom)
@@ -501,6 +534,13 @@ export class DashboardRoot implements Component {
 					: result.error.message;
 				return;
 			}
+			if (label === SANDBOX_CONFIGURE_LABEL) {
+				// The jump into the `vm` settings section (spec 28, box 28c): the same
+				// runAction flash as the Settings screen, so the apply-on-restart hint
+				// rides an unapplied vm write identically from both entry points.
+				await this.runAction(() => this.actions.configureVm(), "settings");
+				return;
+			}
 			if (label === SANDBOX_SERIAL_LABEL) {
 				const result = await this.actions.readSerial();
 				if (!result.ok) {
@@ -510,6 +550,17 @@ export class DashboardRoot implements Component {
 				this.serialTail = serialTailOf(result.value.content, result.value.totalBytes);
 				this.screen = { kind: "serial" };
 				this.focus = 0;
+				return;
+			}
+			if (label === SANDBOX_INSTALL_LABEL) {
+				// The no-golden jump target (spec 28, box 28c, matrix row 2). Progress is
+				// the spinner (the wiring's runModal); this flash carries the outcome + the
+				// onboarding next step (Install → set mode → restart).
+				const result = await this.actions.installSandbox();
+				if (result === null) return;
+				this.flashMessage = result.ok
+					? `Install complete — session ${result.value.sessionDir}. Next: Configure → set the boot mode, then restart.`
+					: result.error.message;
 				return;
 			}
 		}
@@ -559,17 +610,27 @@ export class DashboardRoot implements Component {
 	 * Run a settings-mutating action, flashing success/failure. On `ok` the action
 	 * closure already persisted + updated the store (the wiring), so the next render
 	 * reflects the change; here we just flash the outcome. `successMsg` overrides the
-	 * generic "<kind> updated." message.
+	 * generic "<kind> updated." message. A write that touched the vm section while
+	 * the change is still unapplied (matrix row 3 — no live restart succeeded)
+	 * flashes the apply-on-restart hint instead of the generic success line.
 	 */
 	private async runAction(
 		run: () => Promise<Result<Settings, Error> | null>,
 		kind: "channel" | "settings",
 		successMsg?: string,
 	): Promise<void> {
+		const before = this.store.settings;
 		const result = await run();
 		if (result === null) return; // cancelled — silent
 		if (result.ok) {
-			this.flashMessage = successMsg ?? (kind === "channel" ? "Channel added." : "Settings updated.");
+			const vmTouched = !vmSettingsEqual(before.vm, this.store.settings.vm);
+			this.flashMessage =
+				successMsg ??
+				(kind === "channel"
+					? "Channel added."
+					: vmTouched && this.store.vmApplyPending
+						? VM_APPLY_HINT
+						: "Settings updated.");
 		} else {
 			this.flashMessage = result.error.message;
 		}

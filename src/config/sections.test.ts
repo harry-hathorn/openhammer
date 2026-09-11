@@ -1,8 +1,11 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { BannerStream } from "../tui/banner.ts";
 import { flagIo } from "../tui/prompts.ts";
 import { SECTION_SELECT_PROMPT, setSection } from "../tui/wizards/section.ts";
-import { CONFIG_SECTIONS, mcpSection, vmSection } from "./sections.ts";
+import { CONFIG_SECTIONS, goldenManifestExists, mcpSection, NO_GOLDEN_GUARD_MESSAGE, vmSection } from "./sections.ts";
 import { defaultSettings, defaultVmSettings, type Settings, type VmSettings } from "./settings.ts";
 
 /** A silent banner stream (the cli's `silentStream` — wizard framing writes nowhere). */
@@ -17,6 +20,27 @@ function withClients(clients: string[]): Settings {
 function withVm(vm: Partial<VmSettings> = {}): Settings {
 	return { ...defaultSettings(), vm: { ...defaultVmSettings(), ...vm } };
 }
+
+/**
+ * Write deps whose golden probe answers the given fact — the vm write guard's
+ * hermetic seam (never the real HOME; a machine-dependent trio is no trio).
+ */
+const golden = (exists: boolean) => ({ goldenExists: () => exists });
+
+/** A minimal VALID golden manifest (normalizeManifest's shape — see snapshot.ts). */
+const VALID_MANIFEST = {
+	id: "golden-4.0.3-20260911-101112",
+	flavor: "base",
+	guestUser: "sandbox",
+	rootDir: "/home/sandbox",
+	isoVersion: "4.0.3",
+	isoUrl: "https://example.com/omarchy-4.0.3.iso",
+	isoSha256: "a".repeat(64),
+	diskVirtualSizeBytes: 42949672960,
+	provisionScriptHashes: null,
+	builtAt: "2026-09-11T10:11:12Z",
+	encrypt: false,
+};
 
 describe("mcpSection — fields", () => {
 	it("declares a single text field named allowedClients", () => {
@@ -188,15 +212,19 @@ describe("vmSection — read", () => {
 
 describe("vmSection — write", () => {
 	it("parses the number fields and applies the selects", () => {
-		const next = vmSection.write(defaultSettings(), {
-			mode: "vm",
-			memoryMb: "8192",
-			cpus: "6",
-			persist: "discard",
-			idleTimeoutMs: "900000",
-			agentCmd: "codex",
-			secretsDir: "/vm/secrets",
-		});
+		const next = vmSection.write(
+			defaultSettings(),
+			{
+				mode: "vm",
+				memoryMb: "8192",
+				cpus: "6",
+				persist: "discard",
+				idleTimeoutMs: "900000",
+				agentCmd: "codex",
+				secretsDir: "/vm/secrets",
+			},
+			golden(true),
+		);
 		expect(next.vm).toEqual({
 			mode: "vm",
 			memoryMb: 8192,
@@ -257,7 +285,7 @@ describe("vmSection — write", () => {
 			channels: [{ id: "x", kind: "nginx", mode: "static", options: { publicUrl: "https://x" } }],
 			defaultChannel: "x",
 		};
-		const next = vmSection.write(original, { mode: "vm" });
+		const next = vmSection.write(original, { mode: "vm" }, golden(true));
 		expect(next).not.toBe(original); // new object
 		expect(next.channels).toBe(original.channels); // untouched by reference
 		expect(next.version).toBe(original.version);
@@ -268,6 +296,141 @@ describe("vmSection — write", () => {
 
 	it("defaults missing keys to the current values (defensive, the mcp ?? pattern)", () => {
 		expect(vmSection.write(defaultSettings(), {}).vm).toEqual(defaultVmSettings());
+	});
+});
+
+describe("vmSection — the no-golden mode guard (spec 28, matrix row 2)", () => {
+	it("mode vm with a bootable golden passes through", () => {
+		const next = vmSection.write(defaultSettings(), { mode: "vm" }, golden(true));
+		expect(next.vm.mode).toBe("vm");
+	});
+
+	it("mode vm without a golden throws the exact actionable message (block, never persist)", () => {
+		expect(() => vmSection.write(defaultSettings(), { mode: "vm" }, golden(false))).toThrow(NO_GOLDEN_GUARD_MESSAGE);
+		expect(NO_GOLDEN_GUARD_MESSAGE).toBe(
+			"no golden image — run: openhammer vm install (or Sandbox → Install sandbox)",
+		);
+	});
+
+	it("mode agent without a golden throws too", () => {
+		expect(() => vmSection.write(defaultSettings(), { mode: "agent" }, golden(false))).toThrow(
+			NO_GOLDEN_GUARD_MESSAGE,
+		);
+	});
+
+	it("an off write never consults the probe (the guard is vm/agent-only)", () => {
+		let consulted = false;
+		const next = vmSection.write(
+			defaultSettings(),
+			{ mode: "off" },
+			{
+				goldenExists: () => {
+					consulted = true;
+					return false;
+				},
+			},
+		);
+		expect(next.vm.mode).toBe("off");
+		expect(consulted).toBe(false);
+	});
+
+	it("fires on the RESOLVED mode — already vm + a blank answer + no golden is the cannot-boot state, blocked", () => {
+		expect(() => vmSection.write(withVm({ mode: "vm" }), { memoryMb: "8192" }, golden(false))).toThrow(
+			NO_GOLDEN_GUARD_MESSAGE,
+		);
+	});
+
+	it("an invalid mode answer throws before the probe runs (validation first, guard second)", () => {
+		let consulted = false;
+		expect(() =>
+			vmSection.write(
+				defaultSettings(),
+				{ mode: "nope" },
+				{
+					goldenExists: () => {
+						consulted = true;
+						return true;
+					},
+				},
+			),
+		).toThrow('vm.mode must be one of off, vm, agent (got "nope")');
+		expect(consulted).toBe(false);
+	});
+});
+
+describe("goldenManifestExists — the guard's probe (preflight check 5's posture)", () => {
+	async function goldenHome(): Promise<string> {
+		return mkdtemp(join(tmpdir(), "oh-golden-"));
+	}
+
+	async function writeGolden(home: string, id: string, manifest: object | string | null): Promise<void> {
+		const dir = join(home, ".openhammer", "vm", "images", id);
+		await mkdir(dir, { recursive: true });
+		if (manifest === null) return;
+		const body = typeof manifest === "string" ? manifest : JSON.stringify(manifest);
+		await writeFile(join(dir, "manifest.json"), body, "utf8");
+	}
+
+	it("false with no images root at all", async () => {
+		const home = await goldenHome();
+		try {
+			expect(goldenManifestExists(home)).toBe(false);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("true for a newest golden with a valid manifest", async () => {
+		const home = await goldenHome();
+		try {
+			await writeGolden(home, VALID_MANIFEST.id, VALID_MANIFEST);
+			expect(goldenManifestExists(home)).toBe(true);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("false for a golden dir without a manifest", async () => {
+		const home = await goldenHome();
+		try {
+			await writeGolden(home, "golden-4.0.3-20260911-101112", null);
+			expect(goldenManifestExists(home)).toBe(false);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("false when the NEWEST golden's manifest is corrupt — never skipped past for an older valid one", async () => {
+		const home = await goldenHome();
+		try {
+			await writeGolden(home, "golden-4.0.3-20260901-000000", VALID_MANIFEST); // older, valid
+			await writeGolden(home, "golden-4.0.3-20260911-101112", "{not json"); // newer, corrupt
+			expect(goldenManifestExists(home)).toBe(false);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("true when the newest is valid and an older one is corrupt (the newest is the active golden)", async () => {
+		const home = await goldenHome();
+		try {
+			await writeGolden(home, "golden-4.0.3-20260901-000000", "{not json");
+			await writeGolden(home, "golden-4.0.3-20260911-101112", VALID_MANIFEST);
+			expect(goldenManifestExists(home)).toBe(true);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("strays (non-golden dirs, files) are not goldens", async () => {
+		const home = await goldenHome();
+		try {
+			await writeGolden(home, "not-a-golden", VALID_MANIFEST);
+			await writeGolden(home, "golden-4.0.3-20260911-101112", VALID_MANIFEST); // the only real one
+			expect(goldenManifestExists(home)).toBe(true);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -282,7 +445,7 @@ describe("vmSection — round-trip", () => {
 			agentCmd: "agy",
 			secretsDir: "/vm/secrets",
 		});
-		expect(vmSection.write(s, vmSection.read(s)).vm).toEqual(s.vm);
+		expect(vmSection.write(s, vmSection.read(s), golden(true)).vm).toEqual(s.vm);
 	});
 
 	it("the defaults round-trip (null secretsDir survives its empty-string display form)", () => {
@@ -291,6 +454,19 @@ describe("vmSection — round-trip", () => {
 });
 
 describe("`config set vm` — the section wizard reaches the vm section", () => {
+	/**
+	 * The vm section with its write's golden probe pinned to a known fact — the
+	 * engine-path twin of the unit-level `golden()` helper. `setSection` passes no
+	 * write deps (production uses the real probe), so the tests pin the probe by
+	 * wrapping the section — the CONFIG_SECTIONS-mutation seam's spirit, hermetic.
+	 */
+	function vmSectionWithGolden(exists: boolean) {
+		return {
+			...vmSection,
+			write: (s: Settings, vals: Record<string, string>) => vmSection.write(s, vals, { goldenExists: () => exists }),
+		};
+	}
+
 	it("setSection picks vm from the registry and applies the answers (the `config set vm` engine path)", async () => {
 		// flagIo keys answers by prompt message: the section picker + the two select
 		// fields' labels (an absent select answer falls back to its seeded current
@@ -301,7 +477,11 @@ describe("`config set vm` — the section wizard reaches the vm section", () => 
 			"Guest memory (MiB)": "8192",
 			"Overlay persist": "retain",
 		});
-		const result = await setSection(defaultSettings(), { io, stream: silentStream });
+		const result = await setSection(defaultSettings(), {
+			io,
+			stream: silentStream,
+			sections: [vmSectionWithGolden(true)],
+		});
 		expect(result).toMatchObject({
 			ok: true,
 			value: {
@@ -317,12 +497,19 @@ describe("`config set vm` — the section wizard reaches the vm section", () => 
 		// null cancelling the whole write.
 		const io = flagIo({ [SECTION_SELECT_PROMPT]: "vm", "Boot mode": "vm" });
 		const s = withVm({ mode: "agent", memoryMb: 6144, cpus: 8, persist: "retain" });
-		const result = await setSection(s, { io, stream: silentStream });
+		const result = await setSection(s, { io, stream: silentStream, sections: [vmSectionWithGolden(true)] });
 		expect(result).toMatchObject({
 			ok: true,
 			value: {
 				vm: { mode: "vm", memoryMb: 6144, cpus: 8, persist: "retain" }, // only mode changed
 			},
 		});
+	});
+
+	it("the engine path hits the no-golden guard too — the write throws and setSection rejects", async () => {
+		const io = flagIo({ [SECTION_SELECT_PROMPT]: "vm", "Boot mode": "vm" });
+		await expect(
+			setSection(defaultSettings(), { io, stream: silentStream, sections: [vmSectionWithGolden(false)] }),
+		).rejects.toThrow(NO_GOLDEN_GUARD_MESSAGE);
 	});
 });

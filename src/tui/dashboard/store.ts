@@ -28,6 +28,7 @@
  * sites stay green during the incremental rebuild.
  */
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
+import { goldenManifestExists } from "../../config/sections.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultSettings } from "../../config/settings.ts";
 import { resolveConfig } from "../../config.ts";
@@ -84,6 +85,15 @@ export interface DashboardStoreDeps {
 	 * inject a literal so the vm-root path never touches disk.
 	 */
 	guestUser?: () => string;
+	/**
+	 * The golden-manifest probe behind {@link DashboardStore.hasGolden} (the
+	 * Install-item's visibility, spec 28 box 28c). Defaults to
+	 * `goldenManifestExists` (config/sections.ts) — the SAME probe the vm write
+	 * guard runs, so the affordance and the guard can never disagree. Tests inject
+	 * a constant; like `guestUser`, the default is lazy (getter) so stores that
+	 * never render the Sandbox screen never touch disk.
+	 */
+	goldenExists?: () => boolean;
 }
 
 /**
@@ -117,6 +127,18 @@ export class DashboardStore {
 	 * still says `off` (a boot-time `MCP_VM_MODE` override the doc lags behind).
 	 */
 	vmObserved = false;
+	/**
+	 * True when a vm settings write is SAVED but not yet applied by a running
+	 * server (spec 28, matrix row 3): the dashboard restarted nothing (no
+	 * `restartServer` seam — unowned/hermetic) or its restart attempt failed. The
+	 * settings/sandbox surfaces render the apply-on-restart affordance from this
+	 * (the flash + the header `note:` row); a successful apply clears it. It is a
+	 * hint, not state authority — a server restarted OUTSIDE the dashboard (the
+	 * operator's own `openhammer` relaunch) also applies the change without
+	 * touching this flag; the note merely stays until a dashboard-visible apply
+	 * succeeds.
+	 */
+	vmApplyPending = false;
 
 	/** The connected-client reducer (call counts + last-seen), reused from monitor. */
 	private readonly monitor: MonitorState;
@@ -130,10 +152,15 @@ export class DashboardStore {
 	private readonly guestUser: (() => string) | undefined;
 	/** Memoized guest-root value; `undefined` = not computed yet, `null` = unresolvable. */
 	private vmRootCache: string | null | undefined = undefined;
+	/** The golden-manifest probe {@link hasGolden} resolves through (injectable; avoids disk). */
+	private readonly goldenExists: () => boolean;
+	/** Memoized has-golden value; `undefined` = not computed yet (lazy, like {@link vmRootCache}). */
+	private hasGoldenCache: boolean | undefined = undefined;
 
 	/**
 	 * @param deps.monitorLimit the events-ring cap; `env`/`guestUser` the guest-root
-	 * resolution seams (defaults: `process.env` / the spec-26 guest doc).
+	 * resolution seams (defaults: `process.env` / the spec-26 guest doc); `goldenExists`
+	 * the Install-item visibility probe (default: the real newest-golden scan).
 	 * @param initial the seed settings (channels/default/mcp); defaults to empty.
 	 */
 	constructor(deps: DashboardStoreDeps = {}, initial: Settings = emptySettings()) {
@@ -142,6 +169,7 @@ export class DashboardStore {
 		this.settings = initial;
 		this.env = deps.env ?? process.env;
 		this.guestUser = deps.guestUser;
+		this.goldenExists = deps.goldenExists ?? goldenManifestExists;
 	}
 
 	/** The configured channels (a view over {@link settings}). */
@@ -184,6 +212,11 @@ export class DashboardStore {
 	/** Update the operator-login-configured flag (after `set-login` or on construction). */
 	setLoginConfigured(value: boolean): void {
 		this.loginConfigured = value;
+	}
+
+	/** Set the saved-but-not-applied vm settings flag (the row-3 apply affordance's source). */
+	setVmApplyPending(value: boolean): void {
+		this.vmApplyPending = value;
 	}
 
 	/**
@@ -248,6 +281,22 @@ export class DashboardStore {
 			}
 		}
 		return this.vmRootCache;
+	}
+
+	/**
+	 * Does a bootable golden exist (spec 28, box 28c)? Gates the Sandbox screen's
+	 * *Install sandbox* row — the item is HIDDEN when this is true ("shown only
+	 * when no golden manifest exists"). The probe is the SAME one the vm write
+	 * guard runs (`goldenManifestExists`, preflight's exact check-5 posture: the
+	 * NEWEST golden's manifest must be valid), so the affordance and the guard can
+	 * never disagree. Lazy + memoized like {@link vmRoot} — stores that never
+	 * render the Sandbox screen never touch disk.
+	 */
+	get hasGolden(): boolean {
+		if (this.hasGoldenCache === undefined) {
+			this.hasGoldenCache = this.goldenExists();
+		}
+		return this.hasGoldenCache;
 	}
 }
 

@@ -65,6 +65,33 @@ function seedSettings(home: string, settings: Settings): void {
 	writeFileSync(join(dir, "config.json"), JSON.stringify(settings));
 }
 
+/**
+ * Seed a minimal BOOTABLE golden under `home` (a valid `manifest.json` — the
+ * normalizeManifest shape). The spec-28c no-golden mode guard blocks every
+ * `vm.mode` write that resolves to vm/agent without one, so the flag-path tests
+ * that write vm fields on a vm-mode doc must install the precondition first.
+ */
+function seedGolden(home: string): void {
+	const dir = join(home, ".openhammer", "vm", "images", "golden-4.0.3-20260911-101112");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(
+		join(dir, "manifest.json"),
+		JSON.stringify({
+			id: "golden-4.0.3-20260911-101112",
+			flavor: "base",
+			guestUser: "sandbox",
+			rootDir: "/home/sandbox",
+			isoVersion: "4.0.3",
+			isoUrl: "https://example.invalid/omarchy-4.0.3.iso",
+			isoSha256: "a".repeat(64),
+			diskVirtualSizeBytes: 42949672960,
+			provisionScriptHashes: null,
+			builtAt: "2026-09-11T10:11:12Z",
+			encrypt: false,
+		}),
+	);
+}
+
 /** A recording channel/config handler fake — captures the routed `sub` + `rest`. */
 function fakeHandler() {
 	const calls: Array<{ sub: string | undefined; rest: string[] }> = [];
@@ -546,6 +573,7 @@ describe("dispatch — non-interactive flag mode (spec 20g)", () => {
 					secretsDir: "/vm/secrets",
 				},
 			});
+			seedGolden(home); // the spec-28c no-golden guard blocks vm-mode writes without a bootable golden
 			const out = recordingStream();
 			const code = await dispatch(parsed("config", ["set", "vm.mode", "vm"]), { stdout: out.stream });
 			expect(code).toBe(0);
@@ -571,6 +599,7 @@ describe("dispatch — non-interactive flag mode (spec 20g)", () => {
 				...defaultSettings(),
 				vm: { ...defaultVmSettings(), mode: "agent", persist: "discard" },
 			});
+			seedGolden(home); // the resolved mode stays "agent" — the spec-28c guard wants a bootable golden
 			const out = recordingStream();
 			const code = await dispatch(parsed("config", ["set", "vm.persist", "retain"]), { stdout: out.stream });
 			expect(code).toBe(0);
