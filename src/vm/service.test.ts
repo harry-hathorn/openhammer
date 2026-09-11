@@ -2,6 +2,13 @@
 // against recorded serial fixtures". Every external effect is a scripted fake (the
 // VmServiceDeps seams); the serial/ssh shapes are quoted from the 22-measured run logs,
 // so the machine is driven by recordings of the real boot, never by KVM/QEMU/ssh.
+//
+// REPLAY-FIXTURE MAP (spec 27's "replay fixtures … are committed" — traceability only,
+// nothing is extracted or duplicated): the recordings are the consts below — the
+// SERIAL_ENCRYPTED/SERIAL_UNENCRYPTED prompts, the USERNET_TABLE row, GOLDEN_KNOWN_HOSTS,
+// and the sshExec fake's "Connection refused" stderr — and the tests that replay them for
+// unlock/readiness are "encrypted unlock (phase 1)" (both its), the "unencrypted happy
+// path" boot-to-ready, and the "phase 2 failures" sshd-poll tests.
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";

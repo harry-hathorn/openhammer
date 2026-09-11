@@ -53,7 +53,8 @@
 		"test:compose:real": "docker compose --profile real up --build --exit-code-from real-test-runner --abort-on-container-exit real-test-runner",
 		"test:in-container": "docker compose run --rm dev npm test",
 		"test:tunnel": "bash scripts/test-tunnel.sh",
-		"test:tunnel:ngrok": "bash scripts/test-tunnel-ngrok.sh"
+		"test:tunnel:ngrok": "bash scripts/test-tunnel-ngrok.sh",
+		"test:vm": "bash scripts/test-vm.sh"
 	},
 	"dependencies": {
 		"@earendil-works/pi-tui": "^0.80.2",
