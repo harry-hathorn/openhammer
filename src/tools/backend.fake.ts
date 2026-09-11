@@ -136,14 +136,23 @@ export interface FakeBackendSeed {
 	/** Paths whose `writeFile` errs `EACCES` — write-permission denial (no real permission bits to clear). */
 	failWritesFor?: string[];
 	homedir?: string;
+	/**
+	 * The reported `ToolBackend.kind` (spec 27's kind seam). Defaults to
+	 * `"local"`; the fake always *behaves* locally — nothing here runs a guest —
+	 * so this only relabels `backend.kind` for tools that legitimately branch on
+	 * it (guide's vm variant), letting their tests express the mode without a
+	 * real sandbox.
+	 */
+	kind?: ToolBackend["kind"];
 }
 
 /** The scripted, spawn-free backend (see the module comment for fidelity rules). */
 export class FakeBackend implements ToolBackend {
-	// `kind` is "local": the fake imitates the local backend's shape, and tools
-	// must never branch on `kind` (spec 23) — reporting anything else here would
-	// invite exactly that branching.
-	readonly kind: "local" = "local";
+	// `kind` defaults to "local" (the fake imitates the local backend's shape and
+	// always behaves locally); the seed may relabel it "vm" (spec 27) for the one
+	// tool that legitimately branches on kind — guide's vm variant. Spec 23's
+	// "tools don't branch on kind" rule now has exactly one sanctioned exception.
+	readonly kind: ToolBackend["kind"];
 
 	private readonly files = new Map<string, Buffer>();
 	private readonly fileMtimes = new Map<string, number>();
@@ -168,6 +177,7 @@ export class FakeBackend implements ToolBackend {
 	readonly probeFlagCalls: Array<{ bin: string; flag: string }> = [];
 
 	constructor(seed: FakeBackendSeed = {}) {
+		this.kind = seed.kind ?? "local";
 		this.script = [...(seed.script ?? [])];
 		this.probeTable = seed.probeResults ?? {};
 		this.probeFlagTable = seed.probeFlagResults ?? {};

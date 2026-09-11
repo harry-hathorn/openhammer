@@ -6,6 +6,13 @@
  * capability tools one line each, and the workflow notes (bounded output, no memory
  * between calls, jail `bash` in a container).
  *
+ * Spec 27 adds one variant: a VM-mode boot (`MCP_VM_MODE=vm|agent`) threads a backend
+ * whose `kind` is "vm" (the DelegatingBackend over the guest), and the guide keys off
+ * that alone — the working root it names is then the GUEST root (27b: `MCP_ROOT_DIR`
+ * is a guest absolute path in VM modes) and the container note becomes the VM
+ * boundary note. `agent` mode shares this variant for now; its six doctrine blocks
+ * are spec 29.
+ *
  * This is spec 18's chosen alternative to bloating every capability tool's
  * description with a working-root line — definitions stay lean and precise, and the
  * guide evolves as the MCP grows. The 7 capability tools are unchanged; `guide` is
@@ -15,14 +22,27 @@
  * unit-tested without driving the tool); `execute` wraps it in a single text `ToolOk`.
  */
 import type { ToolModule, ToolOk } from "../mcp/types.ts";
+import type { ToolBackend } from "./backend.ts";
 import { ok } from "./result.ts";
 
 /**
- * Build the orientation markdown. Pure — `rootDir` is the only input and is
- * interpolated as the absolute working root (it arrives already resolved via
- * `config.rootDir`, which resolves `MCP_ROOT_DIR` absolute at boot).
+ * Build the orientation markdown. Pure — the text is a function of two inputs.
+ * `rootDir` is interpolated as the absolute working root (it arrives already
+ * resolved via `config.rootDir`, which resolves `MCP_ROOT_DIR` absolute at
+ * boot; in a VM mode it is already the guest path, so the working-root line
+ * names the guest root verbatim). `kind` selects the isolation note: `"local"`
+ * (the default — every pre-27 caller) keeps the container line, `"vm"` (a
+ * VM-mode boot's backend) replaces it with the VM boundary line. Agent mode
+ * reports kind "vm" too and shares the variant (its doctrine blocks are spec 29).
  */
-export function buildGuide(rootDir: string): string {
+export function buildGuide(rootDir: string, kind: ToolBackend["kind"] = "local"): string {
+	// The variant's only word-level difference (spec 27: "the VM is the boundary —
+	// bash reaches anything in the guest, nothing on the host; all paths are guest
+	// paths" — three clauses, guide's own bullet voice).
+	const isolationNote =
+		kind === "vm"
+			? "- The VM is the boundary — `bash` reaches anything in the guest, nothing on the host; all paths are guest paths."
+			: "- `bash` can reach anything the OS user can. Run OpenHammer in a container to jail it.";
 	return [
 		"# OpenHammer",
 		"",
@@ -46,7 +66,7 @@ export function buildGuide(rootDir: string): string {
 		"",
 		"- Output is bounded: each tool truncates large results, and an oversized whole response is replaced with a single `response_too_large` notice.",
 		"- There is no memory between calls — state lives in files under the working root, not in the server.",
-		"- `bash` can reach anything the OS user can. Run OpenHammer in a container to jail it.",
+		isolationNote,
 		"",
 		"_This guide evolves as OpenHammer grows._",
 	].join("\n");
@@ -60,7 +80,10 @@ export const guideTool: ToolModule = {
 		properties: {},
 	},
 	async execute(_args, ctx) {
-		const toolOk: ToolOk = { content: [{ type: "text", text: buildGuide(ctx.rootDir) }] };
+		// The backend kind is the mode signal (spec 27): LocalBackend reports "local",
+		// a VM-mode boot's DelegatingBackend reports "vm". The variant switch lives in
+		// buildGuide; ToolContext stays {rootDir, backend}.
+		const toolOk: ToolOk = { content: [{ type: "text", text: buildGuide(ctx.rootDir, ctx.backend.kind) }] };
 		return ok(toolOk);
 	},
 };
