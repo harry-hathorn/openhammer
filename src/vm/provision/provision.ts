@@ -19,6 +19,15 @@
  *   QEMU layer (24c's `MONITOR_EDID` on the display device, in every qemuBootArgs argv),
  *   NOT in a guest hyprland conf — there is no guest-side monitor step here, by design.
  *
+ * THE 27K SHIP-GATE AMENDMENT: the pass also writes the logind drop-in
+ * `/etc/systemd/logind.conf.d/99-openhammer-powerkey.conf` =
+ * `[Login]\nHandlePowerKey=poweroff\n`. Omarchy ships `HandlePowerKey=ignore`, which made
+ * the ACPI power button — QMP `system_powerdown`'s only guest lever — a no-op, so the
+ * service's 180 s clean-poweroff budget expired into the stop ladder on every session
+ * teardown. The drop-in is read at EVERY boot; logind is deliberately NOT restarted at
+ * provision time (restarting it can kill our own ssh session) — the next boot is all the
+ * gate and the product need.
+ *
  * DIRECT BOOT, NOT AN OVERLAY: provision boots the install session's disk.qcow2 DIRECTLY
  * (qemuBootArgs's session-boot shape pointing at `<session>/disk.qcow2`). This is the one
  * product boot that mutates a base disk ON PURPOSE — the session is a BUILD, not a golden,
@@ -96,6 +105,19 @@ export const SDDM_CONF_DEST = "/etc/sddm.conf.d/99-openhammer-autologin.conf";
 
 /** The staging path the conf rides through (stdin over the wire, then `sudo install`). */
 const SDDM_CONF_STAGING = "/tmp/openhammer-sddm-autologin.conf";
+
+/**
+ * The logind power-key drop-in (27k ship gate): Omarchy ships `HandlePowerKey=ignore`,
+ * which makes the ACPI power button — QMP `system_powerdown`'s only guest lever — a
+ * no-op, so every later session's clean-poweroff budget expired into the stop ladder.
+ */
+export const LOGIND_POWERKEY_DEST = "/etc/systemd/logind.conf.d/99-openhammer-powerkey.conf";
+
+/** The staging path the drop-in rides through (stdin over the wire, then `sudo install`). */
+const LOGIND_POWERKEY_STAGING = "/tmp/openhammer-logind-powerkey.conf";
+
+/** The drop-in's exact content — read at every boot (no logind restart at provision time). */
+export const LOGIND_POWERKEY_CONF = "[Login]\nHandlePowerKey=poweroff\n";
 
 /** Finding 12's file: what `omarchy default agent` (the getter) reads. */
 export const AGENT_DEFAULTS_PATH = "~/.config/omarchy/defaults/agent";
@@ -279,8 +301,9 @@ async function waitQemuExit(
 /**
  * `openhammer vm provision` (spec 26d) — boot the newest complete install session DIRECTLY
  * (headless, its own serial/stderr evidence files), gate on ssh, run the idempotent pass
- * (packages → SDDM autologin → agent defaults file → rc env lines → boot hook →
- * `~/.openhammer` dir → host-key capture → agent pre-warm → the operator's provision.sh),
+ * (packages → SDDM autologin → agent defaults file → rc env lines → logind power-key
+ * drop-in → boot hook → `~/.openhammer` dir → host-key capture → agent pre-warm → the
+ * operator's provision.sh),
  * verify the spec's manual-gate assertions in-pass, then power the guest down cleanly.
  * Throws with actionable evidence on any failure (the session dir is kept — it is the
  * thing being fixed, and `vm provision` reruns idempotently).
@@ -512,7 +535,20 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 			}
 		}
 
-		// ---- (e) bootCommands as Omarchy's own post-boot hook; EMPTY means SKIP — no
+		// ---- (e) logind power-key drop-in (27k ship gate): Omarchy ships
+		// `HandlePowerKey=ignore`, so the ACPI power button — QMP `system_powerdown`'s
+		// only guest lever — is a no-op and every session teardown expires into the stop
+		// ladder. The drop-in is read at every boot; NO logind restart here (restarting
+		// logind can kill our own ssh session). Rerun rewrites identical bytes; the
+		// `install -D` creates the conf.d directory. ----
+		must(
+			await exec(`cat > ${LOGIND_POWERKEY_STAGING}`, { stdin: LOGIND_POWERKEY_CONF }),
+			`cat > ${LOGIND_POWERKEY_STAGING}`,
+		);
+		const installPowerkey = `install -D -m 644 ${LOGIND_POWERKEY_STAGING} ${LOGIND_POWERKEY_DEST}`;
+		must(await sudo(installPowerkey), installPowerkey);
+
+		// ---- (f) bootCommands as Omarchy's own post-boot hook; EMPTY means SKIP — no
 		// empty hook file for a future boot to execute. The rewrite is identical bytes. ----
 		if (config.bootCommands.length > 0) {
 			await exec("mkdir -p ~/.config/omarchy/hooks/post-boot.d");
@@ -526,11 +562,11 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 			log("provision: bootCommands empty — no boot hook written");
 		}
 
-		// ---- (f) the dir only: `~/.openhammer/env` itself is spec 29's session-start
+		// ---- (g) the dir only: `~/.openhammer/env` itself is spec 29's session-start
 		// secret push — creating the dir now keeps the rc line's own guard cheap. ----
 		await exec("mkdir -p ~/.openhammer");
 
-		// ---- (g) host-key capture: THE pin source — future pinned sessions verify
+		// ---- (h) host-key capture: THE pin source — future pinned sessions verify
 		// against this file (spec 26). The installed system's keys are stable across
 		// boots, so a rerun rewrites the same bytes. ----
 		const keyscanFn =
@@ -553,7 +589,7 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 		chmodSync(knownHostsPath, 0o600); // writeFileSync mode only applies at creation
 		log(`provision: host key captured → ${knownHostsPath} (0600)`);
 
-		// ---- (h) agent pre-warm: BEST-EFFORT — resolve the mise stub once so the first
+		// ---- (i) agent pre-warm: BEST-EFFORT — resolve the mise stub once so the first
 		// real invocation does not pay the stub setup. Full cache warming (the measured
 		// ~206 MB first-run growth) is the operator's provision.sh territory. ----
 		const prewarmCommand = `~/.local/bin/${config.agent} --version || true`;
@@ -563,7 +599,7 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 				? `'${prewarmCommand}' exited 0 (${prewarmed.stdoutTail.trim().split(/\r?\n/)[0] ?? ""})`
 				: `'${prewarmCommand}' exited ${prewarmed.code} (best-effort, logged): ${prewarmed.stderrTail.trim()}`;
 
-		// ---- (i) the operator's provision.sh: streamed to the guest and run with bash;
+		// ---- (j) the operator's provision.sh: streamed to the guest and run with bash;
 		// NON-ZERO = provision FAILURE — the operator's script is authoritative. ----
 		const scriptPath = join(dirs.root, PROVISION_SCRIPT);
 		if (existsSync(scriptPath)) {
@@ -631,6 +667,12 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 				`grep -q openhammer/env ~/${rcFile} exited ${present.code}`,
 			);
 		}
+		const powerkey = await exec(`grep -q HandlePowerKey=poweroff ${LOGIND_POWERKEY_DEST}`);
+		addCheck(
+			"powerkey-dropin",
+			powerkey.code === 0,
+			`grep -q HandlePowerKey=poweroff ${LOGIND_POWERKEY_DEST} exited ${powerkey.code}`,
+		);
 		const failed = checks.filter((check) => !check.ok);
 		if (failed.length > 0) {
 			throw new Error(
