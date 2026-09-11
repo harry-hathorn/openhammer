@@ -322,6 +322,73 @@ describe("sweepStaleSessions", () => {
 		const report = await sweepStaleSessions({ homeDir: home });
 		expect(report).toEqual({ killed: 0, skippedForeign: 0, removedDirs: 0, bytesReclaimed: 0 });
 	});
+
+	it("preserve: a dead pid's dir in the preserve set is KEPT and counted preserved (the pinned-retain recovery dir)", async () => {
+		const home = tempHome();
+		const fixture = writeSession(home, "pinned-dead", "999", 40);
+		const { deps, kills } = sweepDeps(home, {}); // pid 999 → no identity → dead, but pinned
+		const report = await sweepStaleSessions(deps, { preserve: new Set(["pinned-dead"]) });
+		expect(report).toEqual({ killed: 0, skippedForeign: 0, removedDirs: 0, bytesReclaimed: 0, preserved: 1 });
+		expect(kills).toEqual([]);
+		expect(statSync(fixture.dir, { throwIfNoEntry: false })).toBeDefined();
+	});
+
+	it("preserve: a live-ours orphan in the preserve set is SIGKILLed but its dir KEPT (the retained reuse path)", async () => {
+		const home = tempHome();
+		const fixture = writeSession(home, "pinned-ours", "4242", 1000);
+		const { deps, kills } = sweepDeps(home, {
+			4242: { comm: "qemu-system-x86", cmdline: "/usr/bin/qemu-system-x86_64 -name openhammer-vm-pinned-ours" },
+		});
+		const report = await sweepStaleSessions(deps, { preserve: new Set(["pinned-ours"]) });
+		expect(report).toEqual({ killed: 1, skippedForeign: 0, removedDirs: 0, bytesReclaimed: 0, preserved: 1 });
+		expect(kills).toEqual([{ pid: 4242, signal: "SIGKILL" }]);
+		expect(statSync(fixture.dir, { throwIfNoEntry: false })).toBeDefined();
+	});
+
+	it("preserve: a kill racing ESRCH on a preserved dir keeps the dir too (stale-but-pinned)", async () => {
+		const home = tempHome();
+		const fixture = writeSession(home, "pinned-raced", "31337", 10);
+		const kills: Array<{ pid: number; signal: string }> = [];
+		const deps: SweepDeps = {
+			homeDir: home,
+			readProc: (): ProcIdentity => ({ comm: "qemu-system-x86", cmdline: "/usr/bin/qemu-system-x86_64" }),
+			kill: (pid: number, signal: "SIGKILL"): void => {
+				kills.push({ pid, signal });
+				throw new Error("kill ESRCH");
+			},
+		};
+		const report = await sweepStaleSessions(deps, { preserve: new Set(["pinned-raced"]) });
+		expect(kills).toEqual([{ pid: 31337, signal: "SIGKILL" }]);
+		expect(report).toEqual({ killed: 0, skippedForeign: 0, removedDirs: 0, bytesReclaimed: 0, preserved: 1 });
+		expect(statSync(fixture.dir, { throwIfNoEntry: false })).toBeDefined();
+	});
+
+	it("preserve changes nothing for a foreign-pid dir: skipped-foreign, kept, no preserved removal", async () => {
+		const home = tempHome();
+		const fixture = writeSession(home, "pinned-foreign", "777", 500);
+		const { deps, kills } = sweepDeps(home, { 777: { comm: "chrome", cmdline: "/usr/bin/chrome" } });
+		const report = await sweepStaleSessions(deps, { preserve: new Set(["pinned-foreign"]) });
+		expect(report).toEqual({ killed: 0, skippedForeign: 1, removedDirs: 0, bytesReclaimed: 0, preserved: 0 });
+		expect(kills).toEqual([]);
+		expect(statSync(fixture.dir, { throwIfNoEntry: false })).toBeDefined();
+	});
+
+	it("preserve is by NAME: the named dir is kept, every other dir sweeps as today", async () => {
+		const home = tempHome();
+		const pinned = writeSession(home, "pinned-mixed", "999", 40);
+		const other = writeSession(home, "unpinned-mixed", "998", 10);
+		const { deps } = sweepDeps(home, {});
+		const report = await sweepStaleSessions(deps, { preserve: new Set(["pinned-mixed"]) });
+		expect(report).toEqual({
+			killed: 0,
+			skippedForeign: 0,
+			removedDirs: 1,
+			bytesReclaimed: other.bytes,
+			preserved: 1,
+		});
+		expect(statSync(pinned.dir, { throwIfNoEntry: false })).toBeDefined();
+		expect(statSync(other.dir, { throwIfNoEntry: false })).toBeUndefined();
+	});
 });
 
 describe("ensureVmDir", () => {
