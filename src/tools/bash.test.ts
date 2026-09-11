@@ -78,6 +78,23 @@ describe("bashTool", () => {
 		}
 	}, 30000);
 
+	test("local over-cap: host spill unchanged — the lines footer form is byte-pinned", async () => {
+		const res = await bashTool.execute({ command: "seq 1 3000" }, { rootDir, backend });
+		const text = expectText(res);
+		// The exact footer form (the lines branch): last 2000 of 3000 lines + path.
+		expect(text).toMatch(/\n\n\[Showing lines 1001-3000 of 3000\. Full output: [^\]]+\]$/);
+		const fullPath = /\[Showing lines 1001-3000 of 3000\. Full output: ([^\]]+)\]$/.exec(text)?.[1];
+		expect(fullPath).toBeTruthy();
+		if (fullPath) {
+			// The spill exists host-side and holds the full 3000-line stream.
+			expect(existsSync(fullPath)).toBe(true);
+			const full = readFileSync(fullPath, "utf-8");
+			expect(full.startsWith("1\n")).toBe(true);
+			expect(full.endsWith("\n3000\n")).toBe(true);
+			expect(full.split("\n")).toHaveLength(3001);
+		}
+	}, 15000);
+
 	test("merges stdout and stderr into one stream", async () => {
 		const res = await bashTool.execute(
 			{ command: "echo OUT_TO_STDOUT; echo ERR_TO_STDERR >&2" },
@@ -148,6 +165,8 @@ describe("bashTool", () => {
 // FakeBackend — zero process spawns, zero host fs (outputs stay under the
 // truncation limits, so the accumulator never spills; the fake's overflowPath
 // mint is a pure string). The real-spawn counterparts live in the suite above.
+// The last test is the spec 25 exception: a vm-kind fake with OVER-cap output,
+// proving the accumulator's spill is "external" there (no host file).
 describe("bash via FakeBackend", () => {
 	const rootDir = "/work";
 
@@ -241,5 +260,28 @@ describe("bash via FakeBackend", () => {
 		});
 		const res = await bashTool.execute({ command: "kill -9 $$" }, { rootDir, backend });
 		expect(expectText(res)).toBe("partial\n");
+	});
+
+	test("vm-kind backend, over-cap output: no host spill — the footer names the GUEST path (spec 25)", async () => {
+		// The parity hazard this box closes: with kind "vm" the overflowPath is a
+		// GUEST path string; before the spill split, a truncated output made the
+		// accumulator host-write to it — a stray host file (or, with the fake's
+		// /tmp/fake parent absent, an ENOENT stream error that narrowed the whole
+		// result to err). Now: ok, footer naming the guest path, host fs untouched.
+		const flood = Array.from({ length: 3000 }, (_, i) => `line ${i + 1}`).join("\n");
+		const backend = fakeBackend({
+			dirs: [rootDir],
+			kind: "vm",
+			script: [{ match: "flood", result: { exitCode: 0 }, stdout: flood }],
+		});
+		const res = await bashTool.execute({ command: "flood" }, { rootDir, backend });
+		const text = expectText(res); // ok — the pre-fix code errored here
+		// The footer names the fake's guest-shaped overflow path, byte-exact —
+		// which also proves no host mint happened (a minted path would differ).
+		expect(text.endsWith("\n\n[Showing lines 1001-3000 of 3000. Full output: /tmp/fake/openhammer-1.log]")).toBe(
+			true,
+		);
+		// No host file exists at the guest path — the guest tee owns the copy.
+		expect(existsSync("/tmp/fake/openhammer-1.log")).toBe(false);
 	});
 });

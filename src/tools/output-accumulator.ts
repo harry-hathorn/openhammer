@@ -16,6 +16,13 @@
  * `backend.overflowPath("openhammer")` (identical path shape locally — prefix +
  * 8 hex + `.log` under the tmpdir — a guest path in VM mode, spec 25); when no
  * path is provided the internal mint from `tempFilePrefix` remains the fallback.
+ * Spec 25 adds `spill`: `"host"` (the default) is the behavior above;
+ * `"external"` says the CALLER owns the full-output copy elsewhere — VM-mode
+ * `bash` passes it because the runShell wrapper's guest-side `tee` already owns
+ * the full output at the provided `tempFilePath`. External never touches the
+ * host fs (no `createWriteStream`, no mint) and `snapshot()` still reports the
+ * provided path once truncated, so the `Full output:` footer names where the
+ * client fetches the full output (`read` resolves the guest path).
  */
 
 import { randomBytes } from "node:crypto";
@@ -28,13 +35,24 @@ export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
 	tempFilePrefix?: string;
-	/** Exact path for the overflow temp file (spec 23: `backend.overflowPath`). When omitted, one is minted from `tempFilePrefix` under the OS tmpdir. Used verbatim — the file is still created lazily, only if the output spills. */
+	/** Exact path for the overflow temp file (spec 23: `backend.overflowPath`). When omitted, one is minted from `tempFilePrefix` under the OS tmpdir. Used verbatim — the file is still created lazily, only if the output spills. Under `spill: "external"` it names the caller's copy, never a host file. */
 	tempFilePath?: string;
+	/**
+	 * Who owns the full-output copy once the stream truncates. `"host"` (the
+	 * default — today's behavior) spills to a host temp file at `tempFilePath`
+	 * (or a minted one). `"external"` (spec 25, VM mode): the caller owns the
+	 * copy elsewhere — the guest-side `tee` at `tempFilePath` — so no host file
+	 * is ever created or minted, and `snapshot().fullOutputPath` reports the
+	 * provided `tempFilePath` (a GUEST path, meaningful to the client via
+	 * `read`) once truncated.
+	 */
+	spill?: "host" | "external";
 }
 
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
+	/** Host spill: the spill file's path once one exists. External spill: the provided path of the caller-owned copy, once truncated (never a host file). Undefined otherwise. */
 	fullOutputPath?: string;
 }
 
@@ -60,6 +78,7 @@ export class OutputAccumulator {
 	private readonly maxRollingBytes: number;
 	private readonly tempFilePrefix: string;
 	private readonly providedTempFilePath: string | undefined;
+	private readonly spill: "host" | "external";
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
@@ -83,6 +102,7 @@ export class OutputAccumulator {
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "openhammer";
 		this.providedTempFilePath = options.tempFilePath;
+		this.spill = options.spill ?? "host";
 	}
 
 	append(data: Buffer): void {
@@ -93,6 +113,13 @@ export class OutputAccumulator {
 		this.totalRawBytes += data.length;
 		this.appendDecodedText(this.decoder.decode(data, { stream: true }));
 
+		if (this.spill === "external") {
+			// The caller owns the full-output copy (vm mode: the guest-side tee),
+			// so there is no host spill to seed — nothing is retained beyond the
+			// decoded tail (still bounded by the trim), and the host fs is never
+			// touched.
+			return;
+		}
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
 			this.tempFileStream?.write(data);
@@ -107,7 +134,7 @@ export class OutputAccumulator {
 		}
 		this.finished = true;
 		this.appendDecodedText(this.decoder.decode());
-		if (this.shouldUseTempFile()) {
+		if (this.spill === "host" && this.shouldUseTempFile()) {
 			this.ensureTempFile();
 		}
 	}
@@ -131,14 +158,19 @@ export class OutputAccumulator {
 			maxBytes: this.maxBytes,
 		};
 
-		if (options.persistIfTruncated && truncation.truncated) {
+		if (this.spill === "host" && options.persistIfTruncated && truncation.truncated) {
 			this.ensureTempFile();
 		}
+		// Host: the spill file's path once one exists. External: the caller-provided
+		// path of the copy the CALLER owns (never created host-side here), reported
+		// once truncated so the footer can name it.
+		const externalCopyPath =
+			this.spill === "external" && truncation.truncated ? this.providedTempFilePath : undefined;
 
 		return {
 			content: truncation.content,
 			truncation,
-			fullOutputPath: this.tempFilePath,
+			fullOutputPath: this.tempFilePath ?? externalCopyPath,
 		};
 	}
 
