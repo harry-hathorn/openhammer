@@ -4,6 +4,7 @@ import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultVmSettings } from "../../config/settings.ts";
 import type { VmStateLine } from "../../observability/status-socket.ts";
 import { err, ok, type Result } from "../../tools/result.ts";
+import { defaultGuestConfig, type GuestConfig } from "../../vm/provision/guest-config.ts";
 import { activeSessionRefusal } from "../../vm/provision/install.ts";
 import { createSandboxActions, VM_UNOWNED_HINT } from "../dashboard.ts";
 import { createStyle } from "../style.ts";
@@ -75,6 +76,10 @@ function fakeActions(log: string[]): DashboardActions {
 		configureVm: async () => {
 			log.push("configureVm");
 			return ok(seed()) as Result<Settings, Error>;
+		},
+		guestSetup: async () => {
+			log.push("guestSetup");
+			return ok(defaultGuestConfig()) as Result<GuestConfig, Error>;
 		},
 		installSandbox: async () => {
 			log.push("installSandbox");
@@ -384,7 +389,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		return root;
 	}
 
-	it("the screen lists Stop / Restart / Configure / Serial tail / Back — Install only with no golden", async () => {
+	it("the screen lists Stop / Restart / Configure / Guest setup / Serial tail / Back — Install only with no golden", async () => {
 		// Rendered wide (200): renderList truncates each row to the width, and the stop
 		// subtitle only fits its full semantics text on a wide terminal — at 80 the
 		// first clause ("power down now — the boot-scoped mode re-boots…") is what shows.
@@ -392,6 +397,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(lines.some((l) => l.includes("Stop sandbox…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Restart sandbox…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Configure…"))).toBe(true);
+		expect(lines.some((l) => l.includes("Guest setup…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Serial tail"))).toBe(true);
 		expect(lines.some((l) => l.includes("Back"))).toBe(true);
 		expect(lines.some((l) => l.includes("re-boots the sandbox on the next server start"))).toBe(true);
@@ -427,7 +433,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 3 = Serial tail (Configure joined at focus 2, box 28c)
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 4 = Serial tail (Configure at 2 + Guest setup at 3, boxes 28c/28e)
 		await flushActions();
 		expect(log).toEqual(["readSerial"]);
 		expect(root.screen).toEqual({ kind: "serial" });
@@ -449,7 +456,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 3 = Serial tail
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 4 = Serial tail
 		await flushActions();
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
 		expect(root.render(80).some((l) => l.includes("no serial yet"))).toBe(true);
@@ -500,7 +508,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install (no golden — the row exists)
+		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Install (no golden — the row exists; Guest setup joined at 3, box 28e)
 		root.handleInput(ENTER);
 		await flushActions();
 		const lines = root.render(80);
@@ -517,7 +525,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install
+		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Install
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(root.render(80).some((l) => l.includes("vm install: gate failed"))).toBe(true);
@@ -571,6 +579,78 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 		root.handleInput(ENTER); // -> Sandbox
 		await flushActions();
 		expect(root.render(80).some((l) => l.includes(`note: ${VM_APPLY_HINT}`))).toBe(true);
+	});
+});
+
+describe("DashboardRoot — Guest setup entry (spec 28, box 28e)", () => {
+	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter) — the per-box helper. */
+	async function sandboxed(
+		log: string[],
+		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+	): Promise<DashboardRoot> {
+		const root = vmRooted(log, "vm", actionsOver);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		return root;
+	}
+
+	it("enter on Guest setup runs guestSetup and flashes the applies-to-next-install line", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 3 = Guest setup (beside Configure at 2)
+		await flushActions();
+		expect(log).toEqual(["guestSetup"]);
+		expect(root.render(80).some((l) => l.includes("Guest setup saved — applies to the next `vm install`."))).toBe(
+			true,
+		);
+	});
+
+	it("a failed guest setup flashes the wizard's err inline and stays on the sandbox screen", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			// The override replaces the logging fake, so it logs the call itself.
+			guestSetup: async () => {
+				log.push("guestSetup");
+				return err(new Error('hostname "my host" is not a valid host label (letters, digits, hyphens)')) as Result<
+					GuestConfig,
+					Error
+				>;
+			},
+		}));
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 3 = Guest setup
+		await flushActions();
+		expect(log).toEqual(["guestSetup"]);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		expect(
+			root
+				.render(80)
+				.some((l) => l.includes('hostname "my host" is not a valid host label (letters, digits, hyphens)')),
+		).toBe(true);
+	});
+
+	it("a cancelled/declined guest setup (null) is silent — the cancelled-modal idiom", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			// The override replaces the logging fake, so it logs the call itself.
+			guestSetup: async () => {
+				log.push("guestSetup");
+				return null;
+			},
+		}));
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 3 = Guest setup
+		await flushActions();
+		expect(log).toEqual(["guestSetup"]);
+		expect(root.render(80).some((l) => l.includes("Guest setup saved"))).toBe(false); // no flash
 	});
 });
 
@@ -634,7 +714,7 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // line says inactive — the vm-side scan is the race backstop
 		);
-		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install (stopped → the row exists)
+		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Install (stopped → the row exists)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(
