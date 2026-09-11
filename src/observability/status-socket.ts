@@ -23,6 +23,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RequestEvent, RequestRecorder } from "../mcp/telemetry.ts";
+import type { VmStatus } from "../vm/service.ts";
 
 const SOCKET_DIR = ".openhammer";
 const SOCKET_FILE = "openhammer.sock";
@@ -101,6 +102,92 @@ export function parseChannelStateLine(line: string): ChannelStateLine | null {
 }
 
 /**
+ * A vm-state line — the server's report of the VM sandbox's live boot lifecycle
+ * (spec 27 "Observability"), shaped like {@link ChannelStateLine}: a `type`
+ * discriminator over the same NDJSON stream, so a client tells the three line
+ * kinds apart — a {@link RequestEvent} (no `type`), channel-state, vm-state.
+ * Carried in the connection dump (the LATEST snapshot — the socket binds after
+ * the eager-async boot may already have begun, see {@link StartStatusSocketDeps.vmState}),
+ * and every `VmService` transition streams one line to connected clients. An
+ * `off`-mode server emits none, ever (the zero-VM-code pin): no getter, no
+ * transitions — the stream is byte-for-byte the pre-27h one.
+ */
+export interface VmStateLine {
+	/** The wire discriminator — distinguishes this from the other line kinds. */
+	type: "vm-state";
+	/** The lifecycle state (`VmService`'s readiness machine, spec 27e). */
+	state: "off" | "booting" | "ready" | "stopped" | "failed";
+	/** The live session id, or `null` before one is minted/resolved. */
+	sessionId: string | null;
+	/** The boot phase (`prepare`/`spawn`/`unlock`/`ssh`/`extras`), or `null` when no boot is in flight. */
+	phase: string | null;
+	/** The guest ssh hostfwd port, or `null` before discovery. */
+	sshPort: number | null;
+	/** The failure's actionable one-liner, or `null` when the state is not `failed`. */
+	error: string | null;
+}
+
+/** Serialize a vm-state line as one NDJSON line (compact JSON + `\n`). */
+export function formatVmStateLine(line: VmStateLine): string {
+	return `${JSON.stringify(line)}\n`;
+}
+
+/** Is `v` a structurally-valid {@link VmStateLine}? */
+function isVmStateLine(v: unknown): v is VmStateLine {
+	if (!isStringRecord(v)) return false;
+	return (
+		v.type === "vm-state" &&
+		(v.state === "off" ||
+			v.state === "booting" ||
+			v.state === "ready" ||
+			v.state === "stopped" ||
+			v.state === "failed") &&
+		(v.sessionId === null || typeof v.sessionId === "string") &&
+		(v.phase === null || typeof v.phase === "string") &&
+		(v.sshPort === null || typeof v.sshPort === "number") &&
+		(v.error === null || typeof v.error === "string")
+	);
+}
+
+/**
+ * Parse one NDJSON line into a {@link VmStateLine}. Returns `null` for a blank
+ * line, malformed JSON, or a value that isn't a vm-state line (an event or
+ * channel-state line shares the socket but carries another/`no` `type`). A
+ * skipped line, never a throw — the same posture as `parseEventLine` /
+ * `parseChannelStateLine`, and the additive-parse guarantee: a future line kind
+ * parses to `null` here instead of mis-rendering or aborting the feed.
+ */
+export function parseVmStateLine(line: string): VmStateLine | null {
+	const trimmed = line.trim();
+	if (trimmed === "") return null;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	return isVmStateLine(parsed) ? parsed : null;
+}
+
+/**
+ * Map the service's status snapshot (`VmService.status()`, spec 27e) to the
+ * wire line — the main.ts wiring's one mapping step, kept beside the shape it
+ * produces (`phase: "none"` means no boot is in flight → `null` on the wire).
+ * The state field types match structurally (the line's union restates
+ * `VmState` so this wire module stays decoupled from the vm stack at runtime).
+ */
+export function vmStateLineFromStatus(status: VmStatus): VmStateLine {
+	return {
+		type: "vm-state",
+		state: status.state,
+		sessionId: status.sessionId,
+		phase: status.phase === "none" ? null : status.phase,
+		sshPort: status.sshPort,
+		error: status.error,
+	};
+}
+
+/**
  * The minimal sink a connection needs — `net.Socket` satisfies it. Declared so a
  * unit test can inject a recording fake without spinning a real socket. `once`
  * returns `unknown` (we never use the return value); `net.Socket.once` returns
@@ -117,6 +204,13 @@ export interface StatusSocketHandle {
 	path: string;
 	/** Stop serving, destroy active connections, and remove the socket file. */
 	close(): Promise<void>;
+	/**
+	 * Stream a vm-state transition line (spec 27h) to every connected client,
+	 * best-effort: a write failure destroys just that connection (its
+	 * `handleConnection` cleanup runs on the close event). The caller's latest-
+	 * state ref stays caller-owned — the dump getter reads it; this only streams.
+	 */
+	emitVmState(line: VmStateLine): void;
 }
 
 /** Injection seams (the `11a`/`13`/`17d` precedent): a temp `path` + a `warn` logger keep tests hermetic. */
@@ -131,6 +225,16 @@ export interface StartStatusSocketDeps {
 	 * channel state is advertised and the dashboard shows `unknown`. Defaults to `[]`.
 	 */
 	channels?: ChannelStateLine[];
+	/**
+	 * The LATEST vm-state snapshot (spec 27h), read per connection for the dump.
+	 * A GETTER, not a static value: the socket starts AFTER the service's
+	 * eager-async boot (main.ts kicks `start()` off before binding), so the first
+	 * `booting` transition can predate the bind — each connect must read the
+	 * caller's latest ref, not a boot-time copy. Answer `null` for a non-VM mode
+	 * or nothing-observed-yet: no vm-state line is dumped (the additive rule —
+	 * the stream stays byte-for-byte the pre-27h one). Defaults to `() => null`.
+	 */
+	vmState?: () => VmStateLine | null;
 	/** Best-effort logger for a server-level socket error. Defaults to `console.warn`. */
 	warn?: (message: string) => void;
 }
@@ -175,15 +279,18 @@ export function safeWrite(socket: StatusSocket, line: string): boolean {
 
 /**
  * Handle one monitor connection: dump the channel-state snapshot (the "what's
- * configured + live now" view), then the recent buffer (history), then stream
- * live events. A write failure or a `close`/`error` on the socket unsubscribes
- * (idempotently) so a dead client never leaks a subscriber. Exported so the
- * dump-then-stream + cleanup logic is unit-tested with a fake socket.
+ * configured + live now" view), then the vm-state snapshot (the sandbox's boot
+ * lifecycle, spec 27h — omitted when `vmState` is `null`), then the recent
+ * buffer (history), then stream live events. A write failure or a
+ * `close`/`error` on the socket unsubscribes (idempotently) so a dead client
+ * never leaks a subscriber. Exported so the dump-then-stream + cleanup logic is
+ * unit-tested with a fake socket.
  */
 export function handleConnection(
 	socket: StatusSocket,
 	recorder: RequestRecorder,
 	channels: readonly ChannelStateLine[] = [],
+	vmState: VmStateLine | null = null,
 ): void {
 	let closed = false;
 	// Initialized to a no-op so `cleanup` can run before `subscribe` reassigns it.
@@ -205,6 +312,14 @@ export function handleConnection(
 			cleanup();
 			return;
 		}
+	}
+
+	// The vm-state snapshot next (the sandbox's boot lifecycle, spec 27h) — the
+	// caller's latest read at connect time. `null` (off mode / nothing observed)
+	// writes nothing: the stream stays byte-for-byte the pre-27h one.
+	if (vmState !== null && !safeWrite(socket, formatVmStateLine(vmState))) {
+		cleanup();
+		return;
 	}
 
 	// Dump history next (oldest → newest); bail out if the client is already gone.
@@ -232,13 +347,16 @@ export async function startStatusSocket(
 	const server = deps.createServer?.() ?? createServer();
 	const warn = deps.warn ?? ((message: string) => console.warn(message));
 	const channels = deps.channels ?? [];
+	const vmState = deps.vmState ?? ((): VmStateLine | null => null);
 	const sockets = new Set<Socket>();
 
-	// Track open connections so `close()` can drop monitor clients promptly.
+	// Track open connections so `close()` can drop monitor clients promptly. The
+	// vm-state getter is read PER connection (not captured once at bind) so each
+	// dump carries the latest state (spec 27h — the boot outlives the bind).
 	server.on("connection", (socket) => {
 		sockets.add(socket);
 		socket.once("close", () => sockets.delete(socket));
-		handleConnection(socket, recorder, channels);
+		handleConnection(socket, recorder, channels, vmState());
 	});
 	// A server-level error after listen must not crash the process (connection
 	// errors are handled per-socket in `handleConnection`).
@@ -262,6 +380,15 @@ export async function startStatusSocket(
 
 	return {
 		path,
+		emitVmState(line: VmStateLine): void {
+			for (const socket of sockets) {
+				if (!safeWrite(socket, formatVmStateLine(line))) {
+					// Dead client — destroy just this connection; its handleConnection
+					// cleanup (unsubscribe) runs on the close event this fires.
+					socket.destroy();
+				}
+			}
+		},
 		async close(): Promise<void> {
 			for (const socket of sockets) socket.destroy();
 			sockets.clear();

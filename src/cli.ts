@@ -11,13 +11,14 @@
  * - `channel { add | list | remove <id> | use <id> }` — manage channels.
  * - `config { get | set [section] }` — manage settings (default section `mcp`).
  * - `auth { add-client | list | remove <id> }` — manage OAuth clients (spec 20e).
- * - `vm { install | provision | snapshot | list | reset | gc }` — manage the local VM
- *   sandbox (spec 26; later boxes add status).
+ * - `vm { install | provision | snapshot | list | reset | gc | status }` — manage the local
+ *   VM sandbox (spec 26; `status` is 27h).
  * - `doctor` — run the diagnostics registry + per-channel checks (17p).
  * - `monitor` — stream live client + tool-call activity over the status socket (17t).
  *
  * `npm start` (`dist/main.js`, spec 14) is unchanged.
  */
+import { createConnection, type Socket } from "node:net";
 import { type ParsedArgs, parseArgs } from "./cli/args.ts";
 import { authCommand } from "./cli/auth.ts";
 import { doctorCommand } from "./cli/doctor.ts";
@@ -27,8 +28,10 @@ import { CONFIG_SECTIONS } from "./config/sections.ts";
 import { loadSettings, type Settings, saveSettings, settingsPath } from "./config/settings.ts";
 import { loadConfig } from "./config.ts";
 import { isMainEntry } from "./entrypoint.ts";
+import { parseVmStateLine, statusSocketPath, type VmStateLine } from "./observability/status-socket.ts";
 import { type BannerStream, printBanner } from "./tui/banner.ts";
 import type { ServerStatusState } from "./tui/dashboard/store.ts";
+import { formatVmState } from "./tui/monitor-view.ts";
 import { flagIo } from "./tui/prompts.ts";
 import { addChannel, CHANNEL_SELECT_PROMPT, type ProbeRunner, registryProviders } from "./tui/wizards/channel.ts";
 import { SECTION_SELECT_PROMPT, setSection } from "./tui/wizards/section.ts";
@@ -113,6 +116,8 @@ export interface DispatchDeps {
 	auth?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
 	/** `vm` subcommand handler (defaults to {@link vmCommand}). */
 	vm?: (sub: string | undefined, rest: string[], io: CommandIo) => Promise<number>;
+	/** `vm status`'s status-socket path override (tests point it at a temp fake socket). Defaults to {@link statusSocketPath}. */
+	vmStatusPath?: string;
 	/** `doctor` handler (defaults to {@link doctorCommand}). */
 	doctor?: (io: CommandIo) => Promise<number>;
 	/** `monitor` handler (defaults to {@link monitorCommand}). */
@@ -148,7 +153,8 @@ export async function dispatch(parsed: ParsedArgs, deps: DispatchDeps = {}): Pro
 	const auth = deps.auth ?? authCommand;
 	const doctor = deps.doctor ?? doctorCommand;
 	const monitor = deps.monitor ?? monitorCommand;
-	const vm = deps.vm ?? vmCommand;
+	const vm =
+		deps.vm ?? (async (sub: string | undefined, rest: string[], io: CommandIo) => vmCommand(sub, rest, io, deps));
 
 	if (parsed.help) {
 		io.stdout.write(`${USAGE}\n`);
@@ -534,12 +540,17 @@ async function setConfigFieldCmd(target: string, value: string | undefined, io: 
 // ---- `vm` subcommands -------------------------------------------------------
 
 /**
- * `vm` (spec 26): the VM-sandbox command tree. `install` + `provision` + `snapshot` +
- * `list`/`reset`/`gc` exist — `status` is the later spec-27 box and is deliberately absent
- * from the usage string (advertising an unimplemented subcommand would just route the
- * operator into an error).
+ * `vm` (spec 26 + 27h): the VM-sandbox command tree. `install` + `provision` + `snapshot` +
+ * `list`/`reset`/`gc` manage the golden tree; `status` (27h) peeks at the live session via
+ * the running server's status socket — the only subcommand that talks to a server rather
+ * than the on-disk tree.
  */
-async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo): Promise<number> {
+async function vmCommand(
+	sub: string | undefined,
+	rest: string[],
+	io: CommandIo,
+	deps: DispatchDeps = {},
+): Promise<number> {
 	switch (sub) {
 		case "install":
 			return await vmInstallCmd(rest, io);
@@ -553,12 +564,14 @@ async function vmCommand(sub: string | undefined, rest: string[], io: CommandIo)
 			return await vmResetCmd(rest, io);
 		case "gc":
 			return await vmGcCmd(rest, io);
+		case "status":
+			return await vmStatusCmd(rest, io, deps.vmStatusPath);
 		case undefined:
 			io.stderr.write(`${VM_USAGE}\n`);
 			return 2;
 		default:
 			io.stderr.write(
-				`vm: unknown subcommand '${sub}' (available: install, provision, snapshot, list, reset, gc)\n\n${VM_USAGE}\n`,
+				`vm: unknown subcommand '${sub}' (available: install, provision, snapshot, list, reset, gc, status)\n\n${VM_USAGE}\n`,
 			);
 			return 2;
 	}
@@ -772,6 +785,82 @@ async function vmGcCmd(rest: string[], io: CommandIo): Promise<number> {
 	}
 }
 
+/**
+ * `vm status` (spec 27 "Observability", wired 27h): render the live VM state row
+ * from the running server's status socket — the same `vm-state` NDJSON line the
+ * monitor feed and the dashboard (spec 28) consume. One-shot: it reads the
+ * connection dump and exits; it is not a stream. Every "no live info" outcome —
+ * an unreachable socket, a dump without a vm-state line (an `off`-mode server
+ * emits none, ever — the zero-VM-code pin), a read that overshoots the dump
+ * budget — prints the no-info line and exits 0: a status peek has nothing to
+ * fail over. The limit is deliberate: full service introspection without a
+ * running server is the spec-28 dashboard's concern, not this command's.
+ */
+async function vmStatusCmd(rest: string[], io: CommandIo, pathOverride?: string): Promise<number> {
+	const flags = parseSubFlags(rest);
+	const unexpected = [...Object.keys(flags.values), ...flags.bools, ...flags.unknown, ...flags.positionals];
+	if (unexpected.length > 0) {
+		io.stderr.write(`Usage: openhammer vm status\n`);
+		return 2;
+	}
+	const line = await readFirstVmStateLine(pathOverride ?? statusSocketPath());
+	if (line === null) {
+		io.stdout.write("vm: no live session info (server not running or mode off)\n");
+		return 0;
+	}
+	io.stdout.write(`${formatVmState(line)}\n`);
+	return 0;
+}
+
+/** How long `vm status` waits for the connection dump (it flushes on connect; this only bounds a wedged server). */
+const VM_STATUS_DUMP_TIMEOUT_MS = 2_000;
+
+/**
+ * Connect to the status socket and resolve the FIRST vm-state line from the
+ * connection dump, or `null` when there is none to render: unreachable socket,
+ * error/close before a vm-state line arrives, or the dump budget expiring (an
+ * `off`-mode server's dump carries only channel-state + events). Non-vm-state
+ * lines are skipped via {@link parseVmStateLine}'s additive null (never a
+ * throw), and the connection is destroyed the moment a line is found.
+ */
+function readFirstVmStateLine(path: string): Promise<VmStateLine | null> {
+	return new Promise((resolve) => {
+		let settled = false;
+		let buf = "";
+		let conn: Socket | null = null;
+		const finish = (line: VmStateLine | null): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			conn?.destroy();
+			resolve(line);
+		};
+		const timer = setTimeout(() => finish(null), VM_STATUS_DUMP_TIMEOUT_MS);
+		try {
+			conn = createConnection(path);
+		} catch {
+			finish(null);
+			return;
+		}
+		const socket = conn;
+		socket.on("data", (chunk: Buffer) => {
+			buf += chunk.toString("utf8");
+			let nl = buf.indexOf("\n");
+			while (nl >= 0) {
+				const line = parseVmStateLine(buf.slice(0, nl));
+				buf = buf.slice(nl + 1);
+				nl = buf.indexOf("\n");
+				if (line !== null) {
+					finish(line);
+					return;
+				}
+			}
+		});
+		socket.on("error", () => finish(null));
+		socket.on("close", () => finish(null));
+	});
+}
+
 // ---- usage text -------------------------------------------------------------
 
 const USAGE = `Usage: openhammer [command] [options]
@@ -829,6 +918,9 @@ Commands:
                            old goldens, with a footprint report (dry run by
                            default; keeps the newest <n> goldens, default 2;
                            refuses while a session is live)
+    status                Show the live VM session state (from the running
+                          server's status socket; "no live session info"
+                          when the server is down or VM mode is off)
   doctor                 Run diagnostics checks
   monitor                Stream live client + tool-call activity
 
@@ -846,7 +938,7 @@ const CHANNEL_USAGE = `Usage: openhammer channel { add | list | remove <id> | us
 const CONFIG_USAGE = `Usage: openhammer config { get | set [section] }`;
 
 /** The vm tree's usage line — only the implemented subcommands are advertised (see vmCommand). */
-const VM_USAGE = `Usage: openhammer vm { install | provision | snapshot | list | reset | gc }`;
+const VM_USAGE = `Usage: openhammer vm { install | provision | snapshot | list | reset | gc | status }`;
 
 // Auto-run only when invoked as the entrypoint (the `openhammer` bin), not when
 // imported by tests. Matches the T-canary guard: under vitest `process.argv[1]`

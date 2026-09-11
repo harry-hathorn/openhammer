@@ -19,7 +19,7 @@
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { type AddressInfo, createServer } from "node:net";
+import { type AddressInfo, createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -402,6 +402,55 @@ function firstText(result: unknown): string {
 	return "";
 }
 
+/**
+ * Connect to the booted server's status socket and collect its NDJSON lines
+ * (the status-socket.test.ts helper, trimmed to the e2e's needs) — used to read
+ * a connection's dump (channel-state + vm-state + recorded history).
+ */
+function collectSocketLines(path: string): {
+	lines: string[];
+	waitFor: (n: number, ms?: number) => Promise<void>;
+	close: () => void;
+} {
+	const lines: string[] = [];
+	let buf = "";
+	const waiters: Array<{ n: number; resolve: () => void }> = [];
+	const socket = createConnection(path);
+	socket.on("data", (chunk) => {
+		buf += chunk.toString("utf8");
+		let idx = buf.indexOf("\n");
+		while (idx >= 0) {
+			lines.push(buf.slice(0, idx));
+			buf = buf.slice(idx + 1);
+			idx = buf.indexOf("\n");
+		}
+		for (const w of waiters.splice(0)) {
+			if (lines.length >= w.n) w.resolve();
+			else waiters.push(w); // not yet satisfied — keep it for the next chunk
+		}
+	});
+	return {
+		lines,
+		waitFor(n, ms = 5000) {
+			if (lines.length >= n) return Promise.resolve();
+			return new Promise((resolve, reject) => {
+				const timer = setTimeout(
+					() => reject(new Error(`timed out waiting for ${n} lines (got ${lines.length})`)),
+					ms,
+				);
+				waiters.push({
+					n,
+					resolve: () => {
+						clearTimeout(timer);
+						resolve();
+					},
+				});
+			});
+		},
+		close: () => socket.destroy(),
+	};
+}
+
 /** Drive one `bash` tools/call over the FULL HTTP stack (the mcp.e2e client pattern). */
 async function callBash(baseUrl: string, token: string, command: string): Promise<{ isError: boolean; text: string }> {
 	const client = new Client({ name: "vm-boot-e2e", version: "0.0.0" }, { capabilities: {} });
@@ -521,6 +570,27 @@ describe("Tier-2 boot: vm modes (spec 27f — real main, scripted gate, zero KVM
 			expect(call.text).toBe("hello-from-the-fake-guest");
 			// The delegation reached the scripted guest with the command verbatim.
 			expect(stdout()).toContain("vm-driver: guest runShell: echo guest");
+
+			// 27h wiring: the status socket's dump carries the vm-state line of the
+			// settled boot. The socket binds AFTER the eager-async start() (the
+			// driver's gate settles synchronously on start), so this pins the
+			// latest-state getter — the dump reflects the post-boot state, not a
+			// bind-time copy (the driver's scripted status: ready, session
+			// "vm-driver", ssh :41733, no phase, no error).
+			const dump = collectSocketLines(join(home, ".openhammer", "openhammer.sock"));
+			try {
+				await dump.waitFor(2); // the vm-state dump + at least the bash call's event
+				expect(JSON.parse(dump.lines[0] ?? "{}")).toMatchObject({
+					type: "vm-state",
+					state: "ready",
+					sessionId: "vm-driver",
+					phase: null,
+					sshPort: 41733,
+					error: null,
+				});
+			} finally {
+				dump.close();
+			}
 		} finally {
 			await ensureDead(child);
 			rmSync(home, { recursive: true, force: true });
