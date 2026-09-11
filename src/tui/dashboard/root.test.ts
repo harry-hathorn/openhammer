@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultVmSettings } from "../../config/settings.ts";
+import type { VmStateLine } from "../../observability/status-socket.ts";
 import { err, ok, type Result } from "../../tools/result.ts";
+import { activeSessionRefusal } from "../../vm/provision/install.ts";
 import { createSandboxActions, VM_UNOWNED_HINT } from "../dashboard.ts";
 import { createStyle } from "../style.ts";
 import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./root.ts";
@@ -311,7 +313,7 @@ function vmRooted(
 	log: string[],
 	mode: "off" | "vm",
 	actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
-	opts: { hasGolden?: boolean } = {},
+	opts: { hasGolden?: boolean; vmState?: VmStateLine["state"] | null } = {},
 ): DashboardRoot {
 	const store = new DashboardStore(
 		{ env: { MCP_ROOT_DIR: "/srv/guest-work" }, goldenExists: () => opts.hasGolden ?? true },
@@ -323,14 +325,19 @@ function vmRooted(
 			vm: { ...defaultVmSettings(), mode },
 		},
 	);
-	if (mode === "vm") {
+	// The held vm-state line defaults to `ready` (the live-sandbox fixture the earlier
+	// boxes' tests grew up with); `vmState` overrides it — `null` holds NO line. Box 28d
+	// reads it through the store (vmSessionActive) to gate the Install row.
+	const line = opts.vmState ?? (mode === "vm" ? "ready" : null);
+	if (mode === "vm" && line !== null) {
+		const ready = line === "ready";
 		store.applyVmStateLine(
 			JSON.stringify({
 				type: "vm-state",
-				state: "ready",
-				sessionId: "vm-20260911T101112Z-ab",
-				phase: null,
-				sshPort: 42255,
+				state: line,
+				sessionId: ready ? "vm-20260911T101112Z-ab" : null,
+				phase: line === "booting" ? "prepare" : null,
+				sshPort: ready ? 42255 : null,
 				error: null,
 			}),
 		);
@@ -368,7 +375,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 	async function sandboxed(
 		log: string[],
 		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
-		opts: { hasGolden?: boolean } = {},
+		opts: { hasGolden?: boolean; vmState?: VmStateLine["state"] | null } = {},
 	): Promise<DashboardRoot> {
 		const root = vmRooted(log, "vm", actionsOver, opts);
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
@@ -391,7 +398,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(lines.some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
 		expect(lines.some((l) => l.includes("Install sandbox…"))).toBe(false); // a golden exists — HIDDEN, not disabled
 
-		const goldenless = (await sandboxed([], undefined, { hasGolden: false })).render(200);
+		const goldenless = (await sandboxed([], undefined, { hasGolden: false, vmState: "stopped" })).render(200);
 		expect(goldenless.some((l) => l.includes("Install sandbox…"))).toBe(true);
 	});
 
@@ -463,7 +470,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 	async function sandboxed(
 		log: string[],
 		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
-		opts: { hasGolden?: boolean } = {},
+		opts: { hasGolden?: boolean; vmState?: VmStateLine["state"] | null } = {},
 	): Promise<DashboardRoot> {
 		const root = vmRooted(log, "vm", actionsOver, opts);
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
@@ -491,7 +498,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 				installSandbox: async () =>
 					ok({ sessionDir: "/h/.openhammer/vm/sessions/build-9" }) as Result<InstallOutcome, Error>,
 			}),
-			{ hasGolden: false },
+			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
 		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install (no golden — the row exists)
 		root.handleInput(ENTER);
@@ -508,7 +515,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			() => ({
 				installSandbox: async () => err(new Error("vm install: gate failed")) as Result<InstallOutcome, Error>,
 			}),
-			{ hasGolden: false },
+			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
 		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install
 		root.handleInput(ENTER);
@@ -564,5 +571,76 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 		root.handleInput(ENTER); // -> Sandbox
 		await flushActions();
 		expect(root.render(80).some((l) => l.includes(`note: ${VM_APPLY_HINT}`))).toBe(true);
+	});
+});
+
+describe("DashboardRoot — Install × active session (spec 28, matrix row 5, box 28d)", () => {
+	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter) — golden/session-aware. */
+	async function sandboxed(
+		log: string[],
+		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+		opts: { hasGolden?: boolean; vmState?: VmStateLine["state"] | null } = {},
+	): Promise<DashboardRoot> {
+		const root = vmRooted(log, "vm", actionsOver, opts);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		return root;
+	}
+
+	it("a ready session HIDES the Install row even with no golden (never an offered action that can't run)", async () => {
+		const lines = (await sandboxed([], undefined, { hasGolden: false })).render(200); // vm mode holds a ready line
+		expect(lines.some((l) => l.includes("Install sandbox…"))).toBe(false);
+		expect(lines.some((l) => l.includes("Back"))).toBe(true); // the list still ends at Back
+	});
+
+	it("a booting session hides it too; once the session stops, the row is shown again", async () => {
+		const log: string[] = [];
+		let storeRef: DashboardStore | undefined;
+		const root = await sandboxed(
+			log,
+			(store) => {
+				storeRef = store;
+				return {};
+			},
+			{ hasGolden: false, vmState: "booting" },
+		);
+		expect(root.render(200).some((l) => l.includes("Install sandbox…"))).toBe(false);
+		storeRef?.applyVmStateLine(
+			JSON.stringify({
+				type: "vm-state",
+				state: "stopped",
+				sessionId: null,
+				phase: null,
+				sshPort: null,
+				error: null,
+			}),
+		);
+		expect(root.render(200).some((l) => l.includes("Install sandbox…"))).toBe(true);
+	});
+
+	it("the vm-side single-flight refusal (the runInstall race) surfaces inline with the shared escape", async () => {
+		const log: string[] = [];
+		const refusal = activeSessionRefusal("install", {
+			sessionDir: "/home/x/.openhammer/vm/sessions/live-one",
+			pid: 999,
+		});
+		const root = await sandboxed(
+			log,
+			() => ({
+				// The wiring maps a thrown runInstall refusal to err — the same Result the
+				// flash renders (fake runInstall throwing the scanActiveVmSessions refusal).
+				installSandbox: async () => err(refusal) as Result<InstallOutcome, Error>,
+			}),
+			{ hasGolden: false, vmState: "stopped" }, // line says inactive — the vm-side scan is the race backstop
+		);
+		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install (stopped → the row exists)
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(
+			root
+				.render(200)
+				.some((l) => l.includes("stop the session first: mode off + restart, or Sandbox → Stop sandbox")),
+		).toBe(true);
 	});
 });

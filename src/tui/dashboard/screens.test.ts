@@ -163,6 +163,22 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c)", () => {
 		expect(stop?.description).toContain("re-boots the sandbox on the next server start");
 		expect(stop?.description).toContain("lasting stop: mode off + restart");
 	});
+
+	it("while a session is ACTIVE the Install row is hidden even with no golden (matrix row 5, box 28d)", () => {
+		const labels = sandboxItems(false, true).map((i) => i.label);
+		expect(labels).not.toContain(SANDBOX_INSTALL_LABEL);
+		expect(labels).toEqual([
+			SANDBOX_STOP_LABEL,
+			SANDBOX_RESTART_LABEL,
+			SANDBOX_CONFIGURE_LABEL,
+			SANDBOX_SERIAL_LABEL,
+			"Back",
+		]);
+	});
+
+	it("the Install row returns once the session is no longer active (stopped/failed/off — vmSessionActive)", () => {
+		expect(sandboxItems(false, false).map((i) => i.label)).toContain(SANDBOX_INSTALL_LABEL);
+	});
 });
 
 describe("screens — renderList + renderFieldRows", () => {

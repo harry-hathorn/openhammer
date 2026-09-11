@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type ProcIdentity, type RunQemuImg, resolveVmDirs, type VmDirs } from "../session.ts";
 import { defaultGuestConfig, saveGuestConfig } from "./guest-config.ts";
-import type { ActiveSession } from "./install.ts";
+import { type ActiveSession, scanActiveVmSessions } from "./install.ts";
 import { ISO_SHA256, ISO_URL } from "./iso.ts";
 import { DEFAULT_KEEP_GOLDENS, type ManageDeps, vmGc, vmList, vmReset } from "./manage.ts";
 import { GOLDEN_DISK_FILE } from "./snapshot.ts";
@@ -14,6 +14,7 @@ import { GOLDEN_DISK_FILE } from "./snapshot.ts";
 const VIRTUAL = 42_949_672_960;
 const ACTUAL = 123_456;
 const STALE_PID = 999_999; // readProc says dead — the stale classification
+const OURS_PID = 777_777; // readProc says a live verified-ours qemu — the single-flight scan's hit
 const FOREIGN_PID = 424_242; // readProc says a live non-qemu process — kept, never removal evidence
 
 const NEWEST = "golden-4.0.3-20260910-070809";
@@ -122,7 +123,11 @@ function harness(options: HarnessOptions = {}) {
 		log: (line) => logs.push(line),
 		scanActiveSessions: async () => options.scan ?? [],
 		readProc: (pid: number): ProcIdentity =>
-			pid === FOREIGN_PID ? { comm: "systemd", cmdline: "/usr/lib/systemd/systemd --system" } : {},
+			pid === OURS_PID
+				? { comm: "qemu-system-x86", cmdline: "qemu-system-x86_64 -name openhammer-vm-pinned" }
+				: pid === FOREIGN_PID
+					? { comm: "systemd", cmdline: "/usr/lib/systemd/systemd --system" }
+					: {},
 		runQemuImg: options.qemuImg ?? defaultQemuImg,
 		duOf: options.duOf,
 	};
@@ -319,8 +324,8 @@ describe("vmReset — discard stale sessions", () => {
 		try {
 			seedSession(h.dirs, "build-stale", STALE_PID);
 			await expect(vmReset(h.deps)).rejects.toThrow(
-				"vm reset: a VM session is active — stop it first (openhammer vm status) — " +
-					"/home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
+				"vm reset: a VM session is active — stop the session first: mode off + restart, " +
+					"or Sandbox → Stop sandbox — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
 			);
 			expect(existsSync(join(h.dirs.sessions, "build-stale"))).toBe(true);
 		} finally {
@@ -449,10 +454,40 @@ describe("vmGc — the aggregate-footprint reclaimer", () => {
 		try {
 			seedWorld(h);
 			await expect(vmGc(h.deps, { yes: true })).rejects.toThrow(
-				"vm gc: a VM session is active — stop it first (openhammer vm status) — " +
-					"/home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
+				"vm gc: a VM session is active — stop the session first: mode off + restart, " +
+					"or Sandbox → Stop sandbox — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
 			);
 			expect(existsSync(join(h.dirs.sessions, "build-stale"))).toBe(true);
+			expect(existsSync(join(h.dirs.images, OLDEST))).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("a RETAINED-LIVE session (pinned id, live verified-ours pid) is never a gc candidate — the REAL scan refuses", async () => {
+		const h = harness(); // no scripted scan — the default resolves to scanActiveVmSessions(dirs)…
+		try {
+			// …so aim it at the REAL scan over the temp tree with the faked /proc read: the
+			// retained (pinned-id) session's pidfile names a live verified-ours QEMU. This
+			// is matrix row 5's "gc never reclaims the retained-live session" end to end —
+			// not the scripted-scan shortcut the test above takes.
+			const pinned = "vm-20260911T101112Z-ab";
+			const pinnedDir = seedSession(h.dirs, pinned, OURS_PID);
+			// The deps object is readonly — spread it into the override (the scan runs the
+			// REAL scanActiveVmSessions over the temp tree, with the harness's faked /proc).
+			const deps: ManageDeps = {
+				...h.deps,
+				scanActiveSessions: () => scanActiveVmSessions(h.dirs, { readProc: h.deps.readProc }),
+			};
+			seedWorld(h); // a full reclaim plan waiting (stale session + orphan cidata + old golden)
+			await expect(vmGc(deps, { yes: true })).rejects.toThrow(
+				"vm gc: a VM session is active — stop the session first: mode off + restart, " +
+					`or Sandbox → Stop sandbox — ${pinnedDir} holds qemu pid ${OURS_PID}`,
+			);
+			// Nothing was a candidate: every reclaimable path survives untouched.
+			expect(existsSync(pinnedDir)).toBe(true);
+			expect(existsSync(join(h.dirs.sessions, "build-stale"))).toBe(true);
+			expect(existsSync(join(h.dirs.cidata, "build-ghost"))).toBe(true);
 			expect(existsSync(join(h.dirs.images, OLDEST))).toBe(true);
 		} finally {
 			h.cleanup();

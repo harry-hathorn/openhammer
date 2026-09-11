@@ -45,8 +45,11 @@
  *
  * SINGLE-FLIGHT (26c's guard, the install-side precedent): both reset and gc REFUSE
  * outright when any qemu.pid under `sessions/` names a live verified-ours QEMU —
- * removing state out from under a running boot is not a judgment call. The refusal
- * names the session dir and pid.
+ * removing state out from under a running boot is not a judgment call. The refusal is
+ * install.ts's SHARED builder ({@link activeSessionRefusal} — one message across the vm
+ * tree, so the CLI stderr and the dashboard's inline flash can never drift) and it names
+ * the session dir, the pid, and the escape (mode off + restart, or Sandbox → Stop
+ * sandbox — spec 28 matrix rows 4/5).
  *
  * Error model: process layer, not a tool. Expected failures THROW actionable errors
  * (the snapshot.ts posture); the CLI boundary maps them to exit 1.
@@ -57,7 +60,7 @@ import { basename, join, resolve } from "node:path";
 import { QEMU_IMG_BIN } from "../qemu/process.ts";
 import { type ProcIdentity, type ReadProc, type RunQemuImg, resolveVmDirs, type VmDirs } from "../session.ts";
 import { loadGuestConfig } from "./guest-config.ts";
-import { type ActiveSession, type ScanActiveSessions, scanActiveVmSessions } from "./install.ts";
+import { activeSessionRefusal, type ScanActiveSessions, scanActiveVmSessions } from "./install.ts";
 import { runBinDefault } from "./iso.ts";
 import { GOLDEN_DISK_FILE, type Manifest, type ManifestFlavor, readManifest } from "./snapshot.ts";
 
@@ -373,7 +376,7 @@ export async function vmReset(deps: ManageDeps = {}, options: ResetOptions = {})
 	const scan = deps.scanActiveSessions ?? (() => scanActiveVmSessions(dirs));
 	const active = (await scan())[0];
 	if (active !== undefined) {
-		throw singleFlightRefusal("reset", active);
+		throw activeSessionRefusal("reset", active);
 	}
 	const readProc = deps.readProc ?? readProcDefault;
 	const duOf = deps.duOf ?? duOfDefault;
@@ -435,13 +438,6 @@ export interface GcReport {
 	readonly protectedGoldens: readonly string[];
 }
 
-function singleFlightRefusal(command: string, active: ActiveSession): Error {
-	return new Error(
-		`vm ${command}: a VM session is active — stop it first (openhammer vm status) — ` +
-			`${active.sessionDir} holds qemu pid ${active.pid}`,
-	);
-}
-
 /**
  * `openhammer vm gc` (spec 26f) — the aggregate-footprint reclaimer over three
  * categories: stale session dirs (the reset classification), orphaned cidata builds
@@ -461,7 +457,7 @@ export async function vmGc(deps: ManageDeps = {}, options: GcOptions = {}): Prom
 	const scan = deps.scanActiveSessions ?? (() => scanActiveVmSessions(dirs));
 	const active = (await scan())[0];
 	if (active !== undefined) {
-		throw singleFlightRefusal("gc", active);
+		throw activeSessionRefusal("gc", active);
 	}
 	const readProc = deps.readProc ?? readProcDefault;
 	const duOf = deps.duOf ?? duOfDefault;

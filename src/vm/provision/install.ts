@@ -35,7 +35,21 @@
  *
  * SINGLE-FLIGHT (spec 26/28, the install-side guard — the full VmService lock is spec 27's):
  * `install` refuses when any qemu.pid under `<sessions>/` names a live OUR-qemu process
- * (session.ts's isOurQemu verification — never a recycled PID).
+ * (session.ts's isOurQemu verification — never a recycled PID). The refusal is BUILT here
+ * ({@link activeSessionRefusal}) and shared with manage.ts's reset/gc — one message, so the
+ * CLI stderr and the dashboard's inline flash can never drift — and it names the ESCAPE
+ * (spec 28 matrix rows 4/5: a lasting stop is mode `off` + restart; the dashboard's
+ * Sandbox → Stop sandbox tears down now).
+ *
+ * REBUILD WARNING (spec 28, matrix row 5's second half): when a golden already exists on
+ * disk, THIS run is a rebuild — legitimate (spec 26's upgrade posture), so it proceeds,
+ * but only after ONE pre-flight WARNING line: rebuilding invalidates retained overlays
+ * (the recovery path), and `openhammer vm reset` is the clean-slate alternative. The probe
+ * ({@link newestGoldenId}) is golden EXISTENCE — the doctor's dir-level notion —
+ * deliberately NOT the dashboard Install-row's bootability probe
+ * (`goldenManifestExists`): a corrupt-manifest golden is exactly the tree `vm list` tells
+ * the operator to rebuild, and the warning's subject is displacing a prior golden, not
+ * bootability (preflight check 5 stays the boot path's business).
  *
  * Error model: process layer, not a tool. Expected failures THROW with actionable evidence
  * (disk-growth samples, status, serial + run log paths, stderr tail); the CLI boundary maps
@@ -178,6 +192,12 @@ export interface InstallDeps {
 	readonly log?: (line: string) => void;
 	/** Override the single-flight pid scan (tests script a hit or a miss). */
 	readonly scanActiveSessions?: ScanActiveSessions;
+	/**
+	 * Override the rebuild warning's golden-existence probe (spec 28, matrix row 5;
+	 * default: {@link newestGoldenId} over the resolved tree). Tests script a hit (the
+	 * WARNING line fires, the run proceeds) or a miss (a fresh build, no warning).
+	 */
+	readonly newestGoldenId?: () => string | null;
 	/** Override the pristine OVMF VARS template copied into the session (default: args.ts's). */
 	readonly varsTemplate?: string;
 	/** Override the qemu-img runner (default: runBinDefault over QEMU_IMG_BIN). */
@@ -215,6 +235,11 @@ const LOG_FILE = "install.log";
 const VARS_FILE = "OVMF_VARS.4m.fd";
 const DEBUG_DIR = "debug";
 const PID_FILE = "qemu.pid";
+
+// The golden-dir shape (manage.ts/sections.ts/preflight.ts's restated names — the scan
+// below is the rebuild probe's own restate; see its comment for why it cannot import).
+const GOLDEN_PREFIX = "golden-";
+const MANIFEST_FILE = "manifest.json";
 
 const sleepDefault = (ms: number): Promise<void> =>
 	new Promise((resolve) => {
@@ -329,6 +354,79 @@ export async function scanActiveVmSessions(
 	return active;
 }
 
+/**
+ * The single-flight refusal, SHARED by every vm-tree command that must not run under a
+ * live session — install (here), reset/gc (manage.ts imports this builder) — so the CLI
+ * stderr line and the dashboard's inline flash render the SAME text. The message names
+ * the escape, not just the evidence (spec 28, matrix rows 4/5): a lasting stop is mode
+ * `off` + restart, and the dashboard's Sandbox → Stop sandbox tears down now.
+ */
+export function activeSessionRefusal(command: string, active: ActiveSession): Error {
+	return new Error(
+		`vm ${command}: a VM session is active — stop the session first: mode off + restart, ` +
+			`or Sandbox → Stop sandbox — ${active.sessionDir} holds qemu pid ${active.pid}`,
+	);
+}
+
+// sections.ts's goldenOrderKey, verbatim in shape (the readProcDefault restatement
+// precedent): the manifest's builtAt (digits only, so ISO stamps and bare ids compare)
+// orders goldens, falling back to the id's trailing `-YYYYMMDD-HHMMSS` stamp. Restated
+// here — together with the whole scan below — because the twin
+// (config/sections.ts's goldenManifestExists) reads manifests through snapshot.ts's
+// readManifest, and snapshot.ts imports THIS module's scanActiveVmSessions: any static
+// edge from here toward that layer would be the repo's first circular import
+// (AGENTS.md). Consolidate into a shared golden-scan module if snapshot.ts's scan
+// import ever moves.
+function goldenOrderKey(id: string, builtAt: string | undefined): string {
+	if (builtAt !== undefined) {
+		return builtAt.replace(/\D/g, "");
+	}
+	const stamp = /(\d{8}-\d{6})$/.exec(id);
+	return stamp === null ? "" : (stamp[1] ?? "").replaceAll("-", "");
+}
+
+/**
+ * The newest `images/golden-<id>/` dir's id, or `null` when the tree holds none — the
+ * rebuild warning's probe (spec 28, matrix row 5). Golden EXISTENCE (doctor's dir-level
+ * `vm-golden` notion: a `golden-*` dir under images/), deliberately NOT sections.ts's
+ * `goldenManifestExists` bootability probe — see the module header's REBUILD WARNING
+ * paragraph. The manifest is read only for its `builtAt` (the sort key; an absent or
+ * unreadable one orders by the id stamp instead, sections.ts's fallback) — manifest
+ * VALIDITY stays the boot path's business (preflight check 5). Synchronous local
+ * probes only; an absent images root is simply `null`.
+ */
+export function newestGoldenId(homeDir?: string): string | null {
+	const imagesDir = resolveVmDirs({ homeDir }).images;
+	let entries: readonly Dirent[];
+	try {
+		entries = readdirSync(imagesDir, { withFileTypes: true });
+	} catch {
+		return null; // no images root — no goldens, no rebuild
+	}
+	const goldens: { readonly id: string; readonly key: string }[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !entry.name.startsWith(GOLDEN_PREFIX)) continue; // strays are not goldens
+		let builtAt: string | undefined;
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(join(imagesDir, entry.name, MANIFEST_FILE), "utf8"));
+			if (typeof parsed === "object" && parsed !== null && "builtAt" in parsed) {
+				const value = (parsed as Record<string, unknown>).builtAt;
+				if (typeof value === "string") builtAt = value;
+			}
+		} catch {
+			// absent/corrupt manifest — the id's stamp orders instead (the twin's fallback)
+		}
+		goldens.push({ id: entry.name, key: goldenOrderKey(entry.name, builtAt) });
+	}
+	goldens.sort((a, b) => {
+		if (a.key !== b.key) {
+			return a.key < b.key ? 1 : -1;
+		}
+		return a.id < b.id ? 1 : -1;
+	});
+	return goldens[0]?.id ?? null;
+}
+
 /** The spike's statusState — pull the `status` string out of a query-status return. */
 function statusState(returned: unknown): string {
 	if (typeof returned === "object" && returned !== null && "status" in returned) {
@@ -366,13 +464,26 @@ export async function runInstall(deps: InstallDeps = {}, options: InstallOptions
 
 	// Single-flight: a live session and a concurrent install would fight over KVM, the port
 	// space, and the sessions tree. Spec 27's VmService owns the real lock; this is the
-	// install-side refusal.
+	// install-side refusal (the shared builder — manage.ts's reset/gc refuse with the
+	// same line).
 	const scan = deps.scanActiveSessions ?? (() => scanActiveVmSessions(dirs));
 	const active = await scan();
 	const first = active[0];
 	if (first !== undefined) {
-		throw new Error(
-			`vm install: a VM session is active — stop it first (openhammer vm status) — ${first.sessionDir} holds qemu pid ${first.pid}`,
+		throw activeSessionRefusal("install", first);
+	}
+
+	// The rebuild warning (spec 28, matrix row 5): a golden on disk makes THIS run a
+	// rebuild — legitimate (the upgrade posture), so it proceeds — but the operator is
+	// told the cost first, BEFORE any side effect (the iso/cidata work below): retained
+	// overlays are invalidated, and `vm reset` is the clean-slate alternative. One line,
+	// never a block.
+	const goldenProbe = deps.newestGoldenId ?? (() => newestGoldenId(deps.homeDir));
+	const existingGolden = goldenProbe();
+	if (existingGolden !== null) {
+		log(
+			`install: WARNING: a golden already exists (${existingGolden}) — rebuilding invalidates ` +
+				"retained overlays (recovery path); consider `openhammer vm reset` first",
 		);
 	}
 
