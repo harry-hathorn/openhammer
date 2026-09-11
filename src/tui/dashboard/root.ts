@@ -26,6 +26,7 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { Settings } from "../../config/settings.ts";
 import type { Result } from "../../tools/result.ts";
+import type { GuestConfig } from "../../vm/provision/guest-config.ts";
 import { BANNER } from "../banner.ts";
 import type { Style } from "../style.ts";
 import {
@@ -41,6 +42,7 @@ import {
 	renderFieldRows,
 	renderList,
 	SANDBOX_CONFIGURE_LABEL,
+	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SERIAL_LABEL,
@@ -143,6 +145,18 @@ export interface DashboardActions {
 	 * before anything persists (decline keeps the mode, silently).
 	 */
 	configureVm(): Promise<Result<Settings, Error> | null>;
+	/**
+	 * Guest setup (spec 28, box 28e) — the tier-(a) wizard over the LOCAL `guest.json`
+	 * (26a): hostname/timezone/keyboard/username, git identity, encrypt, the default
+	 * agent, extra packages, boot-with commands. OWNED-AGNOSTIC — the one Sandbox
+	 * action with no `vmService` gate: `guest.json` configures the BUILD INPUTS of the
+	 * local tree (what the next `vm install` bakes), never a (possibly remote)
+	 * running server, so there is nothing to own. When a golden already exists the
+	 * wizard precedes with the applies-to-next-install warning (declining writes
+	 * nothing); the write funnels through the real `normalizeGuestConfig` and 26a's
+	 * atomic 0600 writer. `ok` carries the saved config; `null` = cancelled/declined.
+	 */
+	guestSetup(): Promise<Result<GuestConfig, Error> | null>;
 	/**
 	 * Build the golden image — 26c's `runInstall` (spec 28, box 28c), matrix row 2's
 	 * jump target. Gated by the SAME owned/unowned model as Stop/Restart (install
@@ -271,10 +285,11 @@ export class DashboardRoot implements Component {
 				// Sandbox (spec 28): the verbatim state row, then the effective guest root
 				// when known (matrix row 9), then the apply-on-restart note while a vm
 				// settings write is saved-but-unapplied (matrix row 3, box 28c) — over the
-				// session action list (box 28b, extended in 28c): Stop / Restart /
-				// Configure / Serial tail / Install (no golden AND no active session — row 5) / Back.
-				// Owned-vs-unowned does not change the list — an unowned activation
-				// surfaces the unowned hint (never a dead button).
+				// session action list (box 28b, extended in 28c/28e): Stop / Restart /
+				// Configure / Guest setup / Serial tail / Install (no golden AND no active
+				// session — row 5) / Back. Owned-vs-unowned does not change the list — an
+				// unowned activation surfaces the unowned hint (never a dead button);
+				// Guest setup alone takes no gate at all (local build inputs, box 28e).
 				if (section === "sandbox") {
 					return {
 						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
@@ -540,6 +555,18 @@ export class DashboardRoot implements Component {
 				// runAction flash as the Settings screen, so the apply-on-restart hint
 				// rides an unapplied vm write identically from both entry points.
 				await this.runAction(() => this.actions.configureVm(), "settings");
+				return;
+			}
+			if (label === SANDBOX_GUEST_SETUP_LABEL) {
+				// The guest-build-config wizard (spec 28, box 28e) — owned-agnostic
+				// (guest.json is local; a build input, not a server setting), so no gate
+				// and no store adoption: guest.json is not dashboard state, the wizard
+				// already saved through 26a's writer on ok, and this only flashes.
+				const result = await this.actions.guestSetup();
+				if (result === null) return; // cancelled / the post-golden warning declined — silent
+				this.flashMessage = result.ok
+					? "Guest setup saved — applies to the next `vm install`."
+					: result.error.message;
 				return;
 			}
 			if (label === SANDBOX_SERIAL_LABEL) {

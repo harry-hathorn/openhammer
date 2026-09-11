@@ -77,6 +77,7 @@ import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
+import { runGuestSetup } from "./wizards/guest-setup.ts";
 import { type SetSectionResult, setSection } from "./wizards/section.ts";
 
 export { DASHBOARD_MONITOR_LIMIT } from "./dashboard/store.ts";
@@ -650,6 +651,16 @@ function buildActions(
 	const editSettingsAction: DashboardActions["editSettings"] = overrides.editSettings ?? settingsCore.editSettings;
 	const configureVmAction: DashboardActions["configureVm"] = overrides.configureVm ?? settingsCore.configureVm;
 
+	// Guest setup (spec 28, box 28e): the tier-(a) wizard over the LOCAL guest.json
+	// (26a) — OWNED-AGNOSTIC (a build input of this machine's tree, not a server
+	// setting; the one Sandbox action with no vmService/owned gate), so the wiring is
+	// just the modal suspend/resume around `runGuestSetup`, which loads the doc,
+	// warns when a golden exists, asks, normalizes through the REAL normalize, and
+	// saves through 26a's atomic 0600 writer. The silentStream keeps ONE banner
+	// (printed once by `runCli`) — the section wizard's exact pattern.
+	const guestSetupAction: DashboardActions["guestSetup"] =
+		overrides.guestSetup ?? (async () => withModal(() => runGuestSetup({ io, stream: silentStream })));
+
 	const issueClientAction: DashboardActions["issueClient"] =
 		overrides.issueClient ??
 		(async () => {
@@ -786,6 +797,7 @@ function buildActions(
 		restartSandbox: restartSandboxAction,
 		readSerial: readSerialAction,
 		configureVm: configureVmAction,
+		guestSetup: guestSetupAction,
 		installSandbox: installSandboxAction,
 		quit: () => {},
 	};

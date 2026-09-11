@@ -266,6 +266,13 @@ export function doctorItems(): ListItem[] {
 export const SANDBOX_STOP_LABEL = "Stop sandbox…";
 export const SANDBOX_RESTART_LABEL = "Restart sandbox…";
 export const SANDBOX_CONFIGURE_LABEL = "Configure…";
+/**
+ * The Guest-setup row's label (spec 28, box 28e) — beside Configure, matched by EXACT
+ * match in the root's dispatch like every other Sandbox row. Guest setup is the
+ * tier-(a) wizard over the LOCAL `guest.json` (26a) — a build input of this machine's
+ * tree, owned-agnostic (see root.ts's action contract).
+ */
+export const SANDBOX_GUEST_SETUP_LABEL = "Guest setup…";
 export const SANDBOX_SERIAL_LABEL = "Serial tail";
 export const SANDBOX_INSTALL_LABEL = "Install sandbox…";
 
@@ -279,21 +286,22 @@ export const SANDBOX_STOP_TEXT =
 	"power down now — the boot-scoped mode re-boots the sandbox on the next server start (lasting stop: mode off + restart)";
 
 /**
- * The Sandbox screen's action list: Stop / Restart / Configure / Serial tail,
- * then — ONLY when no bootable golden exists AND no session is active — Install
+ * The Sandbox screen's action list: Stop / Restart / Configure / Guest setup / Serial
+ * tail, then — ONLY when no bootable golden exists AND no session is active — Install
  * sandbox, then Back. Off-mode users never see these — the actions live inside the
  * drill-in screen, which inherits 28a's off-mode invisibility (the menu row is
  * hidden entirely). Owned-vs-unowned does NOT change the list: an unowned dashboard
  * renders the same rows and surfaces the unowned hint on activation (never a dead
- * button). The Install row is HIDDEN, not disabled, when a golden exists — the
- * spec's "shown only when no golden manifest exists" (matrix row 2's jump target);
- * visibility rides the same probe the vm write guard uses (`goldenManifestExists`),
- * so the affordance and the guard can never disagree. It is ALSO hidden while a
- * session is active (`sessionActive` — {@link ./view.ts}'s `vmSessionActive` over
- * the store's vm-state line; matrix row 5: install vs a live session is RAM
- * contention + file races, and the operator should not see an action that can't
- * run) — runInstall's own single-flight scan stays the race authority for the
- * window a vm-state line can't see, and its refusal surfaces inline. Pure.
+ * button) — EXCEPT Guest setup, which takes no gate at all (guest.json is a local
+ * build input, not a server setting). The Install row is HIDDEN, not disabled, when a
+ * golden exists — the spec's "shown only when no golden manifest exists" (matrix row
+ * 2's jump target); visibility rides the same probe the vm write guard uses
+ * (`goldenManifestExists`), so the affordance and the guard can never disagree. It is
+ * ALSO hidden while a session is active (`sessionActive` — {@link ./view.ts}'s
+ * `vmSessionActive` over the store's vm-state line; matrix row 5: install vs a live
+ * session is RAM contention + file races, and the operator should not see an action
+ * that can't run) — runInstall's own single-flight scan stays the race authority for
+ * the window a vm-state line can't see, and its refusal surfaces inline. Pure.
  */
 export function sandboxItems(hasGolden: boolean, sessionActive = false): ListItem[] {
 	const rows: ListItem[] = [
@@ -303,6 +311,10 @@ export function sandboxItems(hasGolden: boolean, sessionActive = false): ListIte
 			description: "stop, then a fresh boot (retain reuses the overlay, discard is fresh)",
 		},
 		{ label: SANDBOX_CONFIGURE_LABEL, description: "the vm settings section — boot mode, memory, persist…" },
+		{
+			label: SANDBOX_GUEST_SETUP_LABEL,
+			description: "the guest's build config — what the next `vm install` bakes (guest.json)",
+		},
 		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
 	];
 	if (!hasGolden && !sessionActive) {

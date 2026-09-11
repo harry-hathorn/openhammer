@@ -16,6 +16,7 @@ import {
 	renderFieldRows,
 	renderList,
 	SANDBOX_CONFIGURE_LABEL,
+	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SERIAL_LABEL,
@@ -139,17 +140,27 @@ describe("screens — settings/doctor items", () => {
 	});
 });
 
-describe("screens — sandboxItems (spec 28, box 28b + 28c)", () => {
-	it("with a golden: Stop, Restart, Configure, Serial tail, Back — no Install row", () => {
+describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e)", () => {
+	it("with a golden: Stop, Restart, Configure, Guest setup, Serial tail, Back — no Install row", () => {
 		const labels = sandboxItems(true).map((i) => i.label);
 		expect(labels).toEqual([
 			SANDBOX_STOP_LABEL,
 			SANDBOX_RESTART_LABEL,
 			SANDBOX_CONFIGURE_LABEL,
+			SANDBOX_GUEST_SETUP_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);
 		expect(labels).not.toContain(SANDBOX_INSTALL_LABEL);
+	});
+
+	it("the Guest setup row sits beside Configure and frames itself as a local build input (box 28e)", () => {
+		const items = sandboxItems(true);
+		const configure = items.findIndex((i) => i.label === SANDBOX_CONFIGURE_LABEL);
+		const guest = items.findIndex((i) => i.label === SANDBOX_GUEST_SETUP_LABEL);
+		expect(guest).toBe(configure + 1); // beside Configure, before Serial tail
+		expect(items[guest]?.description).toContain("guest.json");
+		expect(items[guest]?.description).toContain("`vm install`");
 	});
 
 	it("without a golden the Install row APPEARS (hidden when one exists — never a disabled row)", () => {
@@ -171,6 +182,7 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c)", () => {
 			SANDBOX_STOP_LABEL,
 			SANDBOX_RESTART_LABEL,
 			SANDBOX_CONFIGURE_LABEL,
+			SANDBOX_GUEST_SETUP_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);
