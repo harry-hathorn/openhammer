@@ -280,3 +280,55 @@ describe("DashboardRoot — hjkl navigation (nvim-style)", () => {
 		expect(log).not.toContain("quit");
 	});
 });
+
+describe("DashboardRoot — Sandbox screen (spec 28)", () => {
+	/** A root whose store is in the given vm mode; the vm case has a ready line + a
+	 *  hermetic guest root (env-injected — the store never reads the real guest doc). */
+	function vmRooted(log: string[], mode: "off" | "vm"): DashboardRoot {
+		const store = new DashboardStore(
+			{ env: { MCP_ROOT_DIR: "/srv/guest-work" } },
+			{
+				version: 1,
+				channels: [],
+				defaultChannel: null,
+				mcp: { allowedClients: [] },
+				vm: { ...defaultVmSettings(), mode },
+			},
+		);
+		if (mode === "vm") {
+			store.applyVmStateLine(
+				JSON.stringify({
+					type: "vm-state",
+					state: "ready",
+					sessionId: "vm-20260911T101112Z-ab",
+					phase: null,
+					sshPort: 42255,
+					error: null,
+				}),
+			);
+		}
+		return new DashboardRoot({ store, style: createStyle(false), actions: fakeActions(log) });
+	}
+
+	it("the Sandbox row drills into the read-only state screen (state row + guest root)", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm");
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // -> Sandbox (index 6, after Doctor)
+		expect(root.focus).toBe(6);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		await flushActions();
+		const lines = root.render(80);
+		expect(lines.some((l) => l.includes("Sandbox  ready · session vm-20260911T101112Z-ab · ssh :42255"))).toBe(true);
+		expect(lines.some((l) => l.includes("guest root: /srv/guest-work"))).toBe(true);
+	});
+
+	it("off mode + no vm-state line: focus 6 is Quit, not a hidden Sandbox row", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "off");
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toContain("quit"); // the row after Doctor IS Quit — nothing new for an off user
+	});
+});

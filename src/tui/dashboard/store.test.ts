@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
-import { defaultVmSettings } from "../../config/settings.ts";
+import { defaultVmSettings, type VmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
+import type { VmStateLine } from "../../observability/status-socket.ts";
 import { DashboardStore, emptyStatus, type ServerStatusState } from "./store.ts";
 
 /** A minimal valid RequestEvent for the monitor ring (the reducer reads client + ts). */
@@ -110,5 +111,103 @@ describe("DashboardStore — monitor ring + clients reducer", () => {
 		const s = new DashboardStore();
 		for (let i = 0; i < 12; i++) s.applyEvent(event(`c${i}`));
 		expect(s.monitorEvents.length).toBe(8);
+	});
+});
+
+/** A vm-state line fixture (mirrors monitor-view.test.ts's — the spec 27h wire shape). */
+function vmLine(over: Partial<VmStateLine> = {}): VmStateLine {
+	return {
+		type: "vm-state",
+		state: "ready",
+		sessionId: "vm-20260911T101112Z-ab",
+		phase: null,
+		sshPort: 42255,
+		error: null,
+		...over,
+	};
+}
+
+/** A settings doc with only the vm mode overridden. */
+function settingsInMode(mode: VmSettings["mode"]): Settings {
+	return {
+		version: 1,
+		channels: [],
+		defaultChannel: null,
+		mcp: { allowedClients: [] },
+		vm: { ...defaultVmSettings(), mode },
+	};
+}
+
+describe("DashboardStore — vm-state (spec 28)", () => {
+	it("applyVmStateLine holds the latest line and marks the vm observed", () => {
+		const s = new DashboardStore();
+		expect(s.latestVmState).toBeNull();
+		expect(s.vmObserved).toBe(false);
+		s.applyVmStateLine(JSON.stringify(vmLine({ state: "booting", phase: "ssh", sessionId: null, sshPort: null })));
+		expect(s.latestVmState?.state).toBe("booting");
+		s.applyVmStateLine(JSON.stringify(vmLine()));
+		expect(s.latestVmState).toEqual(vmLine()); // latest wins
+		expect(s.vmObserved).toBe(true);
+	});
+
+	it("a stopped line keeps the sticky observed flag (the sandbox existed)", () => {
+		const s = new DashboardStore();
+		s.applyVmStateLine(JSON.stringify(vmLine()));
+		s.applyVmStateLine(JSON.stringify(vmLine({ state: "stopped", sessionId: null, sshPort: null })));
+		expect(s.latestVmState?.state).toBe("stopped");
+		expect(s.vmObserved).toBe(true);
+	});
+
+	it("an off line is held but does NOT mark the vm observed", () => {
+		const s = new DashboardStore();
+		s.applyVmStateLine(JSON.stringify(vmLine({ state: "off", sessionId: null })));
+		expect(s.latestVmState?.state).toBe("off");
+		expect(s.vmObserved).toBe(false);
+	});
+
+	it("an unknown line kind leaves the store unharmed (the 27h additive-parse twin)", () => {
+		const s = new DashboardStore();
+		s.applyVmStateLine('{"type":"future-thing","x":1}');
+		s.applyVmStateLine("{not json");
+		s.applyVmStateLine("");
+		s.applyVmStateLine(JSON.stringify({ type: "channel-state", id: "c1", up: true, url: null }));
+		// A vm-state discriminator with missing fields is rejected too:
+		s.applyVmStateLine(JSON.stringify({ type: "vm-state", state: "ready" }));
+		expect(s.latestVmState).toBeNull();
+		expect(s.vmObserved).toBe(false);
+	});
+
+	it("vmRoot is null in off mode without resolving any vm config (zero-VM pin)", () => {
+		const guestUser = vi.fn(() => {
+			throw new Error("must not be called in off mode");
+		});
+		const s = new DashboardStore({ guestUser }, settingsInMode("off"));
+		expect(s.vmRoot).toBeNull();
+		expect(guestUser).not.toHaveBeenCalled();
+	});
+
+	it("vm mode resolves MCP_ROOT_DIR as the guest root (the reinterpretation)", () => {
+		const s = new DashboardStore({ env: { MCP_ROOT_DIR: "/srv/guest-work" } }, settingsInMode("vm"));
+		expect(s.vmRoot).toBe("/srv/guest-work");
+	});
+
+	it("vm mode with MCP_ROOT_DIR unset defaults to /home/<guestUser> via the seam", () => {
+		const s = new DashboardStore({ env: {}, guestUser: () => "sandbox" }, settingsInMode("vm"));
+		expect(s.vmRoot).toBe("/home/sandbox");
+	});
+
+	it("an unresolvable env degrades to null instead of throwing into a render", () => {
+		// A malformed MCP_VM_* value throws in resolveConfig (the boot-fatal
+		// posture) — the dashboard hides the row rather than crash a render.
+		const s = new DashboardStore({ env: { MCP_VM_MEMORY: "banana" } }, settingsInMode("vm"));
+		expect(s.vmRoot).toBeNull();
+	});
+
+	it("vmRoot memoizes the resolution across reads", () => {
+		const guestUser = vi.fn(() => "sandbox");
+		const s = new DashboardStore({ env: {}, guestUser }, settingsInMode("vm"));
+		expect(s.vmRoot).toBe("/home/sandbox");
+		expect(s.vmRoot).toBe("/home/sandbox");
+		expect(guestUser).toHaveBeenCalledTimes(1);
 	});
 });

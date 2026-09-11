@@ -3,11 +3,15 @@ import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultVmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
+import type { VmStateLine } from "../../observability/status-socket.ts";
 import {
 	channelDetailRows,
 	channelRows,
 	clientRows,
 	monitorRows,
+	sandboxEntryVisible,
+	sandboxHeaderRows,
+	sandboxStateRow,
 	secretRevealRows,
 	settingsRows,
 	statusRows,
@@ -165,5 +169,63 @@ describe("view — monitorRows + settingsRows", () => {
 		const map2 = Object.fromEntries(settingsRows(s2).map((r) => [r.label, r.value]));
 		expect(map2["allowed clients"]).toBe("(any)"); // "*" => any
 		expect(map2["default channel"]).toBe("(none)");
+	});
+});
+
+/** A vm-state line fixture (mirrors monitor-view.test.ts's — the spec 27h wire shape). */
+function vmState(over: Partial<VmStateLine> = {}): VmStateLine {
+	return {
+		type: "vm-state",
+		state: "ready",
+		sessionId: "vm-20260911T101112Z-ab",
+		phase: null,
+		sshPort: 42255,
+		error: null,
+		...over,
+	};
+}
+
+describe("view — sandbox rows (spec 28)", () => {
+	it("renders the state row per lifecycle state, in the monitor-view voice", () => {
+		expect(sandboxStateRow(vmState())).toBe("Sandbox  ready · session vm-20260911T101112Z-ab · ssh :42255");
+		expect(sandboxStateRow(vmState({ sshPort: null }))).toBe("Sandbox  ready · session vm-20260911T101112Z-ab");
+		expect(sandboxStateRow(vmState({ sshPort: null, sessionId: null }))).toBe("Sandbox  ready · session (none)");
+		expect(sandboxStateRow(vmState({ state: "booting", phase: "ssh", sessionId: null, sshPort: null }))).toBe(
+			"Sandbox  booting (phase ssh)",
+		);
+		expect(sandboxStateRow(vmState({ state: "booting", phase: null, sessionId: null, sshPort: null }))).toBe(
+			"Sandbox  booting",
+		);
+		expect(
+			sandboxStateRow(
+				vmState({
+					state: "failed",
+					sessionId: null,
+					sshPort: null,
+					error: "sandbox boot failed: no golden manifest\nrun: openhammer vm install",
+				}),
+			),
+		).toBe("Sandbox  failed — sandbox boot failed: no golden manifest run: openhammer vm install");
+		expect(sandboxStateRow(vmState({ state: "failed", sessionId: null, sshPort: null, error: null }))).toBe(
+			"Sandbox  failed",
+		);
+		expect(sandboxStateRow(vmState({ state: "stopped", sessionId: null, sshPort: null }))).toBe("Sandbox  stopped");
+	});
+
+	it("a null line (vm mode configured, nothing reported yet) reads as stopped", () => {
+		expect(sandboxStateRow(null)).toBe("Sandbox  stopped");
+	});
+
+	it("sandboxHeaderRows appends the guest-root row only when the root is known", () => {
+		const row = sandboxStateRow(vmState());
+		expect(sandboxHeaderRows(vmState(), "/home/sandbox")).toEqual([row, "guest root: /home/sandbox"]);
+		expect(sandboxHeaderRows(vmState(), null)).toEqual([row]);
+	});
+
+	it("sandboxEntryVisible: off + no report hides; a report or a vm mode shows", () => {
+		expect(sandboxEntryVisible("off", false)).toBe(false);
+		expect(sandboxEntryVisible("off", true)).toBe(true); // the mode-flipped-at-boot escape hatch
+		expect(sandboxEntryVisible("vm", false)).toBe(true); // from settings, before any line
+		expect(sandboxEntryVisible("agent", false)).toBe(true);
 	});
 });

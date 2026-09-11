@@ -78,6 +78,8 @@ export interface DashboardDeps {
 	subscribe?: (
 		onEvent: (event: RequestEvent) => void,
 		onChannelState?: (state: ChannelStateLine) => void,
+		/** vm-state lines (spec 28): the RAW NDJSON line — the store parses + holds it. */
+		onVmState?: (line: string) => void,
 	) => () => void;
 	/** Static-channel probe (19c-probe). Omit for a dashboard that does not probe channels. */
 	probeChannels?: (
@@ -208,6 +210,9 @@ export async function runDashboard(deps: DashboardDeps): Promise<void> {
 					store.setStatus({ ...store.status, publicUrl: null });
 				}
 			},
+			// vm-state lines (spec 28): the raw line — the store parses (skipping
+			// unknown kinds) and holds the latest for the Sandbox entry.
+			(line) => store.applyVmStateLine(line),
 		);
 
 		// The static-channel probe fills the channels the server has NOT reported, so the

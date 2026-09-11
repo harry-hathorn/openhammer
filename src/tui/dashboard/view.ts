@@ -19,9 +19,10 @@
  * screen renders differently.
  */
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
-import type { ChannelEntry, Settings } from "../../config/settings.ts";
+import type { ChannelEntry, Settings, VmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
-import { formatEvent } from "../monitor-view.ts";
+import type { VmStateLine } from "../../observability/status-socket.ts";
+import { formatEvent, formatVmState } from "../monitor-view.ts";
 import type { ChannelLiveState, ServerStatusState } from "./store.ts";
 
 /** A labeled key/value row (status, channel detail, settings). `value` is plain text. */
@@ -183,4 +184,64 @@ export function settingsRows(settings: Settings): FieldRow[] {
 		{ label: "allowed clients", value: any ? "(any)" : clients.join(", ") },
 		{ label: "default channel", value: settings.defaultChannel ?? "(none)" },
 	];
+}
+
+// ---- the Sandbox entry (spec 28) ----------------------------------------------
+
+/**
+ * The Sandbox entry's visibility — the off-mode invisibility rule (spec 28):
+ * the entry is ABSENT exactly when the **loaded settings'** vm mode is `off` AND
+ * no vm-state line with state ≠ `off` has ever arrived. The mode is read from
+ * the settings doc (not from the line): that is what the default npm user has,
+ * so they see nothing new. A vm-state line is the escape hatch for a boot-time
+ * override (`MCP_VM_MODE=vm` in the env while the doc still says `off`) — once
+ * the server reports a live VM lifecycle, the entry appears. Pure.
+ */
+export function sandboxEntryVisible(mode: VmSettings["mode"], vmObserved: boolean): boolean {
+	return mode !== "off" || vmObserved;
+}
+
+/**
+ * The Sandbox state row's text AFTER the head — one shape per lifecycle state,
+ * in the monitor-view's established voice (formatVmState owns the per-state
+ * clauses; this derives from it so the monitor row and the dashboard row can
+ * never drift):
+ *
+ *     ready · session vm-20260911T101112Z-ab · ssh :42255
+ *     booting (phase ssh)
+ *     failed — sandbox boot failed: …
+ *     stopped
+ *
+ * A `null` line (vm mode configured, nothing reported yet) reads as `stopped` —
+ * the honest pre-first-report posture (the eager boot reports within moments).
+ * Pure.
+ */
+export function sandboxStateText(line: VmStateLine | null): string {
+	if (line === null) return "stopped";
+	// Strip formatVmState's `VM  ` head; the dashboard re-heads with `Sandbox  `.
+	return formatVmState(line).slice("VM".length).trim();
+}
+
+/**
+ * The verbatim Sandbox state row — {@link sandboxStateText} with the
+ * `Sandbox  ` head (the monitor's `VM  ` head swapped for the entry's own
+ * name). e.g. `Sandbox  ready · session vm-20260911T101112Z-ab · ssh :42255`.
+ * Pure.
+ */
+export function sandboxStateRow(line: VmStateLine | null): string {
+	return `Sandbox  ${sandboxStateText(line)}`;
+}
+
+/**
+ * The Sandbox screen's header lines (spec 28, matrix row 9): the state row
+ * verbatim, then — when the effective guest root is known (vm modes, resolvable
+ * env) — the `guest root: <rootDir>` row surfacing `MCP_ROOT_DIR`'s guest
+ * reinterpretation (the same value a boot resolves; the store computes it via
+ * `resolveConfig`). `null` root (off mode / unresolvable) renders no root row.
+ * Pure.
+ */
+export function sandboxHeaderRows(line: VmStateLine | null, guestRoot: string | null): string[] {
+	const rows = [sandboxStateRow(line)];
+	if (guestRoot !== null) rows.push(`guest root: ${guestRoot}`);
+	return rows;
 }

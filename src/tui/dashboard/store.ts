@@ -30,7 +30,9 @@
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultSettings } from "../../config/settings.ts";
+import { resolveConfig } from "../../config.ts";
 import type { ClientStat, RequestEvent } from "../../mcp/telemetry.ts";
+import { parseVmStateLine, type VmStateLine } from "../../observability/status-socket.ts";
 import { MonitorState } from "../monitor-view.ts";
 
 /** Default monitor-feed depth — the last N events shown in the monitor screen. */
@@ -71,6 +73,17 @@ export interface ChannelLiveState {
 export interface DashboardStoreDeps {
 	/** Monitor-feed depth (the events ring cap). Defaults to {@link DASHBOARD_MONITOR_LIMIT}. */
 	monitorLimit?: number;
+	/**
+	 * The env the effective guest root resolves against ({@link DashboardStore.vmRoot}).
+	 * Defaults to `process.env`; tests inject a literal to stay hermetic.
+	 */
+	env?: NodeJS.ProcessEnv;
+	/**
+	 * The guest-username seam behind the vm-mode root default (`/home/<guestUser>`).
+	 * Defaults to `resolveConfig`'s own (the spec-26 guest-config doc read); tests
+	 * inject a literal so the vm-root path never touches disk.
+	 */
+	guestUser?: () => string;
 }
 
 /**
@@ -91,6 +104,19 @@ export class DashboardStore {
 	oauthClients: ClientInfo[] = [];
 	/** Whether the global operator login is configured (the `/authorize` gate for login clients). */
 	loginConfigured = false;
+	/**
+	 * The LATEST vm-state line (spec 27h), held exactly like {@link channelState}
+	 * holds channel reports: the most recent wins. `null` = nothing observed yet
+	 * (an off-mode server emits no vm-state lines, ever — the zero-VM-code pin).
+	 */
+	latestVmState: VmStateLine | null = null;
+	/**
+	 * Sticky: has any vm-state line with state ≠ `off` ever arrived? The Sandbox
+	 * entry's escape hatch (spec 28 off-mode invisibility) — once the server
+	 * reports a live VM lifecycle, the entry appears even if the settings doc
+	 * still says `off` (a boot-time `MCP_VM_MODE` override the doc lags behind).
+	 */
+	vmObserved = false;
 
 	/** The connected-client reducer (call counts + last-seen), reused from monitor. */
 	private readonly monitor: MonitorState;
@@ -98,15 +124,24 @@ export class DashboardStore {
 	private readonly events: RequestEvent[] = [];
 	/** The events-ring cap. */
 	private readonly monitorLimit: number;
+	/** The env {@link vmRoot} resolves against (injectable for hermetic tests). */
+	private readonly env: NodeJS.ProcessEnv;
+	/** The guest-username seam {@link vmRoot} resolves through (injectable; avoids disk). */
+	private readonly guestUser: (() => string) | undefined;
+	/** Memoized guest-root value; `undefined` = not computed yet, `null` = unresolvable. */
+	private vmRootCache: string | null | undefined = undefined;
 
 	/**
-	 * @param deps.monitorLimit the events-ring cap.
+	 * @param deps.monitorLimit the events-ring cap; `env`/`guestUser` the guest-root
+	 * resolution seams (defaults: `process.env` / the spec-26 guest doc).
 	 * @param initial the seed settings (channels/default/mcp); defaults to empty.
 	 */
 	constructor(deps: DashboardStoreDeps = {}, initial: Settings = emptySettings()) {
 		this.monitor = new MonitorState();
 		this.monitorLimit = deps.monitorLimit ?? DASHBOARD_MONITOR_LIMIT;
 		this.settings = initial;
+		this.env = deps.env ?? process.env;
+		this.guestUser = deps.guestUser;
 	}
 
 	/** The configured channels (a view over {@link settings}). */
@@ -172,6 +207,47 @@ export class DashboardStore {
 	/** Fold a channel live-state report (server feed or probe) into the snapshot. */
 	applyChannelState(id: string, up: boolean, url: string | null): void {
 		this.setChannelState(id, up, url);
+	}
+
+	/**
+	 * Parse one NDJSON line as a vm-state report and hold it (spec 28 — the
+	 * additive-parse rule's store-side twin of `parseChannelStateLine`'s client):
+	 * a `null` parse (blank, malformed, a `RequestEvent`, a channel-state line, or
+	 * a future/unknown line kind) is a no-op — the store is unharmed, never
+	 * throws. A valid line REPLACES {@link latestVmState} (latest wins) and sets
+	 * the sticky {@link vmObserved} when its state ≠ `off`. The single vm-state
+	 * parse point: the socket feed forwards the raw line, the store narrows it.
+	 */
+	applyVmStateLine(line: string): void {
+		const parsed = parseVmStateLine(line);
+		if (parsed === null) return;
+		this.latestVmState = parsed;
+		if (parsed.state !== "off") this.vmObserved = true;
+	}
+
+	/**
+	 * The effective guest root (spec 28, matrix row 9) — `null` hides the
+	 * `guest root:` row. `null` when the loaded settings' vm mode is `off` (the
+	 * zero-VM-code pin at the dashboard layer: an off user's session reads no vm
+	 * config and resolves nothing), and `null` when the env is unresolvable (the
+	 * same fail-fatal `MCP_VM_*` table `resolveConfig` enforces at boot — a stale
+	 * shell value must never crash a render; the row hides instead). Otherwise the
+	 * value is `resolveConfig(...).rootDir` — the exact path a boot takes, so the
+	 * dashboard row, doctor's `vm-root` check, and a real boot can never drift.
+	 * Computed once per store (the value depends on env + the guest doc, not on
+	 * the mutable settings), memoized across reads.
+	 */
+	get vmRoot(): string | null {
+		if (this.settings.vm.mode === "off") return null;
+		if (this.vmRootCache === undefined) {
+			try {
+				this.vmRootCache = resolveConfig({}, this.env, this.settings, { guestUser: this.guestUser }).rootDir;
+			} catch {
+				// Unresolvable env (a malformed MCP_VM_* in a vm mode): degrade to hidden.
+				this.vmRootCache = null;
+			}
+		}
+		return this.vmRootCache;
 	}
 }
 
