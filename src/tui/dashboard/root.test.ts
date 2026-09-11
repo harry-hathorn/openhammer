@@ -9,6 +9,7 @@ import { activeSessionRefusal } from "../../vm/provision/install.ts";
 import type { SecretsStore } from "../../vm/provision/secrets.ts";
 import { createSandboxActions, VM_UNOWNED_HINT } from "../dashboard.ts";
 import { createStyle } from "../style.ts";
+import { APPLY_TO_RUNNING_HINT, PROVISION_SAVED_FLASH } from "../wizards/guest-setup.ts";
 import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./root.ts";
 import { DashboardStore } from "./store.ts";
 import { type SerialSource, VM_APPLY_HINT } from "./view.ts";
@@ -85,6 +86,20 @@ function fakeActions(log: string[]): DashboardActions {
 		secretsSetup: async () => {
 			log.push("secretsSetup");
 			return ok({ env: {}, files: [] }) as Result<SecretsStore, Error>;
+		},
+		editProvision: async () => {
+			log.push("editProvision");
+			return ok(undefined) as Result<void, Error>;
+		},
+		applyAgent: async () => {
+			log.push("applyAgent");
+			return ok(
+				`default agent written to ~/.config/omarchy/defaults/agent (codex) — ${APPLY_TO_RUNNING_HINT}`,
+			) as Result<string, Error>;
+		},
+		applyTheme: async () => {
+			log.push("applyTheme");
+			return ok(`theme set to tokyo-night — ${APPLY_TO_RUNNING_HINT}`) as Result<string, Error>;
 		},
 		installSandbox: async () => {
 			log.push("installSandbox");
@@ -404,7 +419,10 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(lines.some((l) => l.includes("Configure…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Guest setup…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Secrets…"))).toBe(true);
+		expect(lines.some((l) => l.includes("Edit provision.sh…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Serial tail"))).toBe(true);
+		expect(lines.some((l) => l.includes("Set default agent…"))).toBe(true); // the vm fixture holds a READY line — 28g
+		expect(lines.some((l) => l.includes("Set theme…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Back"))).toBe(true);
 		expect(lines.some((l) => l.includes("re-boots the sandbox on the next server start"))).toBe(true);
 		expect(lines.some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
@@ -441,7 +459,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 5 = Serial tail (Configure 2, Guest setup 3, Secrets 4 — boxes 28c/28e/28f)
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 6 = Serial tail (Configure 2, Guest setup 3, Secrets 4, Edit provision.sh 5 — boxes 28c/28e/28f/28g)
 		await flushActions();
 		expect(log).toEqual(["readSerial"]);
 		expect(root.screen).toEqual({ kind: "serial" });
@@ -465,7 +484,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 5 = Serial tail (Secrets joined at 4, box 28f)
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 6 = Serial tail (Edit provision.sh joined at 5, box 28g)
 		await flushActions();
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
 		expect(root.render(80).some((l) => l.includes("no serial yet"))).toBe(true);
@@ -516,7 +536,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Install (no golden — the row exists; Secrets joined at 4, box 28f)
+		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Install (no golden + session stopped — the apply rows hide without a ready line, box 28g; Secrets joined at 4)
 		root.handleInput(ENTER);
 		await flushActions();
 		const lines = root.render(80);
@@ -533,7 +553,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Install (Secrets joined at 4, box 28f)
+		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Install (no golden + stopped — box 28g's apply rows hide; Secrets joined at 4)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(root.render(80).some((l) => l.includes("vm install: gate failed"))).toBe(true);
@@ -790,7 +810,7 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // line says inactive — the vm-side scan is the race backstop
 		);
-		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Install (stopped → the row exists; Secrets joined at 4, box 28f)
+		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Install (stopped → the row exists; Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(
@@ -798,5 +818,94 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 				.render(200)
 				.some((l) => l.includes("stop the session first: mode off + restart, or Sandbox → Stop sandbox")),
 		).toBe(true);
+	});
+});
+
+describe("DashboardRoot — provision.sh + apply-to-running (spec 28, box 28g)", () => {
+	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter) — the per-box helper. */
+	async function sandboxed(
+		log: string[],
+		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+		opts: { hasGolden?: boolean; vmState?: VmStateLine["state"] | null } = {},
+	): Promise<DashboardRoot> {
+		const root = vmRooted(log, "vm", actionsOver, opts);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		return root;
+	}
+
+	it("a READY session shows the apply rows; the booting (port undiscovered) and stopped fixtures hide them", async () => {
+		const ready = (await sandboxed([])).render(200);
+		expect(ready.some((l) => l.includes("Set default agent…"))).toBe(true);
+		expect(ready.some((l) => l.includes("Set theme…"))).toBe(true);
+
+		const booting = (await sandboxed([], undefined, { vmState: "booting" })).render(200);
+		expect(booting.some((l) => l.includes("Set default agent…"))).toBe(false);
+		expect(booting.some((l) => l.includes("Set theme…"))).toBe(false);
+
+		const stopped = (await sandboxed([], undefined, { vmState: "stopped" })).render(200);
+		expect(stopped.some((l) => l.includes("Set default agent…"))).toBe(false);
+		expect(stopped.some((l) => l.includes("Set theme…"))).toBe(false);
+	});
+
+	it("enter on Edit provision.sh runs editProvision and flashes the runs-at-next-provision line", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Edit provision.sh (beside Secrets, box 28g)
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["editProvision"]);
+		expect(root.render(80).some((l) => l.includes(PROVISION_SAVED_FLASH))).toBe(true);
+	});
+
+	it("enter on Set default agent runs applyAgent and flashes the report verbatim — the row-7 hint included", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Set default agent (after Serial tail at 6, box 28g)
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["applyAgent"]);
+		const flash = root.render(200).find((l) => l.includes("default agent written"));
+		expect(flash).toBeDefined();
+		expect(flash).toContain(APPLY_TO_RUNNING_HINT);
+	});
+
+	it("a failed apply flashes the err with the hint appended — matrix row 7 on failure too (never twice)", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			applyTheme: async () => {
+				log.push("applyTheme");
+				// The flow's errs ALREADY carry the hint (its own tests pin that) — the
+				// flash must show it exactly once.
+				return err(
+					new Error(
+						`omarchy theme set tokyo-night failed in the guest (exit 1: no such theme) — ${APPLY_TO_RUNNING_HINT}`,
+					),
+				) as Result<string, Error>;
+			},
+		}));
+		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Set theme
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["applyTheme"]);
+		const flash = root.render(200).find((l) => l.includes("no such theme"));
+		expect(flash).toContain(APPLY_TO_RUNNING_HINT);
+		expect(flash?.split(APPLY_TO_RUNNING_HINT)).toHaveLength(2); // once — not double-appended
+	});
+
+	it("a cancelled apply (null) is silent — the cancelled-modal idiom", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			applyAgent: async () => {
+				log.push("applyAgent");
+				return null;
+			},
+		}));
+		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Set default agent
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["applyAgent"]);
+		expect(root.render(80).some((l) => l.includes("default agent written"))).toBe(false); // no flash
 	});
 });

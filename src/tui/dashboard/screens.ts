@@ -280,6 +280,23 @@ export const SANDBOX_GUEST_SETUP_LABEL = "Guest setup…";
  * input of this machine's tree (the flow owns the row-6 live-session semantics).
  */
 export const SANDBOX_SECRETS_LABEL = "Secrets…";
+/**
+ * The provision.sh row's label (spec 28, box 28g) — the tier-(c) escape hatch
+ * (`$EDITOR` over `<vm root>/provision.sh`, created from a commented template on
+ * first open), beside Secrets, matched by EXACT match in the root's dispatch.
+ * Owned-agnostic like Guest setup/Secrets: a local build input.
+ */
+export const SANDBOX_PROVISION_LABEL = "Edit provision.sh…";
+/**
+ * The apply-to-running rows' labels (spec 28, box 28g) — the two curated one-ssh-exec
+ * actions against the LIVE guest, matched by EXACT match in the root's dispatch.
+ * UNOWNED-FRIENDLY: they take no vmService gate (the guest is addressable from the
+ * vm-state line's port + session id plus the vm tree's key/pin — see
+ * wizards/guest-setup.ts). Shown ONLY when the vm-state line is ready enough
+ * (`applyToRunningReady`) — hidden, not disabled, the row-5 precedent.
+ */
+export const SANDBOX_APPLY_AGENT_LABEL = "Set default agent…";
+export const SANDBOX_APPLY_THEME_LABEL = "Set theme…";
 export const SANDBOX_SERIAL_LABEL = "Serial tail";
 export const SANDBOX_INSTALL_LABEL = "Install sandbox…";
 
@@ -294,25 +311,29 @@ export const SANDBOX_STOP_TEXT =
 
 /**
  * The Sandbox screen's action list: Stop / Restart / Configure / Guest setup /
- * Secrets / Serial tail, then — ONLY when no bootable golden exists AND no session
- * is active — Install sandbox, then Back. Off-mode users never see these — the
- * actions live inside the drill-in screen, which inherits 28a's off-mode
- * invisibility (the menu row is hidden entirely). Owned-vs-unowned does NOT change
- * the list: an unowned dashboard renders the same rows and surfaces the unowned
- * hint on activation (never a dead button) — EXCEPT Guest setup and Secrets, which
- * take no gate at all (both are editors over the LOCAL vm tree: guest.json is a
- * build input, the secrets store a runtime input — not server settings). The
- * Install row is HIDDEN, not disabled, when a golden exists — the spec's "shown
- * only when no golden manifest exists" (matrix row 2's jump target); visibility
- * rides the same probe the vm write guard uses (`goldenManifestExists`), so the
- * affordance and the guard can never disagree. It is ALSO hidden while a session is
- * active (`sessionActive` — {@link ./view.ts}'s `vmSessionActive` over the store's
- * vm-state line; matrix row 5: install vs a live session is RAM contention + file
- * races, and the operator should not see an action that can't run) — runInstall's
- * own single-flight scan stays the race authority for the window a vm-state line
- * can't see, and its refusal surfaces inline. Pure.
+ * Secrets / Edit provision.sh / Serial tail, then — ONLY while the vm-state line is
+ * ready enough (`applyReady`: a live session with a discovered port, spec 28 box
+ * 28g) — the two apply-to-running rows (direct ssh execs at the LIVE guest; no
+ * owned-server gate exists for them, so visibility is the only gate), then — ONLY
+ * when no bootable golden exists AND no session is active — Install sandbox, then
+ * Back. Off-mode users never see these — the actions live inside the drill-in
+ * screen, which inherits 28a's off-mode invisibility (the menu row is hidden
+ * entirely). Owned-vs-unowned does NOT change the list: an unowned dashboard renders
+ * the same rows and surfaces the unowned hint on activation (never a dead button) —
+ * EXCEPT Guest setup, Secrets, and Edit provision.sh, which take no gate at all
+ * (editors over the LOCAL vm tree: guest.json is a build input, the secrets store a
+ * runtime input, provision.sh an operator-authored build input — not server
+ * settings). The Install row is HIDDEN, not disabled, when a golden exists — the
+ * spec's "shown only when no golden manifest exists" (matrix row 2's jump target);
+ * visibility rides the same probe the vm write guard uses (`goldenManifestExists`),
+ * so the affordance and the guard can never disagree. It is ALSO hidden while a
+ * session is active (`sessionActive` — {@link ./view.ts}'s `vmSessionActive` over
+ * the store's vm-state line; matrix row 5: install vs a live session is RAM
+ * contention + file races, and the operator should not see an action that can't
+ * run) — runInstall's own single-flight scan stays the race authority for the
+ * window a vm-state line can't see, and its refusal surfaces inline. Pure.
  */
-export function sandboxItems(hasGolden: boolean, sessionActive = false): ListItem[] {
+export function sandboxItems(hasGolden: boolean, sessionActive = false, applyReady = false): ListItem[] {
 	const rows: ListItem[] = [
 		{ label: SANDBOX_STOP_LABEL, description: SANDBOX_STOP_TEXT },
 		{
@@ -328,8 +349,21 @@ export function sandboxItems(hasGolden: boolean, sessionActive = false): ListIte
 			label: SANDBOX_SECRETS_LABEL,
 			description: "env pairs + credential files — the 0700 store (loads at sandbox boot)",
 		},
+		{
+			label: SANDBOX_PROVISION_LABEL,
+			description: "the operator's provision.sh escape hatch in $EDITOR (runs at `vm provision`)",
+		},
 		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
 	];
+	if (applyReady) {
+		rows.push(
+			{
+				label: SANDBOX_APPLY_AGENT_LABEL,
+				description: "write ~/.config/omarchy/defaults/agent in the running guest over ssh",
+			},
+			{ label: SANDBOX_APPLY_THEME_LABEL, description: "omarchy theme set — the list fetched from the guest" },
+		);
+	}
 	if (!hasGolden && !sessionActive) {
 		rows.push({
 			label: SANDBOX_INSTALL_LABEL,

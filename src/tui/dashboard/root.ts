@@ -30,6 +30,7 @@ import type { GuestConfig } from "../../vm/provision/guest-config.ts";
 import type { SecretsStore } from "../../vm/provision/secrets.ts";
 import { BANNER } from "../banner.ts";
 import type { Style } from "../style.ts";
+import { APPLY_TO_RUNNING_HINT, applyToRunningReady, PROVISION_SAVED_FLASH } from "../wizards/guest-setup.ts";
 import {
 	channelDetailSpec,
 	channelItems,
@@ -42,9 +43,12 @@ import {
 	menuSectionAt,
 	renderFieldRows,
 	renderList,
+	SANDBOX_APPLY_AGENT_LABEL,
+	SANDBOX_APPLY_THEME_LABEL,
 	SANDBOX_CONFIGURE_LABEL,
 	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
+	SANDBOX_PROVISION_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SECRETS_LABEL,
 	SANDBOX_SERIAL_LABEL,
@@ -171,6 +175,38 @@ export interface DashboardActions {
 	 * carries the saved store; `null` = cancelled/declined.
 	 */
 	secretsSetup(): Promise<Result<SecretsStore, Error> | null>;
+	/**
+	 * Edit provision.sh (spec 28, box 28g) — the tier-(c) escape hatch: opens
+	 * `<HOME>/.openhammer/vm/provision.sh` in `$EDITOR` (created from a commented
+	 * template on first open). NOTHING executes here — the script runs as bash in the
+	 * guest during the next `vm provision` (the flash says exactly that). OWNED-
+	 * AGNOSTIC like Guest setup/Secrets — a local build input of this machine's tree.
+	 * An unset `$EDITOR` errs actionably naming it. `ok` = the editor exited cleanly;
+	 * `null` is never returned (the editor's exit IS the outcome).
+	 */
+	editProvision(): Promise<Result<void, Error> | null>;
+	/**
+	 * Apply-to-running #1 (spec 28, box 28g, matrix row 7): write the RUNNING guest's
+	 * `~/.config/omarchy/defaults/agent` over ONE direct ssh exec — the DIRECT FILE
+	 * WRITE (the `omarchy default agent` CLI setter is a Wayland picker, 22-measured
+	 * finding 12). UNOWNED-FRIENDLY by design: no vmService gate — the guest is
+	 * addressable from the vm-state line's session id + live port (the store) plus the
+	 * vm tree's pinned key + the session's re-keyed known_hosts, all local facts; the
+	 * target is loopback-only, BatchMode, key-only. The agent choice is a select of
+	 * the 13 seeded from guest.json's agent. `ok` carries the report line with the
+	 * row-7 hint (affects FUTURE agent launches — a running tmux agent keeps the old
+	 * one until the sandbox restarts); `null` = cancelled choice.
+	 */
+	applyAgent(): Promise<Result<string, Error> | null>;
+	/**
+	 * Apply-to-running #2 (spec 28, box 28g, matrix row 7): fetch the guest's
+	 * `omarchy theme list` over ssh and set the chosen theme with `omarchy theme set`
+	 * — ONE more ssh exec. A failed list degrades the select to a text field with the
+	 * failure as its hint (the spec's documented fallback — never blocks). Same
+	 * unowned-friendly ssh posture as {@link applyAgent}; the outcome — success or
+	 * failure — is surfaced with the row-7 hint appended. `null` = cancelled choice.
+	 */
+	applyTheme(): Promise<Result<string, Error> | null>;
 	/**
 	 * Build the golden image — 26c's `runInstall` (spec 28, box 28c), matrix row 2's
 	 * jump target. Gated by the SAME owned/unowned model as Stop/Restart (install
@@ -299,16 +335,22 @@ export class DashboardRoot implements Component {
 				// Sandbox (spec 28): the verbatim state row, then the effective guest root
 				// when known (matrix row 9), then the apply-on-restart note while a vm
 				// settings write is saved-but-unapplied (matrix row 3, box 28c) — over the
-				// session action list (box 28b, extended in 28c/28e/28f): Stop / Restart /
-				// Configure / Guest setup / Secrets / Serial tail / Install (no golden AND
-				// no active session — row 5) / Back. Owned-vs-unowned does not change the
-				// list — an unowned activation surfaces the unowned hint (never a dead
-				// button); Guest setup and Secrets take no gate at all (editors over the
-				// LOCAL vm tree — a build input and the runtime secrets store, 28e/28f).
+				// session action list (box 28b, extended in 28c/28e/28f/28g): Stop /
+				// Restart / Configure / Guest setup / Secrets / Edit provision.sh / Serial
+				// tail / the two apply-to-running rows (ready session only — 28g) /
+				// Install (no golden AND no active session — row 5) / Back. Owned-vs-
+				// unowned does not change the list — an unowned activation surfaces the
+				// unowned hint (never a dead button); Guest setup, Secrets, and Edit
+				// provision.sh take no gate at all (editors over the LOCAL vm tree — a
+				// build input and the runtime secrets store, 28e/28f/28g).
 				if (section === "sandbox") {
 					return {
 						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
-						items: sandboxItems(this.store.hasGolden, vmSessionActive(this.store.latestVmState)),
+						items: sandboxItems(
+							this.store.hasGolden,
+							vmSessionActive(this.store.latestVmState),
+							applyToRunningReady(this.store.latestVmState),
+						),
 						hint: this.hint(),
 					};
 				}
@@ -598,6 +640,33 @@ export class DashboardRoot implements Component {
 				this.flashMessage = result.ok
 					? "Secrets saved — they load at the next sandbox boot."
 					: result.error.message;
+				return;
+			}
+			if (label === SANDBOX_PROVISION_LABEL) {
+				// The tier-(c) escape hatch (spec 28, box 28g): $EDITOR over the operator's
+				// provision.sh. Owned-agnostic like Guest setup/Secrets (a local build
+				// input). The flow never executes the script — this flash is the honesty:
+				// it runs during the NEXT `vm provision` (provision.ts step (j)).
+				const result = await this.actions.editProvision();
+				if (result === null) return; // unreachable today — the editor's exit IS the outcome
+				this.flashMessage = result.ok ? PROVISION_SAVED_FLASH : result.error.message;
+				return;
+			}
+			if (label === SANDBOX_APPLY_AGENT_LABEL || label === SANDBOX_APPLY_THEME_LABEL) {
+				// The apply-to-running actions (spec 28, box 28g): each wired action runs
+				// its ONE direct ssh exec (no owned gate — the guest is reachable from the
+				// vm-state line's port + session id plus the local key/pin) and returns the
+				// surfaced report. Matrix row 7: EVERY outcome carries the hint — the flows
+				// append it themselves, so the flash shows it as-is and only backfills a
+				// foreign err that lacks it (never the hint twice).
+				const result =
+					label === SANDBOX_APPLY_AGENT_LABEL ? await this.actions.applyAgent() : await this.actions.applyTheme();
+				if (result === null) return; // cancelled choice — silent (the modal idiom)
+				this.flashMessage = result.ok
+					? result.value
+					: result.error.message.includes(APPLY_TO_RUNNING_HINT)
+						? result.error.message
+						: `${result.error.message} — ${APPLY_TO_RUNNING_HINT}`;
 				return;
 			}
 			if (label === SANDBOX_SERIAL_LABEL) {

@@ -1,6 +1,7 @@
 /**
  * The Guest setup wizards (spec 28) — tier (a), the `guest.json` build-config flow,
- * and tier (b), the sandbox-secrets editor over the 0700 store.
+ * tier (b), the sandbox-secrets editor over the 0700 store, tier (c), the
+ * provision.sh `$EDITOR` escape hatch, and the apply-to-running actions.
  *
  * **Composition — not a `ConfigSection`.** The guest doc is a DIFFERENT STORE with a
  * different posture than the settings doc (26a: whole-doc granularity, an atomic 0600
@@ -45,13 +46,49 @@
  * what the next `vm install` bakes, never a (possibly remote) running server — so the
  * flow takes no owned-server gate anywhere (the one Sandbox action without one).
  *
+ * **Tier (c) — the provision.sh escape hatch ({@link runProvisionEditor})** opens
+ * `<vm root>/provision.sh` (provision.ts's module-private PROVISION_SCRIPT, restated)
+ * in `$EDITOR`: created from a commented template on first open, never EXECUTED here —
+ * it runs as bash in the guest during `vm provision` (provision.ts step (j), which
+ * treats the operator's script as authoritative: a non-zero exit fails the run). No
+ * $EDITOR idiom existed anywhere in src/, so the spawn is `$EDITOR <file>` as an ARG
+ * ARRAY (AGENTS.md spawn hygiene; the editor inherits the terminal while the
+ * dashboard's renderer is suspended), and an unset EDITOR is an actionable err naming
+ * it — never a silently different editor. The saved flash names the only truth: the
+ * script runs during the NEXT `vm provision`.
+ *
+ * **Apply-to-running ({@link runApplyAgent}/{@link runApplyTheme})** — spec 28's
+ * matrix row 7: two curated ONE-ssh-exec actions against the LIVE guest.
+ * Unowned-friendly by design: 28c resolved the `VmService` handle is
+ * child-process-side, but the GUEST is addressable from any process holding the three
+ * local facts the dashboard already has — the session id + live ssh port ride the
+ * vm-state line (the store's `latestVmState`), and the pinned key
+ * `<vm root>/id_ed25519` + the session dir's known_hosts pin are plain files in the vm
+ * tree (the service's `repinKnownHosts` re-keys the pin to `[127.0.0.1]:<port>` for
+ * the CURRENT boot, so the file always pins the live port). The target is
+ * loopback-only by TYPE (`SshTarget.host`), BatchMode, key-only — no passwords
+ * anywhere, and the pin makes an orphan VM on a reused port fail safe. The AGENT
+ * action is the DIRECT FILE WRITE of `~/.config/omarchy/defaults/agent` over ssh —
+ * deliberately NOT `omarchy default agent <x>`: the CLI setter is a Wayland picker
+ * (22-measured finding 12; rc 0 and nothing persisted headless). The write command is
+ * a CONSTANT argv whose payload rides `sshExec`'s stdin (provision.ts's `cat >` idiom)
+ * so no operator-shaped value ever enters a shell string. The THEME action fetches
+ * `omarchy theme list` and — when the list fails — degrades the select to a text field
+ * with the failure as the hint (spec 28's documented fallback; it never blocks the
+ * screen). Every exec-OUTCOME result, success or failure, carries the row-7 hint:
+ * these affect FUTURE agent/theme launches — a running tmux agent keeps the old one
+ * until the sandbox restarts.
+ *
  * **Result spine:** `ok(GuestConfig)` (saved — the doc on disk IS the return),
  * `err(Error)` (an answer no valid doc can carry, or a write failure), or `null`
  * (cancelled, or the post-golden warning declined — no write, silent). Hermetic by
  * injection (the `11a`/`13`/`17b`–`17k` precedent): io/stream/dirs/probe all default
  * to production and are overridden by the tests.
  */
-import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { VmStateLine } from "../../observability/status-socket.ts";
 import { err, ok, type Result } from "../../tools/result.ts";
 import {
 	GUEST_AGENTS,
@@ -69,7 +106,9 @@ import {
 	type SecretsStore,
 	saveSecrets,
 } from "../../vm/provision/secrets.ts";
+import { readManifest } from "../../vm/provision/snapshot.ts";
 import { resolveVmDirs, type VmDirs } from "../../vm/session.ts";
+import { type SshExecResult, type SshTarget, sshExec, sshTargetForPort } from "../../vm/ssh.ts";
 import type { BannerStream } from "../banner.ts";
 import { defaultIo, type SelectOption, withSession } from "../prompts.ts";
 import type { ConfigField } from "../schema.ts";
@@ -685,6 +724,427 @@ export async function runSecretsSetup(deps: SecretsSetupDeps = {}): Promise<Secr
 					if (sure) files.splice(index, 1);
 				}
 			}
+		},
+		{ io, stream: deps.stream },
+	);
+}
+
+// ---- tier (c): the provision.sh escape hatch (spec 28, box 28g) -------------------
+
+/**
+ * The provision.sh file name — provision.ts's module-private `PROVISION_SCRIPT`,
+ * restated (not exported there; the SERIAL_LOG_FILE precedent in dashboard.ts). The
+ * SAME name the provisioner reads at `<vm root>/provision.sh` and streams into the
+ * guest during `vm provision` step (j) — one restatement, never a drift.
+ */
+const PROVISION_SCRIPT_FILE = "provision.sh";
+
+/**
+ * The saved flash (the root shows it on `ok`): the editor wrote the file and NOTHING
+ * ran here — the script's only execution is inside the guest during the next
+ * `vm provision`. Exported so the root and these tests share the single surface.
+ */
+export const PROVISION_SAVED_FLASH = "provision.sh saved — it runs during the next `vm provision`.";
+
+/**
+ * The exact err when `$EDITOR` is unset: actionable (names the variable AND the fix,
+ * which documents the plain-vi fallback the box calls for) — never a silent spawn of
+ * some other editor. Exported so tests pin the surface.
+ */
+export const PROVISION_NO_EDITOR_ERROR =
+	"no $EDITOR is set — export EDITOR=vim (or vi, nano) to edit the sandbox's provision.sh";
+
+/**
+ * The first-open template: a header explaining what the file IS (run as bash IN THE
+ * GUEST during `vm provision`; operator-authored; authoritative — a non-zero exit
+ * fails the provision run) and a two-line example, everything commented so saving it
+ * untouched is a harmless no-op at provision time (every line a comment). Verbatim —
+ * the tests pin this exact string.
+ */
+export function provisionTemplate(): string {
+	return [
+		"#!/usr/bin/env bash",
+		"# OpenHammer's provision.sh — the operator's escape hatch (specs 26/28).",
+		"# Runs as bash IN THE GUEST during `vm provision`, after the base provisioning.",
+		"# Operator-authored and authoritative: a non-zero exit FAILS the provision run.",
+		"#",
+		"# Example:",
+		"#   pacman -Sy --noconfirm htop",
+		"#   git config --global init.defaultBranch main",
+		"",
+	].join("\n");
+}
+
+/** `<vm root>/provision.sh` — the exact path provision.ts's step (j) reads. Pure. */
+export function provisionScriptPath(dirs: VmDirs): string {
+	return join(dirs.root, PROVISION_SCRIPT_FILE);
+}
+
+/** The editor runner's seam: spawn `$EDITOR <file>` and resolve on a clean exit. */
+export type RunEditor = (argv: readonly string[]) => Promise<void>;
+
+// The production runner: stdio inherited (the editor IS the foreground program while
+// the dashboard's renderer is suspended — the withModal handoff), env inherited. No
+// host shell, no detachment, no kill surface: the operator closes the editor.
+const runEditorDefault: RunEditor = (argv) =>
+	new Promise<void>((resolve, reject) => {
+		const child = spawn(argv[0] ?? "", argv.slice(1), { stdio: "inherit" });
+		child.on("error", (error: Error) => reject(error));
+		child.on("close", (code) => {
+			if (code === 0) resolve();
+			else reject(new Error(`exited ${code ?? "on a signal"}`));
+		});
+	});
+
+/** Injectable seams so {@link runProvisionEditor} is hermetic (the tiers-(a)/(b) precedent). */
+export interface ProvisionEditorDeps {
+	/**
+	 * The vm tree the script lives in (default: `resolveVmDirs({ homeDir })`).
+	 * Pass `homeDir` instead to move the whole tree to one place — the single-tree
+	 * guarantee.
+	 */
+	dirs?: VmDirs;
+	/** The HOME the default dirs resolve against (tests: temp dir). */
+	homeDir?: string;
+	/** The env `$EDITOR` is read from (default `process.env`; tests inject `{}` for the unset case). */
+	env?: NodeJS.ProcessEnv;
+	/** The editor runner (default {@link runEditorDefault}; tests record argv + "edit"). */
+	runEditor?: RunEditor;
+}
+
+/**
+ * Open the operator's `provision.sh` in `$EDITOR` (spec 28, tier (c)): with no
+ * `$EDITOR` set, err naming it BEFORE anything is written; on the first open create
+ * the file from {@link provisionTemplate} (0700 dir, 0600 file — the vm-tree
+ * posture); then hand the file to the editor and wait. NOTHING executes here — the
+ * script's only run is in the guest during `vm provision` (provision.ts step (j)),
+ * which is exactly what {@link PROVISION_SAVED_FLASH} says. The flow is
+ * owned-agnostic like its sibling editors (a local build input, not a server
+ * setting). Result spine: `ok(undefined)` (the editor exited cleanly — flash the
+ * saved line), `err(Error)` (no editor, an unwritable tree, or an editor failure),
+ * `null` is never returned (there is nothing to cancel — the editor's own exit IS
+ * the outcome).
+ */
+export async function runProvisionEditor(deps: ProvisionEditorDeps = {}): Promise<Result<void, Error>> {
+	const dirs = deps.dirs ?? resolveVmDirs({ homeDir: deps.homeDir });
+	// 1. The editor gate PRECEDES any write: failing fast with the actionable err must
+	//    not leave a template behind as a side effect of a failed open.
+	const editor = (deps.env ?? process.env).EDITOR;
+	if (editor === undefined || editor.trim() === "") {
+		return err(new Error(PROVISION_NO_EDITOR_ERROR));
+	}
+	// 2. First open: create from the commented template. Existing file → opened as-is.
+	const file = provisionScriptPath(dirs);
+	if (!existsSync(file)) {
+		try {
+			mkdirSync(dirs.root, { recursive: true, mode: 0o700 });
+			writeFileSync(file, provisionTemplate(), { mode: 0o600 });
+		} catch (e) {
+			return err(new Error(`cannot create ${file}: ${e instanceof Error ? e.message : String(e)}`));
+		}
+	}
+	// 3. The editor, as an ARG ARRAY (`$EDITOR <file>` — spawn hygiene; the value is
+	//    whatever the operator exported, one token).
+	try {
+		await (deps.runEditor ?? runEditorDefault)([editor, file]);
+	} catch (e) {
+		const reason = e instanceof Error ? e.message : String(e);
+		return err(new Error(`cannot run $EDITOR ("${editor}"): ${reason}`));
+	}
+	return ok(undefined);
+}
+
+// ---- apply-to-running: the two curated ssh actions (spec 28, box 28g) -------------
+
+/**
+ * The row-7 hint (spec 28's interaction matrix, row 7) — appended to EVERY
+ * apply-to-running exec outcome's result text, success or failure: these writes
+ * affect FUTURE agent/theme launches; a running tmux agent keeps the old one until
+ * the sandbox restarts. Exported so tests pin the surface.
+ */
+export const APPLY_TO_RUNNING_HINT =
+	"affects future agent/theme launches — a running agent keeps the old one until the sandbox restarts";
+
+/** The two flows' banner titles (framed by `withSession`; the dashboard passes a silent stream). */
+export const APPLY_AGENT_TITLE = "Set default agent";
+export const APPLY_THEME_TITLE = "Set theme";
+
+// The prompt messages (module-private; the tests match on their stable substrings).
+const AGENT_SELECT_MESSAGE = "Set the default agent — written to ~/.config/omarchy/defaults/agent in the guest";
+const THEME_SELECT_MESSAGE = "Set the theme — the guest's own `omarchy theme list`";
+const THEME_TEXT_MESSAGE = "Theme (the guest's theme list failed — enter one manually, e.g. tokyo-night)";
+
+/**
+ * Is the vm-state line READY ENOUGH to apply to — the Sandbox screen's visibility
+ * signal for the two apply rows? {@link ./view.ts}'s `vmSessionActive` shape
+ * (state `booting` or `ready`) PLUS the two fields the ssh construction consumes:
+ * a session id (the session dir to pin against) and a discovered ssh port. Re-stated
+ * here — not imported — because the wizards layer must not import the dashboard
+ * layer (dashboard → wizards is the live direction). The vm-side truth beyond the
+ * line stays the runtime's: the exec's own result is the authority.
+ */
+export function applyToRunningReady(line: VmStateLine | null): boolean {
+	return (
+		line !== null &&
+		(line.state === "booting" || line.state === "ready") &&
+		line.sessionId !== null &&
+		line.sshPort !== null
+	);
+}
+
+// service.ts's mint-time SESSION_ID_PATTERN, restated: the vm-state line is WIRE data
+// (a hostile/buggy status socket could say anything), and the session id becomes a
+// PATH SEGMENT below — an id outside the minted charset refuses the whole action.
+const SESSION_ID_SAFE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+
+/**
+ * The pinned ssh target for the LIVE session, composed entirely from existing
+ * exports (src/vm/** is untouched): `sshTargetForPort` completes the port discovered
+ * by the boot; the key is `<vm root>/id_ed25519` (cidata.ts mints it, the service
+ * targets it); the known_hosts + ControlMaster socket live in the session dir —
+ * `known_hosts` is RE-KEYED PER BOOT by the service's `repinKnownHosts` to
+ * `[127.0.0.1]:<current port>`, so StrictHostKeyChecking=yes (part of every
+ * `sshBaseArgv` these execs ride) pins exactly the live guest, and BatchMode +
+ * IdentitiesOnly keep it key-only with no prompts. Loopback-only by type. Errs (no
+ * hint — these are pre-exec guards, not launch-affecting outcomes) when the line is
+ * absent/port undiscovered, the session id is not a safe path segment, or no guest
+ * user is resolvable. Pure path math; nothing on disk is read here.
+ */
+export function sshTargetForVmLine(
+	dirs: VmDirs,
+	line: VmStateLine | null,
+	guestUser: string | undefined,
+): Result<SshTarget, Error> {
+	if (line === null || line.sessionId === null || line.sshPort === null) {
+		return err(new Error("no ready sandbox session to apply to — boot one first (Configure → set the boot mode)"));
+	}
+	if (!SESSION_ID_SAFE.test(line.sessionId)) {
+		return err(
+			new Error("the vm-state line's session id is not a safe path segment — refusing to address the session tree"),
+		);
+	}
+	if (guestUser === undefined) {
+		return err(
+			new Error(
+				"cannot resolve the guest user — no readable golden manifest under the vm tree (images/<id>/manifest.json)",
+			),
+		);
+	}
+	const sessionDir = join(dirs.sessions, line.sessionId);
+	return ok(
+		sshTargetForPort(
+			{
+				user: guestUser,
+				host: "127.0.0.1",
+				keyPath: join(dirs.root, "id_ed25519"),
+				knownHostsPath: join(sessionDir, "known_hosts"),
+				controlPath: join(sessionDir, "cm.sock"),
+			},
+			line.sshPort,
+		),
+	);
+}
+
+/**
+ * The default-agent write's remote argv — a CONSTANT (the agent itself rides
+ * `sshExec`'s `stdin`, so the operator-shaped value never enters ANY shell string):
+ * `bash -c 'mkdir -p … && cat > …'`. bash because the guest shell is bash
+ * (22-measured finding 11) and the command needs `$HOME` + `&&` + `>` — the inner
+ * string is a shell command BY DESIGN (AGENTS.md's bash exception; the ssh layer
+ * remoteQuote's the whole element so it arrives verbatim); `$HOME` is the ssh login's
+ * home (sshd sets it from passwd — the same path 22-measured measured: the getter
+ * reads `$HOME/.config/omarchy/defaults/agent`). THE DIRECT FILE WRITE per
+ * 22-measured finding 12 — the `omarchy default agent` CLI setter is a Wayland
+ * picker (rc 0, nothing persisted headless). The stdin pattern is provision.ts's own
+ * `cat > file` provisioning step.
+ */
+export const AGENT_DEFAULTS_ARGV: readonly string[] = [
+	"bash",
+	"-c",
+	'mkdir -p "$HOME/.config/omarchy/defaults" && cat > "$HOME/.config/omarchy/defaults/agent"',
+];
+
+/** The theme-list fetch's remote argv — each word arrives as one remoteQuote'd argument. */
+export const THEME_LIST_ARGV: readonly string[] = ["omarchy", "theme", "list"];
+
+/**
+ * The theme-set remote argv: `omarchy theme set <t>` as an ARG ARRAY — sshExecArgv
+ * remoteQuote's every element, so a theme containing spaces/quotes arrives as ONE
+ * verbatim argument (never split, never re-evaluated by the remote shell).
+ */
+export function themeSetRemoteArgv(theme: string): string[] {
+	return ["omarchy", "theme", "set", theme];
+}
+
+/**
+ * Parse `omarchy theme list`'s stdout: split lines, trimmed, blanks dropped. The
+ * output's exact shape is the guest CLI's business — this takes every non-empty line
+ * as a theme token, which is exactly what the select offers; an empty parse degrades
+ * to the text field like a failed fetch (the spec's never-blocks posture).
+ */
+export function parseThemeList(stdout: string): string[] {
+	return stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line !== "");
+}
+
+// snapshot.ts's module-private MANIFEST_FILE, restated (the SERIAL_LOG_FILE precedent).
+const MANIFEST_FILE = "manifest.json";
+
+/**
+ * The newest golden manifest's `guestUser` — the ssh LOGIN for the apply actions
+ * (SshTarget.user is "the manifest's guestUser — never the host user's name", and the
+ * vm-state line carries no user). The newest golden is what a boot boots, so its
+ * manifest is the live session's user record. `undefined` when no golden exists or
+ * the manifest is absent/corrupt (`readManifest` never throws; the caller turns
+ * `undefined` into the actionable target err). Reads the LOCAL vm tree only.
+ */
+export function newestGoldenGuestUser(homeDir?: string): string | undefined {
+	const goldenId = newestGoldenId(homeDir);
+	if (goldenId === null) return undefined;
+	const manifest = readManifest(join(resolveVmDirs({ homeDir }).images, goldenId, MANIFEST_FILE));
+	return manifest?.guestUser;
+}
+
+/** The ssh exec seam ({@link typeof sshExec}): production spawns the real pinned ssh; tests record. */
+export type ApplySshExec = typeof sshExec;
+
+/** One recorded ssh exec — the tests' assertion surface (target facts + argv + stdin). */
+export interface RecordedSshExec {
+	readonly target: SshTarget;
+	readonly remoteArgv: readonly string[];
+	readonly stdin: string | undefined;
+}
+
+/** Injectable seams so the apply flows are hermetic (the tiers-(a)/(b) precedent). */
+export interface ApplyToRunningDeps {
+	/** The io driving the agent/theme choice (defaults to {@link defaultIo}). */
+	io?: WizardIo;
+	/** Banner destination for `withSession` (defaults to `process.stdout`). */
+	stream?: BannerStream;
+	/**
+	 * The vm tree the key/session-dir paths resolve from (default:
+	 * `resolveVmDirs({ homeDir })`).
+	 */
+	dirs?: VmDirs;
+	/** The HOME the default dirs resolve against (tests: temp dir). */
+	homeDir?: string;
+	/**
+	 * The live vm-state line (the wiring passes the store's `latestVmState`).
+	 * Absent/null → the actionable no-ready-session err (the rows are hidden when not
+	 * ready; the flow still refuses, never silently no-ops).
+	 */
+	vmLine?: VmStateLine | null;
+	/**
+	 * The golden manifest's guest user (the wiring passes {@link newestGoldenGuestUser}'s
+	 * result). Undefined → the actionable target err.
+	 */
+	guestUser?: string;
+	/** The ssh exec (default: the real pinned {@link sshExec}; tests record + script exits). */
+	sshExec?: ApplySshExec;
+}
+
+/** The apply flows' outcome: `ok(report line — hint included)`, `err(failure — hint included)`, or `null` (cancelled choice). */
+export type ApplyToRunningResult = Result<string, Error> | null;
+
+/**
+ * One ssh failure's surfaced text: what was attempted, the exit code, the guest's
+ * own words (both pipes' tails), then the row-7 hint — a failure is STILL a
+ * future-launch hint carrier (the write may have half-landed; the sandbox restart
+ * advice stands either way).
+ */
+function applySshFailure(what: string, ran: SshExecResult): string {
+	const tail = [ran.stdoutTail.trim(), ran.stderrTail.trim()].filter((s) => s !== "").join(" | ");
+	return `${what} failed in the guest (exit ${ran.exitCode}${tail === "" ? "" : `: ${tail}`}) — ${APPLY_TO_RUNNING_HINT}`;
+}
+
+/**
+ * Set the RUNNING guest's default agent (spec 28, apply-to-running #1): a select of
+ * the 13 `GUEST_AGENTS` seeded from the LOCAL `guest.json`'s agent (what the next
+ * install bakes — the honest starting point for what the guest probably runs), then
+ * ONE ssh exec: {@link AGENT_DEFAULTS_ARGV} with `<agent>\n` on stdin — the DIRECT
+ * FILE WRITE of `~/.config/omarchy/defaults/agent` (22-measured finding 12: the CLI
+ * setter is a Wayland picker, unusable headless). The exec outcome — success or
+ * failure — carries {@link APPLY_TO_RUNNING_HINT} (matrix row 7); a cancelled select
+ * is `null` (silent). Idempotent by nature (rewriting the same token is a no-op), so
+ * no single-flight guard: these are not VmService lifecycle actions.
+ */
+export async function runApplyAgent(deps: ApplyToRunningDeps = {}): Promise<ApplyToRunningResult> {
+	const io = deps.io ?? defaultIo;
+	const dirs = deps.dirs ?? resolveVmDirs({ homeDir: deps.homeDir });
+	return withSession(
+		APPLY_AGENT_TITLE,
+		async () => {
+			const target = sshTargetForVmLine(dirs, deps.vmLine ?? null, deps.guestUser);
+			if (!target.ok) return target;
+			const agent = await io.select({
+				message: AGENT_SELECT_MESSAGE,
+				options: GUEST_AGENTS.map((a) => ({ value: a, label: a })),
+				initialValue: loadGuestConfig(dirs).agent,
+			});
+			if (agent === null) return null; // cancelled — silent
+			if (!isGuestAgentValue(agent)) {
+				// The select only offers members — an out-of-set answer is non-interactive
+				// only (the tier-(a) guard's voice).
+				return err(new Error(`agent must be one of ${GUEST_AGENTS.join(", ")} (got "${agent}")`));
+			}
+			const ran = await (deps.sshExec ?? sshExec)(target.value, AGENT_DEFAULTS_ARGV, { stdin: `${agent}\n` });
+			if (ran.exitCode !== 0) {
+				return err(new Error(applySshFailure("writing the default agent", ran)));
+			}
+			return ok(`default agent written to ~/.config/omarchy/defaults/agent (${agent}) — ${APPLY_TO_RUNNING_HINT}`);
+		},
+		{ io, stream: deps.stream },
+	);
+}
+
+/**
+ * Set the RUNNING guest's theme (spec 28, apply-to-running #2): fetch the guest's
+ * own `omarchy theme list` over ssh and offer it as a select; when the fetch fails
+ * (or lists nothing) DEGRADE to a free-text field carrying the failure as its hint —
+ * the spec's documented fallback, never a blocked screen — then ONE ssh exec of
+ * `omarchy theme set <t>` ({@link themeSetRemoteArgv}: arg array, every word
+ * remoteQuote'd, so any theme token arrives verbatim). Whether the headless CLI
+ * honors a set is the runtime result's to say — the outcome is surfaced either way,
+ * with {@link APPLY_TO_RUNNING_HINT} appended (matrix row 7).
+ */
+export async function runApplyTheme(deps: ApplyToRunningDeps = {}): Promise<ApplyToRunningResult> {
+	const io = deps.io ?? defaultIo;
+	const dirs = deps.dirs ?? resolveVmDirs({ homeDir: deps.homeDir });
+	return withSession(
+		APPLY_THEME_TITLE,
+		async () => {
+			const target = sshTargetForVmLine(dirs, deps.vmLine ?? null, deps.guestUser);
+			if (!target.ok) return target;
+			const exec = deps.sshExec ?? sshExec;
+			// 1. The guest's own list.
+			const listed = await exec(target.value, THEME_LIST_ARGV);
+			const themes = listed.exitCode === 0 ? parseThemeList(listed.stdoutTail) : [];
+			// 2. The choice: the select when the list came back; the degrade-to-text
+			//    fallback (the failure IS the hint) when it did not. Empty text = cancelled
+			//    (the required-empty idiom).
+			let theme: string | null;
+			if (themes.length > 0) {
+				theme = await io.select({
+					message: THEME_SELECT_MESSAGE,
+					options: themes.map((t) => ({ value: t, label: t })),
+				});
+			} else {
+				const detail =
+					listed.exitCode === 0
+						? "it listed no themes"
+						: `exit ${listed.exitCode}: ${[listed.stdoutTail.trim(), listed.stderrTail.trim()].filter((s) => s !== "").join(" | ")}`;
+				const raw = await io.text({ message: `${THEME_TEXT_MESSAGE} (${detail})` });
+				theme = raw === null || raw.trim() === "" ? null : raw.trim();
+			}
+			if (theme === null) return null; // cancelled — silent
+			// 3. The one set exec.
+			const ran = await exec(target.value, themeSetRemoteArgv(theme));
+			if (ran.exitCode !== 0) {
+				return err(new Error(applySshFailure(`omarchy theme set ${theme}`, ran)));
+			}
+			return ok(`theme set to ${theme} — ${APPLY_TO_RUNNING_HINT}`);
 		},
 		{ io, stream: deps.stream },
 	);
