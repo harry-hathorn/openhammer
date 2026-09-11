@@ -235,6 +235,14 @@ interface HarnessOptions {
 	loadSecrets?: "real" | VmServiceDeps["loadSecrets"];
 	/** The store the default loadSecrets fake returns (default: empty). */
 	store?: SecretsStore;
+	/**
+	 * The agent-mode tmux session start: "real" runs the production startAgentSession against
+	 * the scripted backend (hermetic — the transport fake answers rc 0, so the probe reads
+	 * already-running); anything else overrides it. Default: a recording fake.
+	 */
+	startAgentSession?: "real" | VmServiceDeps["startAgentSession"];
+	/** The guest rootDir threaded into the service (boot-backend threads ResolvedConfig.rootDir). */
+	guestRootDir?: string;
 	/** Side effect when QMP sees system_powerdown (default: none — a wedged guest). */
 	onPowerdown?: (handle: FakeVmHandle) => void;
 	/** qemu-img actual-size for the disk-cap hook; null = qemu-img fails. */
@@ -270,6 +278,8 @@ interface Harness {
 		pushSecrets: Array<{ backend: ToolBackend; store: SecretsStore }>;
 		/** The secrets dir each loadSecrets call was pointed at. */
 		loadSecretsDirs: string[];
+		/** The agent-mode tmux start calls: the backend handed over + the resolved opts. */
+		agentSession: Array<{ backend: ToolBackend; agentCmd: string; rootDir: string }>;
 		/** Cross-seam call order (the boot sweep's "before locateGolden" pin). */
 		order: string[];
 	};
@@ -304,6 +314,7 @@ function harness(options: HarnessOptions = {}): Harness {
 		sweep: [],
 		pushSecrets: [],
 		loadSecretsDirs: [],
+		agentSession: [],
 		order: [],
 	};
 	const handles: FakeVmHandle[] = [];
@@ -447,6 +458,7 @@ function harness(options: HarnessOptions = {}): Harness {
 				: (options.pushSecrets ??
 					(async (backend, store) => {
 						calls.pushSecrets.push({ backend, store });
+						calls.order.push("pushSecrets");
 						return { envPairs: Object.keys(store.env).length, filesPushed: store.files.length, filesSkipped: [] };
 					})),
 		loadSecrets:
@@ -457,6 +469,18 @@ function harness(options: HarnessOptions = {}): Harness {
 						calls.loadSecretsDirs.push(dirs.secrets);
 						return options.store ?? { env: {}, files: [] };
 					})),
+		// The agent-mode tmux start (spec 29): recorded by default; "real" lets the production
+		// startAgentSession run against the scripted backend's rc-0 transport fake.
+		startAgentSession:
+			options.startAgentSession === "real"
+				? undefined
+				: (options.startAgentSession ??
+					(async (backend, opts) => {
+						calls.agentSession.push({ backend, agentCmd: opts.agentCmd, rootDir: opts.rootDir });
+						calls.order.push("agentSession");
+						return { action: "started", session: "agent" };
+					})),
+		guestRootDir: options.guestRootDir,
 	};
 
 	const service = createVmService(vmConfig(options.config ?? {}), deps, tuning);
@@ -1035,6 +1059,85 @@ describe("VmService — agent-mode session-start secrets push (spec 29)", () => 
 		await h.service.start();
 		expect(h.service.state).toBe("ready");
 		expect(h.logs.some((line) => line.includes("vm: secrets pushed: 0 env pair(s), 0 file(s)"))).toBe(true);
+	});
+});
+
+describe("VmService — agent-mode tmux session start (spec 29)", () => {
+	const AGENT_CMD = "claude --dangerously-skip-permissions";
+
+	it("agent mode: the tmux start runs AFTER the secrets push, with the config's agentCmd + threaded guest rootDir", async () => {
+		const h = harness({
+			config: { mode: "agent", persist: "auto", agentCmd: AGENT_CMD },
+			guestRootDir: "/home/sandbox/work",
+			store: { env: { ANTHROPIC_API_KEY: "sk-ant-agent-test" }, files: [] },
+		});
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(h.calls.pushSecrets.length).toBe(1);
+		expect(h.calls.agentSession.length).toBe(1);
+		expect(h.calls.order.slice(-2)).toEqual(["pushSecrets", "agentSession"]); // credentials first
+		expect(h.calls.agentSession[0]?.agentCmd).toBe(AGENT_CMD);
+		expect(h.calls.agentSession[0]?.rootDir).toBe("/home/sandbox/work");
+		// The start got the SAME backend the boot gate hands out (and the push used).
+		const r = await h.service.ensureReady();
+		expect(r.ok && h.calls.agentSession[0]?.backend === r.backend).toBe(true);
+	});
+
+	it("guestRootDir unset: the golden manifest's recorded guest root is the -c fallback", async () => {
+		const h = harness({ config: { mode: "agent", persist: "auto" } });
+		await h.service.start();
+		expect(h.calls.agentSession[0]?.rootDir).toBe(manifestFixture().rootDir);
+	});
+
+	it("vm mode: no tmux start — the wiring is agent-only", async () => {
+		const h = harness({ config: { agentCmd: AGENT_CMD }, guestRootDir: "/home/sandbox/work" });
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(h.calls.agentSession).toEqual([]);
+	});
+
+	it("a start failure is logged NON-FATAL: the session still reaches ready and serves tools", async () => {
+		const h = harness({
+			config: { mode: "agent", persist: "auto", agentCmd: AGENT_CMD },
+			startAgentSession: async () => {
+				throw new Error("tmux new-session exited 127: bash: tmux: command not found");
+			},
+		});
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		const r = await h.service.ensureReady();
+		expect(r.ok).toBe(true);
+		expect(
+			h.logs.some(
+				(line) =>
+					line.includes("WARNING: agent session failed to start") &&
+					line.includes("non-fatal") &&
+					line.includes("tmux new-session exited 127") &&
+					line.includes("fix via bash"),
+			),
+		).toBe(true);
+	});
+
+	it("an empty agentCmd rides the same non-fatal path (the real module's belt throw; config's parse is the gate)", async () => {
+		const h = harness({ config: { mode: "agent", persist: "auto" }, startAgentSession: "real" });
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		const r = await h.service.ensureReady();
+		expect(r.ok).toBe(true);
+		expect(
+			h.logs.some((line) => line.includes("WARNING: agent session failed to start") && line.includes("is empty")),
+		).toBe(true);
+	});
+
+	it("already-running: no warning — the guard against a re-entrant extras phase", async () => {
+		const h = harness({
+			config: { mode: "agent", persist: "auto", agentCmd: "claude" },
+			startAgentSession: "real", // the transport fake answers rc 0 → has-session reads already-running
+		});
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(h.logs.some((line) => line.includes("WARNING"))).toBe(false);
+		expect(h.logs.some((line) => line.includes("agent session already running"))).toBe(true);
 	});
 });
 

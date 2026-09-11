@@ -65,6 +65,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { ResolvedVmConfig } from "../config.ts";
+import { startAgentSession } from "./agent-session.ts";
 import { createVmBackendFromQmp, type VmBackend, type VmBackendPendingSpec } from "./backend.ts";
 import { type CaptureResult, captureOnTeardown } from "./capture.ts";
 import type { ReadManifest } from "./preflight.ts";
@@ -210,8 +211,10 @@ export interface VmServiceTuning {
  * the session context; undefined (the default) skips the caller-supplied phase entirely.
  * A throw follows the normal boot failure path (capture + ladder + failed) — in agent
  * mode the extras ARE the point. In agent mode the service additionally composes the
- * BUILT-IN secrets push (see {@link VmServiceDeps.pushSecrets}) after this hook — that
- * one is non-fatal (logged, never fails the boot), while a caller-hook throw stays fatal.
+ * BUILT-IN agent-mode extras after this hook — the secrets push
+ * (see {@link VmServiceDeps.pushSecrets}), then the agent's tmux session start
+ * (see {@link VmServiceDeps.startAgentSession}) — both non-fatal (logged, never fail the
+ * boot), while a caller-hook throw stays fatal.
  */
 export type AfterReadyHook = (context: VmSessionContext) => Promise<void>;
 
@@ -281,6 +284,19 @@ export interface VmServiceDeps {
 	readonly pushSecrets?: typeof pushSecrets;
 	/** Override the secrets-store read (default: provision/secrets.ts's loadSecrets — never throws). */
 	readonly loadSecrets?: typeof loadSecrets;
+	/**
+	 * The GUEST rootDir the agent-mode tmux session starts in. boot-backend threads
+	 * `ResolvedConfig.rootDir` (27b's guest reinterpretation of `MCP_ROOT_DIR`), so the agent
+	 * starts where the outer client's tools are rooted. Default: the golden manifest's
+	 * recorded guest root — the same value `MCP_ROOT_DIR` resolves to by default.
+	 */
+	readonly guestRootDir?: string;
+	/**
+	 * Override the agent-mode tmux session start (default: agent-session.ts's
+	 * startAgentSession). Runs after the secrets push, agent mode only, NON-FATAL: a throw is
+	 * logged and the boot still reaches ready (see {@link VmService.startAgentTmuxSession}).
+	 */
+	readonly startAgentSession?: typeof startAgentSession;
 }
 
 // ---- the pure derivations (each a contract later boxes or tests parse) ----
@@ -636,6 +652,9 @@ export class VmService {
 			// Spec 29's session-start extras: the agent-mode secrets push — after the
 			// caller's hook, before the boot reports ready (non-fatal, agent mode only).
 			await this.pushAgentSecrets(context);
+			// …then the agent's detached tmux session — credentials are in place first, and
+			// the start still lands before ready (non-fatal, agent mode only).
+			await this.startAgentTmuxSession(context);
 			// The last stop() race window: an operator stop that landed while the final
 			// awaits were in flight must not resurrect a torn-down session as ready.
 			this.throwIfAbandoned(epoch);
@@ -899,6 +918,44 @@ export class VmService {
 		} catch (error) {
 			this.log(
 				`vm: WARNING: secrets push failed (non-fatal — the session is up, but the agent lacks credentials): ${messageOf(error)}`,
+			);
+		}
+	}
+
+	/**
+	 * Spec 29's session-start extras, second half — AGENT MODE ONLY: start the agent's
+	 * DETACHED tmux session (agent-session.ts) inside the fresh guest, after the secrets
+	 * push so the agent's first prompt already has its credentials.
+	 *
+	 * NON-FATAL, consistent with the secrets push above: a failure is logged and the boot
+	 * still reaches ready. The sandbox itself is up either way, and the spec's own edge case
+	 * names the remedy — a dead/missing tmux is a bash-fixable state
+	 * (`tmux new-session -d -s agent …`), documented in the agent-mode guide — where failing
+	 * the boot would trade a working session for a bookkeeping error (and agent mode
+	 * discards its overlay, so the next boot re-attempts). An empty `MCP_VM_AGENT_CMD` rides
+	 * the same path: config.ts's boundary parse already rejects one, so a throw here is the
+	 * module's belt-and-braces, not a boot decision.
+	 *
+	 * OpenHammer-never-reacts: the session is started detached and NEVER touched again — no
+	 * output is read, no prompt is sent, no state is parsed (agent-session.ts has no read
+	 * path). The supervision doctrine — how the CLIENT drives the session — is 29c's guide
+	 * copy.
+	 */
+	private async startAgentTmuxSession(context: VmSessionContext): Promise<void> {
+		if (this.mode() !== "agent") return;
+		const start = this.deps.startAgentSession ?? startAgentSession;
+		const rootDir = this.deps.guestRootDir ?? context.manifest.rootDir;
+		try {
+			const report = await start(context.backend, { agentCmd: this.config.agentCmd, rootDir });
+			this.log(
+				report.action === "started"
+					? `vm: agent session started (tmux session "${report.session}", cwd ${rootDir})`
+					: `vm: agent session already running (tmux session "${report.session}") — not re-created`,
+			);
+		} catch (error) {
+			this.log(
+				`vm: WARNING: agent session failed to start (non-fatal — fix via bash: ` +
+					`tmux new-session -d -s agent -x 220 -y 50 -c <rootDir> '<MCP_VM_AGENT_CMD>'): ${messageOf(error)}`,
 			);
 		}
 	}
