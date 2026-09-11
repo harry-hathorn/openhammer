@@ -273,6 +273,13 @@ export const SANDBOX_CONFIGURE_LABEL = "Configure…";
  * tree, owned-agnostic (see root.ts's action contract).
  */
 export const SANDBOX_GUEST_SETUP_LABEL = "Guest setup…";
+/**
+ * The Secrets row's label (spec 28, box 28f) — the tier-(b) editor over the 0700
+ * secrets store (26a), beside Guest setup, matched by EXACT match in the root's
+ * dispatch. Owned-agnostic like Guest setup: the store is a local build/runtime
+ * input of this machine's tree (the flow owns the row-6 live-session semantics).
+ */
+export const SANDBOX_SECRETS_LABEL = "Secrets…";
 export const SANDBOX_SERIAL_LABEL = "Serial tail";
 export const SANDBOX_INSTALL_LABEL = "Install sandbox…";
 
@@ -286,22 +293,24 @@ export const SANDBOX_STOP_TEXT =
 	"power down now — the boot-scoped mode re-boots the sandbox on the next server start (lasting stop: mode off + restart)";
 
 /**
- * The Sandbox screen's action list: Stop / Restart / Configure / Guest setup / Serial
- * tail, then — ONLY when no bootable golden exists AND no session is active — Install
- * sandbox, then Back. Off-mode users never see these — the actions live inside the
- * drill-in screen, which inherits 28a's off-mode invisibility (the menu row is
- * hidden entirely). Owned-vs-unowned does NOT change the list: an unowned dashboard
- * renders the same rows and surfaces the unowned hint on activation (never a dead
- * button) — EXCEPT Guest setup, which takes no gate at all (guest.json is a local
- * build input, not a server setting). The Install row is HIDDEN, not disabled, when a
- * golden exists — the spec's "shown only when no golden manifest exists" (matrix row
- * 2's jump target); visibility rides the same probe the vm write guard uses
- * (`goldenManifestExists`), so the affordance and the guard can never disagree. It is
- * ALSO hidden while a session is active (`sessionActive` — {@link ./view.ts}'s
- * `vmSessionActive` over the store's vm-state line; matrix row 5: install vs a live
- * session is RAM contention + file races, and the operator should not see an action
- * that can't run) — runInstall's own single-flight scan stays the race authority for
- * the window a vm-state line can't see, and its refusal surfaces inline. Pure.
+ * The Sandbox screen's action list: Stop / Restart / Configure / Guest setup /
+ * Secrets / Serial tail, then — ONLY when no bootable golden exists AND no session
+ * is active — Install sandbox, then Back. Off-mode users never see these — the
+ * actions live inside the drill-in screen, which inherits 28a's off-mode
+ * invisibility (the menu row is hidden entirely). Owned-vs-unowned does NOT change
+ * the list: an unowned dashboard renders the same rows and surfaces the unowned
+ * hint on activation (never a dead button) — EXCEPT Guest setup and Secrets, which
+ * take no gate at all (both are editors over the LOCAL vm tree: guest.json is a
+ * build input, the secrets store a runtime input — not server settings). The
+ * Install row is HIDDEN, not disabled, when a golden exists — the spec's "shown
+ * only when no golden manifest exists" (matrix row 2's jump target); visibility
+ * rides the same probe the vm write guard uses (`goldenManifestExists`), so the
+ * affordance and the guard can never disagree. It is ALSO hidden while a session is
+ * active (`sessionActive` — {@link ./view.ts}'s `vmSessionActive` over the store's
+ * vm-state line; matrix row 5: install vs a live session is RAM contention + file
+ * races, and the operator should not see an action that can't run) — runInstall's
+ * own single-flight scan stays the race authority for the window a vm-state line
+ * can't see, and its refusal surfaces inline. Pure.
  */
 export function sandboxItems(hasGolden: boolean, sessionActive = false): ListItem[] {
 	const rows: ListItem[] = [
@@ -314,6 +323,10 @@ export function sandboxItems(hasGolden: boolean, sessionActive = false): ListIte
 		{
 			label: SANDBOX_GUEST_SETUP_LABEL,
 			description: "the guest's build config — what the next `vm install` bakes (guest.json)",
+		},
+		{
+			label: SANDBOX_SECRETS_LABEL,
+			description: "env pairs + credential files — the 0700 store (loads at sandbox boot)",
 		},
 		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
 	];

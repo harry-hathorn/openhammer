@@ -72,12 +72,12 @@ import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
 import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
-import { hasPublicChannel, type SerialSource, vmSettingsEqual } from "./dashboard/view.ts";
+import { hasPublicChannel, type SerialSource, vmSessionActive, vmSettingsEqual } from "./dashboard/view.ts";
 import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
-import { runGuestSetup } from "./wizards/guest-setup.ts";
+import { runGuestSetup, runSecretsSetup } from "./wizards/guest-setup.ts";
 import { type SetSectionResult, setSection } from "./wizards/section.ts";
 
 export { DASHBOARD_MONITOR_LIMIT } from "./dashboard/store.ts";
@@ -782,6 +782,26 @@ function buildActions(
 				),
 			));
 
+	// Sandbox secrets (spec 28, box 28f): the tier-(b) editor over the 0700 store —
+	// masked, values write-only. Matrix row 6 lives inside the flow: the liveness
+	// probe reads the SAME vm-state line the Sandbox row does (28d's
+	// `vmSessionActive` over the store), and the interstitial's *Restart sandbox*
+	// shortcut invokes THE WIRED 28b action (`restartSandboxAction` — the
+	// single-flight guard, the unowned hint, and the pending-flag clearing are
+	// inherited, not duplicated). Owned-agnostic like Guest setup (a local store),
+	// and the silentStream keeps ONE banner (the section wizard's exact pattern).
+	const secretsSetupAction: DashboardActions["secretsSetup"] =
+		overrides.secretsSetup ??
+		(async () =>
+			withModal(() =>
+				runSecretsSetup({
+					io,
+					stream: silentStream,
+					sessionActive: () => vmSessionActive(store.latestVmState),
+					restartSandbox: () => restartSandboxAction(),
+				}),
+			));
+
 	// `quit` is assigned by runDashboard (it owns the lifecycle/`onQuit`); a placeholder
 	// here satisfies the interface so the root can be constructed before that wiring.
 	const actions: DashboardActions = {
@@ -798,6 +818,7 @@ function buildActions(
 		readSerial: readSerialAction,
 		configureVm: configureVmAction,
 		guestSetup: guestSetupAction,
+		secretsSetup: secretsSetupAction,
 		installSandbox: installSandboxAction,
 		quit: () => {},
 	};

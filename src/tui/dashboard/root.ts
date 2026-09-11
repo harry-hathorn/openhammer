@@ -27,6 +27,7 @@ import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { Settings } from "../../config/settings.ts";
 import type { Result } from "../../tools/result.ts";
 import type { GuestConfig } from "../../vm/provision/guest-config.ts";
+import type { SecretsStore } from "../../vm/provision/secrets.ts";
 import { BANNER } from "../banner.ts";
 import type { Style } from "../style.ts";
 import {
@@ -45,6 +46,7 @@ import {
 	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
 	SANDBOX_RESTART_LABEL,
+	SANDBOX_SECRETS_LABEL,
 	SANDBOX_SERIAL_LABEL,
 	SANDBOX_STOP_LABEL,
 	type ScreenSpec,
@@ -157,6 +159,18 @@ export interface DashboardActions {
 	 * atomic 0600 writer. `ok` carries the saved config; `null` = cancelled/declined.
 	 */
 	guestSetup(): Promise<Result<GuestConfig, Error> | null>;
+	/**
+	 * Sandbox secrets (spec 28, box 28f) — the tier-(b) editor over the 0700 store
+	 * (26a's `secrets.ts`): masked env-pair + credential-file rows, saved through
+	 * loadSecrets → the real normalizeSecrets gate → saveSecrets (0700 dir / 0600
+	 * files). Values are write-only — the rendered model never carries a stored
+	 * value. Matrix row 6 lives INSIDE the flow: with a live session the editor
+	 * precedes with the applies-at-next-boot hint + a *Restart sandbox* shortcut
+	 * that reuses THIS interface's {@link restartSandbox} action. OWNED-AGNOSTIC
+	 * like Guest setup — the store is a local input of this machine's tree. `ok`
+	 * carries the saved store; `null` = cancelled/declined.
+	 */
+	secretsSetup(): Promise<Result<SecretsStore, Error> | null>;
 	/**
 	 * Build the golden image — 26c's `runInstall` (spec 28, box 28c), matrix row 2's
 	 * jump target. Gated by the SAME owned/unowned model as Stop/Restart (install
@@ -285,11 +299,12 @@ export class DashboardRoot implements Component {
 				// Sandbox (spec 28): the verbatim state row, then the effective guest root
 				// when known (matrix row 9), then the apply-on-restart note while a vm
 				// settings write is saved-but-unapplied (matrix row 3, box 28c) — over the
-				// session action list (box 28b, extended in 28c/28e): Stop / Restart /
-				// Configure / Guest setup / Serial tail / Install (no golden AND no active
-				// session — row 5) / Back. Owned-vs-unowned does not change the list — an
-				// unowned activation surfaces the unowned hint (never a dead button);
-				// Guest setup alone takes no gate at all (local build inputs, box 28e).
+				// session action list (box 28b, extended in 28c/28e/28f): Stop / Restart /
+				// Configure / Guest setup / Secrets / Serial tail / Install (no golden AND
+				// no active session — row 5) / Back. Owned-vs-unowned does not change the
+				// list — an unowned activation surfaces the unowned hint (never a dead
+				// button); Guest setup and Secrets take no gate at all (editors over the
+				// LOCAL vm tree — a build input and the runtime secrets store, 28e/28f).
 				if (section === "sandbox") {
 					return {
 						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
@@ -566,6 +581,22 @@ export class DashboardRoot implements Component {
 				if (result === null) return; // cancelled / the post-golden warning declined — silent
 				this.flashMessage = result.ok
 					? "Guest setup saved — applies to the next `vm install`."
+					: result.error.message;
+				return;
+			}
+			if (label === SANDBOX_SECRETS_LABEL) {
+				// The secrets editor (spec 28, box 28f) — owned-agnostic like Guest setup
+				// (the 0700 store is a local input of this machine's tree), so no gate and
+				// no store adoption: the flow already saved through the real
+				// normalizeSecrets + 26a's writer on ok, and this only flashes. Row 6's
+				// live-session hint + Restart shortcut live INSIDE the flow (it owns the
+				// liveness probe and reuses actions.restartSandbox). The flash is honest
+				// in both session states — injection happens at session START, so a save
+				// always loads at the next sandbox boot.
+				const result = await this.actions.secretsSetup();
+				if (result === null) return; // cancelled / declined — silent (the modal idiom)
+				this.flashMessage = result.ok
+					? "Secrets saved — they load at the next sandbox boot."
 					: result.error.message;
 				return;
 			}

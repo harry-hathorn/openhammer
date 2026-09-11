@@ -6,6 +6,7 @@ import type { VmStateLine } from "../../observability/status-socket.ts";
 import { err, ok, type Result } from "../../tools/result.ts";
 import { defaultGuestConfig, type GuestConfig } from "../../vm/provision/guest-config.ts";
 import { activeSessionRefusal } from "../../vm/provision/install.ts";
+import type { SecretsStore } from "../../vm/provision/secrets.ts";
 import { createSandboxActions, VM_UNOWNED_HINT } from "../dashboard.ts";
 import { createStyle } from "../style.ts";
 import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./root.ts";
@@ -80,6 +81,10 @@ function fakeActions(log: string[]): DashboardActions {
 		guestSetup: async () => {
 			log.push("guestSetup");
 			return ok(defaultGuestConfig()) as Result<GuestConfig, Error>;
+		},
+		secretsSetup: async () => {
+			log.push("secretsSetup");
+			return ok({ env: {}, files: [] }) as Result<SecretsStore, Error>;
 		},
 		installSandbox: async () => {
 			log.push("installSandbox");
@@ -398,6 +403,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(lines.some((l) => l.includes("Restart sandbox…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Configure…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Guest setup…"))).toBe(true);
+		expect(lines.some((l) => l.includes("Secrets…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Serial tail"))).toBe(true);
 		expect(lines.some((l) => l.includes("Back"))).toBe(true);
 		expect(lines.some((l) => l.includes("re-boots the sandbox on the next server start"))).toBe(true);
@@ -434,7 +440,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 4 = Serial tail (Configure at 2 + Guest setup at 3, boxes 28c/28e)
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 5 = Serial tail (Configure 2, Guest setup 3, Secrets 4 — boxes 28c/28e/28f)
 		await flushActions();
 		expect(log).toEqual(["readSerial"]);
 		expect(root.screen).toEqual({ kind: "serial" });
@@ -457,7 +464,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 4 = Serial tail
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 5 = Serial tail (Secrets joined at 4, box 28f)
 		await flushActions();
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
 		expect(root.render(80).some((l) => l.includes("no serial yet"))).toBe(true);
@@ -508,7 +516,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Install (no golden — the row exists; Guest setup joined at 3, box 28e)
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Install (no golden — the row exists; Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
 		const lines = root.render(80);
@@ -525,7 +533,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Install
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Install (Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(root.render(80).some((l) => l.includes("vm install: gate failed"))).toBe(true);
@@ -654,6 +662,74 @@ describe("DashboardRoot — Guest setup entry (spec 28, box 28e)", () => {
 	});
 });
 
+describe("DashboardRoot — Secrets entry (spec 28, box 28f)", () => {
+	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter) — the per-box helper. */
+	async function sandboxed(
+		log: string[],
+		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+	): Promise<DashboardRoot> {
+		const root = vmRooted(log, "vm", actionsOver);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		return root;
+	}
+
+	it("enter on Secrets runs secretsSetup and flashes the loads-at-next-boot line", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 4 = Secrets (beside Guest setup at 3)
+		await flushActions();
+		expect(log).toEqual(["secretsSetup"]);
+		// The flash is a constant — the flash-text half of the box's secrecy posture
+		// (a stored value can never reach it, so the list needs no value-grep here).
+		expect(root.render(80).some((l) => l.includes("Secrets saved — they load at the next sandbox boot."))).toBe(true);
+	});
+
+	it("a failed secrets save flashes the wizard's err inline and stays on the sandbox screen", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			secretsSetup: async () => {
+				log.push("secretsSetup");
+				return err(
+					new Error('"/nope" is not an absolute path — it must start with "/" and hold no newline or NUL'),
+				) as Result<SecretsStore, Error>;
+			},
+		}));
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 4 = Secrets
+		await flushActions();
+		expect(log).toEqual(["secretsSetup"]);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		expect(root.render(80).some((l) => l.includes('"/nope" is not an absolute path'))).toBe(true);
+	});
+
+	it("a cancelled secrets editor (null) is silent — the cancelled-modal idiom", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			secretsSetup: async () => {
+				log.push("secretsSetup");
+				return null;
+			},
+		}));
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 4 = Secrets
+		await flushActions();
+		expect(log).toEqual(["secretsSetup"]);
+		expect(root.render(80).some((l) => l.includes("Secrets saved"))).toBe(false); // no flash
+	});
+});
+
 describe("DashboardRoot — Install × active session (spec 28, matrix row 5, box 28d)", () => {
 	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter) — golden/session-aware. */
 	async function sandboxed(
@@ -714,7 +790,7 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // line says inactive — the vm-side scan is the race backstop
 		);
-		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // focus 5 = Install (stopped → the row exists)
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Install (stopped → the row exists; Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(

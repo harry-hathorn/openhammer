@@ -10,16 +10,27 @@ import {
 	loadGuestConfig,
 	saveGuestConfig,
 } from "../../vm/provision/guest-config.ts";
+import { loadSecrets, type SecretFileMapping, type SecretsStore, saveSecrets } from "../../vm/provision/secrets.ts";
 import { resolveVmDirs, type VmDirs } from "../../vm/session.ts";
 import { BANNER } from "../banner.ts";
 import type { WizardIo } from "../wizard.ts";
 import {
+	envKeyLine,
+	envPairError,
+	envSummary,
+	fileMappingError,
+	fileSummary,
 	goldenWarningMessage,
 	guestConfigFromAnswers,
 	guestSetupFields,
 	parseBootCommands,
 	parsePackageList,
 	runGuestSetup,
+	runSecretsSetup,
+	SECRETS_EDIT_CHOICE,
+	SECRETS_LIVE_HINT,
+	SECRETS_RESTART_CHOICE,
+	secretsModelLines,
 } from "./guest-setup.ts";
 
 /** A fresh HOME per test — resolveVmDirs({homeDir}) roots the whole vm tree inside it; nothing real is touched. */
@@ -457,5 +468,464 @@ describe("runGuestSetup — the flow (temp HOME, injected probe)", () => {
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}
+	});
+});
+
+// ---- tier (b): the secrets editor (spec 28, box 28f) -----------------------------
+
+/** A seeded secret VALUE — the grep test's canary: it may exist only in the store file, never in any rendered string. */
+const CANARY_VALUE = "s3cr3t-Value-42-do-not-render";
+const HOST_A = "/home/me/credentials.json";
+const GUEST_A = "/home/sandbox/.claude/credentials.json";
+/** The seeded store the masking + round-trip tests read (mirrors 26a's shapes). */
+const seededStore: SecretsStore = {
+	env: { API_KEY: CANARY_VALUE, DB_PASS: CANARY_VALUE },
+	files: [{ hostPath: HOST_A, guestPath: GUEST_A }],
+};
+
+/** One recorded prompt: its kind, its message, and every string a select rendered (labels + hints) — the grep surface. */
+interface PromptCall {
+	kind: "select" | "text" | "password" | "confirm";
+	message: string;
+	rendered: string[];
+}
+
+/** One scripted answer: applied to the first prompt whose message contains `match` (the editor's menu repeats, so answers are match-keyed, not position-keyed). */
+interface ScriptedAnswer {
+	match: string;
+	answer: string | boolean;
+}
+
+/**
+ * A scripted io for the secrets flow's LOOPED prompts (the tier-(a) fake's
+ * per-kind queues can't express a repeating menu). Each call is RECORDED (kind +
+ * message + rendered option labels/hints — exactly what the masking test greps)
+ * and answered from the script; an unmatched prompt resolves to `null` (cancel),
+ * so an unexpected prompt fails the flow loudly at its assertions.
+ */
+function scriptedIo(script: ScriptedAnswer[]): WizardIo & { calls: PromptCall[] } {
+	const queue = [...script];
+	const calls: PromptCall[] = [];
+	const respond = (call: PromptCall): string | boolean | null => {
+		const index = queue.findIndex((e) => call.message.includes(e.match));
+		if (index === -1) return null;
+		const entry = queue[index];
+		queue.splice(index, 1);
+		return entry.answer;
+	};
+	return {
+		calls,
+		async select(o) {
+			const call: PromptCall = {
+				kind: "select",
+				message: o.message,
+				rendered: o.options.flatMap((x) => [x.label ?? x.value, x.hint ?? ""]),
+			};
+			calls.push(call);
+			const a = respond(call);
+			return typeof a === "string" ? a : null;
+		},
+		async text(o) {
+			const call: PromptCall = { kind: "text", message: o.message, rendered: [] };
+			calls.push(call);
+			const a = respond(call);
+			return typeof a === "string" ? a : null;
+		},
+		async password(o) {
+			const call: PromptCall = { kind: "password", message: o.message, rendered: [] };
+			calls.push(call);
+			const a = respond(call);
+			return typeof a === "string" ? a : null;
+		},
+		async confirm(o) {
+			const call: PromptCall = { kind: "confirm", message: o.message, rendered: [] };
+			calls.push(call);
+			const a = respond(call);
+			return typeof a === "boolean" ? a : null;
+		},
+		intro() {},
+		outro() {},
+	};
+}
+
+/** Every string the io surfaced for a call — messages plus each select's rendered labels/hints. */
+function surfacedStrings(calls: PromptCall[]): string[] {
+	return calls.flatMap((c) => [c.message, ...c.rendered]);
+}
+
+describe("secrets model — the masked render (spec 28, box 28f)", () => {
+	const always = (): boolean => true;
+
+	it("renders keys + set states and NEVER a stored value (the grep test, model half)", () => {
+		const lines = secretsModelLines(seededStore, always);
+		const joined = lines.join("\n");
+		expect(joined).toContain("API_KEY");
+		expect(joined).toContain("DB_PASS");
+		expect(joined).toContain("— set");
+		for (const line of lines) expect(line).not.toContain(CANARY_VALUE);
+	});
+
+	it("renders host→guest rows; a missing host file gets the soft note (rendered, never blocking)", () => {
+		const files: SecretFileMapping[] = [
+			{ hostPath: "/present.pem", guestPath: "/g/a" },
+			{ hostPath: "/absent.pem", guestPath: "/g/b" },
+		];
+		const lines = secretsModelLines({ env: {}, files }, (p) => p === "/present.pem");
+		expect(lines).toContain("/present.pem → /g/a");
+		expect(lines).toContain("/absent.pem → /g/b (file missing on host)");
+	});
+
+	it("an empty store renders the none states", () => {
+		expect(secretsModelLines({ env: {}, files: [] }, always)).toEqual(["env: none set", "files: none mapped"]);
+	});
+
+	it("the one-line summaries count without values", () => {
+		expect(envSummary({})).toBe("none set");
+		expect(envSummary({ A: "x" })).toBe("1 set (value hidden)");
+		expect(envSummary({ A: "x", B: "y" })).toBe("2 set (values hidden)");
+		expect(fileSummary([], always)).toBe("none mapped");
+		expect(fileSummary([{ hostPath: "/a", guestPath: "/g" }], always)).toBe("1 mapped");
+		expect(fileSummary([{ hostPath: "/a", guestPath: "/g" }], () => false)).toBe("1 mapped — 1 missing on host");
+	});
+});
+
+describe("envPairError / fileMappingError — the 26a grammar surfaced (secrets.ts untouched)", () => {
+	it("a bad key names the grammar rule", () => {
+		expect(envPairError("bad-key", "v")).toBe(
+			'"bad-key" is not a valid env key — use uppercase letters, digits, and underscores, starting with a letter or underscore',
+		);
+		expect(envPairError("1BAD", "v")).not.toBeNull();
+		expect(envPairError("", "v")).not.toBeNull();
+		expect(envPairError("GOOD_KEY_2", "v")).toBeNull();
+	});
+
+	it("a newline/NUL value names the line-based rule", () => {
+		expect(envPairError("KEY", "a\nb")).toBe(
+			"the value for KEY contains a newline or NUL — env values are single lines",
+		);
+		expect(envPairError("KEY", "a\rb")).not.toBeNull();
+		expect(envPairError("KEY", "a\0b")).not.toBeNull();
+		expect(envPairError("KEY", "a=b with spaces")).toBeNull(); // '=' and spaces are legal in a value
+	});
+
+	it("relative paths and control characters are rejected; absolute ones pass", () => {
+		expect(fileMappingError("home/me/pem", "/g/a", [])).toBe(
+			'"home/me/pem" is not an absolute path — it must start with "/" and hold no newline or NUL',
+		);
+		expect(fileMappingError("/h/a", "~/.claude/x", [])).not.toBeNull(); // ~ is not resolved — absolute only
+		expect(fileMappingError("/h/a\nb", "/g/a", [])).not.toBeNull();
+		expect(fileMappingError("/h/a", "/g/a", [])).toBeNull();
+	});
+
+	it("a duplicate guestPath names the 26a rejection (the consumption-side clobber)", () => {
+		const existing: SecretFileMapping[] = [{ hostPath: "/h/one", guestPath: "/g/dup" }];
+		expect(fileMappingError("/h/two", "/g/dup", existing)).toBe(
+			'"/g/dup" is already mapped — each guest path may be used once',
+		);
+		expect(fileMappingError("/h/two", "/g/other", existing)).toBeNull();
+	});
+});
+
+describe("runSecretsSetup — the flow (temp HOME, scripted io)", () => {
+	it("adds an env pair + a file mapping and saves a store loadSecrets reads back identically", async () => {
+		await withTempDirs(async (dirs) => {
+			const { stream, written } = fakeStream();
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "add-env" },
+				{ match: "Env key", answer: "TOKEN" },
+				{ match: "Value for TOKEN", answer: CANARY_VALUE },
+				{ match: "Secrets editor", answer: "add-file" },
+				{ match: "host path", answer: HOST_A },
+				{ match: "guest target", answer: GUEST_A },
+				{ match: "Secrets editor", answer: "save" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io, stream });
+
+			const expected: SecretsStore = {
+				env: { TOKEN: CANARY_VALUE },
+				files: [{ hostPath: HOST_A, guestPath: GUEST_A }],
+			};
+			expect(result).toEqual({ ok: true, value: expected });
+			// The round-trip IS the contract: the store on disk loads back the same shape.
+			expect(loadSecrets(dirs)).toEqual(expected);
+			// One banner, from withSession — nothing else wrote to the stream.
+			expect(written()).toBe(`${BANNER}\n`);
+		});
+	});
+
+	it("a seeded store round-trips untouched through open → save (values preserved, never rendered)", async () => {
+		await withTempDirs(async (dirs) => {
+			saveSecrets(dirs, seededStore);
+			const io = scriptedIo([{ match: "Secrets editor", answer: "save" }]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toEqual({ ok: true, value: seededStore });
+			expect(loadSecrets(dirs)).toEqual(seededStore);
+			// The values flowed through the working copy to the writer — and through NO
+			// rendered string (messages + option labels/hints).
+			for (const s of surfacedStrings(io.calls)) expect(s).not.toContain(CANARY_VALUE);
+		});
+	});
+
+	it("THE GREP TEST: a full editing session's every rendered string lacks the seeded values; keys render", async () => {
+		await withTempDirs(async (dirs) => {
+			saveSecrets(dirs, seededStore);
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "remove-env" },
+				{ match: "Remove which env pair?", answer: "API_KEY" },
+				{ match: "Remove env pair API_KEY?", answer: false }, // decline — keep the pair
+				{ match: "Secrets editor", answer: "save" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toEqual({ ok: true, value: seededStore }); // declined removal + save = unchanged
+			// Keys DO render (masked "set" state); the values behind them never do.
+			const surfaced = surfacedStrings(io.calls);
+			expect(surfaced.some((s) => s.includes(envKeyLine("API_KEY")))).toBe(true);
+			expect(surfaced.some((s) => s.includes(envKeyLine("DB_PASS")))).toBe(true);
+			for (const s of surfaced) expect(s).not.toContain(CANARY_VALUE);
+			// The model half of the same discipline (the canonical render the menu derives from).
+			for (const line of secretsModelLines(seededStore, () => true)) expect(line).not.toContain(CANARY_VALUE);
+		});
+	});
+
+	it("removes an env pair via select + confirm", async () => {
+		await withTempDirs(async (dirs) => {
+			saveSecrets(dirs, seededStore);
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "remove-env" },
+				{ match: "Remove which env pair?", answer: "API_KEY" },
+				{ match: "Remove env pair API_KEY?", answer: true },
+				{ match: "Secrets editor", answer: "save" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toMatchObject({ ok: true, value: { env: { DB_PASS: CANARY_VALUE } } });
+			expect(loadSecrets(dirs).env).toEqual({ DB_PASS: CANARY_VALUE });
+		});
+	});
+
+	it("removes a file mapping via select + confirm", async () => {
+		await withTempDirs(async (dirs) => {
+			saveSecrets(dirs, seededStore);
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "remove-file" },
+				{ match: "Remove which credential file?", answer: "0" },
+				{ match: "Remove credential file", answer: true },
+				{ match: "Secrets editor", answer: "save" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toMatchObject({ ok: true, value: { env: seededStore.env, files: [] } });
+			expect(loadSecrets(dirs).files).toEqual([]);
+		});
+	});
+
+	it("an invalid key surfaces the exact 26a rejection and writes nothing", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "add-env" },
+				{ match: "Env key", answer: "bad-key" },
+				{ match: "Value for", answer: "v" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toMatchObject({ ok: false, error: new Error(envPairError("bad-key", "v") ?? "") });
+			expect(existsSync(join(dirs.secrets, "env"))).toBe(false);
+			expect(loadSecrets(dirs)).toEqual({ env: {}, files: [] });
+		});
+	});
+
+	it("a newline value surfaces the exact 26a rejection and writes nothing", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "add-env" },
+				{ match: "Env key", answer: "GOOD_KEY" },
+				{ match: "Value for", answer: "line one\nline two" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toMatchObject({
+				ok: false,
+				error: new Error(envPairError("GOOD_KEY", "line one\nline two") ?? ""),
+			});
+			expect(existsSync(join(dirs.secrets, "env"))).toBe(false);
+		});
+	});
+
+	it("a duplicate guestPath surfaces the exact 26a rejection and writes nothing", async () => {
+		await withTempDirs(async (dirs) => {
+			saveSecrets(dirs, seededStore);
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "add-file" },
+				{ match: "host path", answer: "/home/me/other.pem" },
+				{ match: "guest target", answer: GUEST_A }, // already mapped by the seed
+			]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result).toMatchObject({
+				ok: false,
+				error: new Error(
+					'"/home/sandbox/.claude/credentials.json" is already mapped — each guest path may be used once',
+				),
+			});
+			expect(loadSecrets(dirs).files).toEqual(seededStore.files); // unchanged — nothing written
+		});
+	});
+
+	it("a cancel at the menu (or any sub-prompt) leaves nothing written", async () => {
+		await withTempDirs(async (dirs) => {
+			const menuCancel = scriptedIo([{ match: "Secrets editor", answer: "cancel" }]);
+			expect(await runSecretsSetup({ dirs, io: menuCancel })).toBeNull();
+			// The next cancel happens mid-add: the key prompt is unscripted → null.
+			const subCancel = scriptedIo([{ match: "Secrets editor", answer: "add-env" }]);
+			expect(await runSecretsSetup({ dirs, io: subCancel })).toBeNull();
+			expect(loadSecrets(dirs)).toEqual({ env: {}, files: [] });
+			expect(existsSync(join(dirs.secrets, "env"))).toBe(false);
+		});
+	});
+
+	it("a missing host file renders the soft note in the flow and stays savable", async () => {
+		await withTempDirs(async (dirs) => {
+			const mapping: SecretFileMapping[] = [{ hostPath: "/absent-on-host.pem", guestPath: "/g/x" }];
+			saveSecrets(dirs, { env: {}, files: mapping });
+			const io = scriptedIo([
+				{ match: "Secrets editor", answer: "remove-file" }, // open the removal list just to render its labels
+				{ match: "Remove which credential file?", answer: "0" },
+				{ match: "Remove credential file", answer: false }, // decline — keep the mapping
+				{ match: "Secrets editor", answer: "save" },
+			]);
+
+			const result = await runSecretsSetup({ dirs, io, hostFileExists: () => false });
+
+			expect(result?.ok).toBe(true);
+			const removeCall = io.calls.find((c) => c.message.includes("Remove which credential file?"));
+			expect(removeCall?.rendered.some((r) => r.includes("(file missing on host)"))).toBe(true);
+			expect(loadSecrets(dirs).files).toEqual(mapping); // the soft note never blocked the save
+		});
+	});
+
+	it("a save failure converts to err (the store's throwing boundary, surfaced inline)", async () => {
+		const home = mkdtempSync(join(tmpdir(), "openhammer-secrets-fail-"));
+		try {
+			// A regular file where the vm root should mkdir — saveSecrets throws ENOTDIR.
+			const blocker = join(home, "blocker");
+			writeFileSync(blocker, "x");
+			const root = join(blocker, "vm");
+			const dirs: VmDirs = {
+				root,
+				sessions: join(root, "sessions"),
+				images: join(root, "images"),
+				isos: join(root, "isos"),
+				cidata: join(root, "cidata"),
+				secrets: join(root, "secrets"),
+			};
+			const io = scriptedIo([{ match: "Secrets editor", answer: "save" }]);
+
+			const result = await runSecretsSetup({ dirs, io });
+
+			expect(result?.ok).toBe(false);
+			if (result === null || result.ok) return; // narrowed to the err case
+			expect(result.error.message.startsWith("cannot save the secrets:")).toBe(true);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("runSecretsSetup — the row-6 interstitial (spec 28, matrix row 6)", () => {
+	it("a live session PRECEDES the editor with the hint; the shortcut invokes the injected 28b action, then the editor opens", async () => {
+		await withTempDirs(async (dirs) => {
+			const restarts: number[] = [];
+			const io = scriptedIo([
+				{ match: SECRETS_LIVE_HINT, answer: "restart" },
+				{ match: "Secrets editor", answer: "cancel" },
+			]);
+
+			const result = await runSecretsSetup({
+				dirs,
+				io,
+				sessionActive: () => true, // 28d's vmSessionActive, injected
+				restartSandbox: async () => {
+					restarts.push(1);
+					return { ok: true, value: undefined };
+				},
+			});
+
+			expect(result).toBeNull(); // the editor was cancelled after the restart — still nothing written
+			expect(restarts).toEqual([1]); // the injected action ran — the wired 28b action, reused (not duplicated)
+			expect(io.calls[0]?.message).toBe(SECRETS_LIVE_HINT); // the interstitial PRECEDES everything
+			expect(io.calls[0]?.rendered).toContain(SECRETS_EDIT_CHOICE);
+			expect(io.calls[0]?.rendered).toContain(SECRETS_RESTART_CHOICE);
+			expect(io.calls[1]?.message.startsWith("Secrets editor")).toBe(true); // then the editor
+		});
+	});
+
+	it("choosing Edit skips the restart action entirely", async () => {
+		await withTempDirs(async (dirs) => {
+			const restarts: number[] = [];
+			const io = scriptedIo([
+				{ match: SECRETS_LIVE_HINT, answer: "edit" },
+				{ match: "Secrets editor", answer: "cancel" },
+			]);
+
+			await runSecretsSetup({
+				dirs,
+				io,
+				sessionActive: () => true,
+				restartSandbox: async () => {
+					restarts.push(1);
+					return { ok: true, value: undefined };
+				},
+			});
+
+			expect(restarts).toEqual([]); // no restart — the hint alone carried the row-6 semantics
+			expect(io.calls[0]?.message).toBe(SECRETS_LIVE_HINT);
+		});
+	});
+
+	it("a failed restart surfaces the action's err inline; the editor never opens", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([{ match: SECRETS_LIVE_HINT, answer: "restart" }]);
+
+			const result = await runSecretsSetup({
+				dirs,
+				io,
+				sessionActive: () => true,
+				restartSandbox: async () => ({ ok: false, error: new Error("unowned hint") }),
+			});
+
+			expect(result).toEqual({ ok: false, error: new Error("unowned hint") }); // the action's hint, surfaced
+			expect(io.calls).toHaveLength(1); // only the interstitial — never a silent fall-through
+		});
+	});
+
+	it("an unwired restart shortcut errs — never a silent no-op", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([{ match: SECRETS_LIVE_HINT, answer: "restart" }]);
+
+			const result = await runSecretsSetup({ dirs, io, sessionActive: () => true });
+
+			expect(result).toEqual({ ok: false, error: new Error("no sandbox restart action is wired here") });
+		});
+	});
+
+	it("no live session → no interstitial: the first prompt is the editor menu", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([{ match: "Secrets editor", answer: "cancel" }]);
+
+			await runSecretsSetup({ dirs, io }); // no sessionActive dep — the default no-live posture
+
+			expect(io.calls[0]?.message.startsWith("Secrets editor")).toBe(true);
+			expect(io.calls.some((c) => c.message === SECRETS_LIVE_HINT)).toBe(false);
+		});
 	});
 });
