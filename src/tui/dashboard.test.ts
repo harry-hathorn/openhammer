@@ -1,9 +1,22 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { Settings } from "../config/settings.ts";
 import { defaultVmSettings } from "../config/settings.ts";
 import { ok, type Result } from "../tools/result.ts";
-import { type DashboardDeps, runDashboard } from "./dashboard.ts";
+import type { VmBootGate } from "../vm/boot-backend.ts";
+import type { VmStatus } from "../vm/service.ts";
+import { DashboardStore } from "./dashboard/store.ts";
+import {
+	createSandboxActions,
+	type DashboardDeps,
+	readSerialLog,
+	runDashboard,
+	VM_IN_FLIGHT_HINT,
+	VM_UNOWNED_HINT,
+} from "./dashboard.ts";
 
 /** A fake terminal: records writes + lets the test inject keystrokes via `send`. */
 class FakeTerminal implements Terminal {
@@ -165,5 +178,171 @@ describe("runDashboard — doctor wiring", () => {
 		await runDashboard(deps({ terminal: term, actions: {}, doctorRunner }));
 		await new Promise((r) => setTimeout(r, 20));
 		expect(doctorCalled).toBe(true);
+	});
+});
+
+// ---- the Sandbox actions (spec 28, box 28b) -------------------------------------
+
+/** A vm-state line fixture — the 27h wire shape (mirrors the dashboard test files). */
+function vmLine(sessionId: string | null): string {
+	return JSON.stringify({ type: "vm-state", state: "ready", sessionId, phase: null, sshPort: null, error: null });
+}
+
+/** A scripted VmBootGate (the structural VmService alias — no real VM, no casts). */
+function scriptedGate(over: { stop?: () => Promise<unknown>; start?: () => Promise<void> } = {}): VmBootGate {
+	const status: VmStatus = {
+		state: "ready",
+		phase: "none",
+		sessionId: "vm-test",
+		sshPort: 42255,
+		bootStartedAt: null,
+		bootTimeoutMs: 60_000,
+		readyAt: 1,
+		error: null,
+		relaunchUsed: false,
+	};
+	return {
+		state: "ready",
+		status: () => status,
+		onTransition: () => () => {},
+		start: over.start ?? (async () => {}),
+		ensureReady: async () => ({ ok: false, message: "unused" }),
+		stop: over.stop ?? (async () => ({ path: "powerdown", overlayRemoved: false })),
+	};
+}
+
+describe("createSandboxActions — owned server", () => {
+	it("stopSandbox calls the service's stop once", async () => {
+		const calls: string[] = [];
+		const gate = scriptedGate({
+			stop: async () => {
+				calls.push("stop");
+				return { path: "powerdown", overlayRemoved: false };
+			},
+		});
+		const actions = createSandboxActions({ vmService: () => gate, store: new DashboardStore() });
+		expect(await actions.stopSandbox()).toEqual({ ok: true, value: undefined });
+		expect(calls).toEqual(["stop"]);
+	});
+
+	it("restartSandbox stops then starts — in that order (the fresh boot per the persist rules)", async () => {
+		const calls: string[] = [];
+		const gate = scriptedGate({
+			stop: async () => {
+				calls.push("stop");
+				return {};
+			},
+			start: async () => {
+				calls.push("start");
+			},
+		});
+		const actions = createSandboxActions({ vmService: () => gate, store: new DashboardStore() });
+		expect(await actions.restartSandbox()).toEqual({ ok: true, value: undefined });
+		expect(calls).toEqual(["stop", "start"]);
+	});
+
+	it("a second action while one is in flight errs inline and never reaches the service", async () => {
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let stops = 0;
+		const gate = scriptedGate({
+			stop: async () => {
+				stops += 1;
+				await blocked;
+				return {};
+			},
+		});
+		const actions = createSandboxActions({ vmService: () => gate, store: new DashboardStore() });
+		const first = actions.stopSandbox();
+		const second = await actions.stopSandbox();
+		expect(second).toEqual({ ok: false, error: new Error(VM_IN_FLIGHT_HINT) });
+		expect(stops).toBe(1); // the second activation was gated before the service
+		release();
+		expect(await first).toEqual({ ok: true, value: undefined });
+	});
+
+	it("readSerial reads the latest vm-state line's session through the reader", async () => {
+		const store = new DashboardStore();
+		store.applyVmStateLine(vmLine("vm-fixture"));
+		const reads: string[] = [];
+		const actions = createSandboxActions({
+			vmService: () => scriptedGate(),
+			readSerial: async (id) => {
+				reads.push(id);
+				return ok({ content: "boot line\n", totalBytes: 10 });
+			},
+			store,
+		});
+		expect(await actions.readSerial()).toEqual({ ok: true, value: { content: "boot line\n", totalBytes: 10 } });
+		expect(reads).toEqual(["vm-fixture"]);
+	});
+
+	it("no session id yet (no vm-state line) errs no-serial-yet; the reader is never called", async () => {
+		let called = false;
+		const actions = createSandboxActions({
+			vmService: () => scriptedGate(),
+			readSerial: async () => {
+				called = true;
+				return ok({ content: "", totalBytes: 0 });
+			},
+			store: new DashboardStore(),
+		});
+		expect(await actions.readSerial()).toEqual({ ok: false, error: new Error("no serial yet") });
+		expect(called).toBe(false);
+	});
+});
+
+describe("createSandboxActions — unowned server (the hint, exact)", () => {
+	it("all three actions err with the unowned hint; no service is ever touched", async () => {
+		let consulted = 0;
+		let read = false;
+		const actions = createSandboxActions({
+			vmService: () => {
+				consulted += 1;
+				return null;
+			},
+			readSerial: async () => {
+				read = true;
+				return ok({ content: "", totalBytes: 0 });
+			},
+			store: new DashboardStore(),
+		});
+		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(await actions.restartSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(await actions.readSerial()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(consulted).toBe(3); // the gate was consulted; nothing behind it existed to touch
+		expect(read).toBe(false); // the unowned gate precedes the serial read
+	});
+
+	it("an absent vmService dep is unowned too (today's child-process wiring)", async () => {
+		const actions = createSandboxActions({ store: new DashboardStore() });
+		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+	});
+});
+
+describe("readSerialLog — the default reader (temp HOME)", () => {
+	it("reads <HOME>/.openhammer/vm/sessions/<id>/serial.log with the exact byte size", async () => {
+		const home = await mkdtemp(join(tmpdir(), "oh-serial-"));
+		try {
+			const dir = join(home, ".openhammer", "vm", "sessions", "vm-fixture");
+			await mkdir(dir, { recursive: true });
+			const body = "SeaBIOS booting...\r\nomarchy login:\r\n";
+			await writeFile(join(dir, "serial.log"), body, "utf8");
+			const result = await readSerialLog("vm-fixture", home);
+			expect(result).toEqual({ ok: true, value: { content: body, totalBytes: Buffer.byteLength(body, "utf8") } });
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("a missing serial log errs with the no-serial-yet line", async () => {
+		const home = await mkdtemp(join(tmpdir(), "oh-serial-"));
+		try {
+			expect(await readSerialLog("vm-absent", home)).toEqual({ ok: false, error: new Error("no serial yet") });
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
 	});
 });

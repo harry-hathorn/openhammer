@@ -40,8 +40,12 @@ import {
 	menuSectionAt,
 	renderFieldRows,
 	renderList,
+	SANDBOX_RESTART_LABEL,
+	SANDBOX_SERIAL_LABEL,
+	SANDBOX_STOP_LABEL,
 	type ScreenSpec,
 	SET_LOGIN_LABEL,
+	sandboxItems,
 	settingsItems,
 	titleLine,
 } from "./screens.ts";
@@ -50,8 +54,12 @@ import {
 	channelRows,
 	clientRows,
 	monitorRows,
+	type SerialSource,
+	type SerialTail,
 	sandboxHeaderRows,
 	secretRevealRows,
+	serialTailNote,
+	serialTailOf,
 	settingsRows,
 	statusRows,
 } from "./view.ts";
@@ -64,7 +72,8 @@ export type ScreenState =
 	| { kind: "menu" }
 	| { kind: "section"; section: Section }
 	| { kind: "channel-detail"; id: string }
-	| { kind: "client-detail"; id: string };
+	| { kind: "client-detail"; id: string }
+	| { kind: "serial" };
 
 /** The add/issue row markers (matched by prefix so a conditional offset can't misroute). */
 const ADD_CHANNEL_MARKER = "＋";
@@ -93,6 +102,32 @@ export interface DashboardActions {
 	setLogin(): Promise<Result<void, Error> | null>;
 	/** `doctor`. Returns the report text ("" if it could not run). */
 	runDoctor(): Promise<string>;
+	/**
+	 * Stop the VM sandbox (spec 28, matrix row 4): the `VmService` teardown — clean
+	 * ACPI powerdown + stop ladder + persist policy (spec 27e). The wired action asks
+	 * ONE confirmation first (the `io.confirm` modal) and returns `null` when declined
+	 * (the cancelled-modal idiom: silent). After a stop the state row reads `stopped`:
+	 * the boot-scoped mode re-boots the sandbox on the next server start — the lasting
+	 * stop is mode `off` + restart.
+	 */
+	stopSandbox(): Promise<Result<void, Error> | null>;
+	/**
+	 * Restart the VM sandbox: `await service.stop()` then `void service.start()` — a
+	 * fresh boot per the persist rules (retain reuses the overlay, discard is fresh;
+	 * the service owns those semantics, spec 27e). The row flips to `booting` via the
+	 * vm-state line: main.ts wires service transitions → status socket (27h), and the
+	 * dashboard's socket-client feed lands them in the store — owned and attached
+	 * dashboards take the SAME loopback path, so no direct render poke exists or is
+	 * needed. Owned-server only; unowned activations err with the unowned hint.
+	 */
+	restartSandbox(): Promise<Result<void, Error> | null>;
+	/**
+	 * Read the session's serial log (the vm-state line's sessionId) as
+	 * `{ content, totalBytes }` (spec 28, box 28b). The default reader is
+	 * `<HOME>/.openhammer/vm/sessions/<sessionId>/serial.log`; a missing file errs
+	 * "no serial yet". Owned-server only — a remote server's serial file isn't here.
+	 */
+	readSerial(): Promise<Result<SerialSource, Error>>;
 	/** Quit the dashboard (stops the render loop; `runDashboard`'s `onQuit` stops the server). */
 	quit(): void;
 }
@@ -135,6 +170,8 @@ export class DashboardRoot implements Component {
 	private reveal: SecretReveal | null = null;
 	/** The doctor report, shown on the Doctor screen once run. */
 	private doctorReport: string | null = null;
+	/** The bounded serial tail, shown on the serial drill-in once read. */
+	private serialTail: SerialTail | null = null;
 	/** The terminal row count (to pin the list at the bottom with a gap under the banner). */
 	private readonly getRows: () => number;
 
@@ -155,14 +192,14 @@ export class DashboardRoot implements Component {
 			case "menu":
 				return "↑↓/jk move · enter/l open · esc/h back · q quit";
 			case "section":
-				return this.screen.section === "monitor" ||
-					this.screen.section === "status" ||
-					this.screen.section === "sandbox"
+				return this.screen.section === "monitor" || this.screen.section === "status"
 					? "esc/h back to return"
-					: "↑↓/jk move · enter/l select · esc/h back";
+					: "↑↓/jk move · enter/l action · esc/h back";
 			case "channel-detail":
 			case "client-detail":
 				return "↑↓/jk move · enter/l action · esc/h back";
+			case "serial":
+				return "esc/h back to return";
 		}
 	}
 
@@ -201,13 +238,14 @@ export class DashboardRoot implements Component {
 						hint: this.hint(),
 					};
 				}
-				// Sandbox (spec 28): a read-only state screen — the verbatim state row,
-				// then the effective guest root when known (matrix row 9). Actions are
-				// 28b/28c; until then the screen is Back-only.
+				// Sandbox (spec 28): the verbatim state row, then the effective guest root
+				// when known (matrix row 9), over the session action list (box 28b): Stop /
+				// Restart / Serial tail / Back. Owned-vs-unowned does not change the list —
+				// an unowned activation surfaces the unowned hint (never a dead button).
 				if (section === "sandbox") {
 					return {
 						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot),
-						items: BACK_ONLY,
+						items: sandboxItems(),
 						hint: this.hint(),
 					};
 				}
@@ -225,6 +263,16 @@ export class DashboardRoot implements Component {
 			case "client-detail": {
 				const spec = clientDetailSpec(this.store, this.screen.id, this.style);
 				return { header: spec.header, items: spec.items, hint: this.hint() };
+			}
+			case "serial": {
+				// The serial drill-in (spec 28, box 28b): the one-line window/bytes note,
+				// then the tail-biased lines — a static snapshot, never a live follow.
+				const tail = this.serialTail;
+				return {
+					header: tail !== null ? [serialTailNote(tail), "", ...tail.lines] : ["(no serial read yet)"],
+					items: BACK_ONLY,
+					hint: this.hint(),
+				};
 			}
 		}
 	}
@@ -331,6 +379,10 @@ export class DashboardRoot implements Component {
 				this.screen = { kind: "section", section: "clients" };
 				this.focus = 0;
 				return;
+			case "serial":
+				this.screen = { kind: "section", section: "sandbox" };
+				this.focus = 0;
+				return;
 		}
 	}
 
@@ -428,6 +480,38 @@ export class DashboardRoot implements Component {
 			this.doctorReport = await this.actions.runDoctor();
 			this.flashMessage = this.doctorReport === "" ? "Doctor failed to run." : null;
 			return;
+		}
+		if (section === "sandbox") {
+			// The session actions (spec 28, box 28b). Each wired action carries the
+			// owned-server gate: an unowned activation errs with the unowned hint, which
+			// flashes here — the same inline surfacing any other failure gets.
+			if (label === SANDBOX_STOP_LABEL) {
+				const result = await this.actions.stopSandbox();
+				if (result === null) return; // confirmation declined — silent (the modal idiom)
+				this.flashMessage = result.ok
+					? "Sandbox stopped — the boot-scoped mode re-boots it on the next server start (lasting stop: mode off + restart)."
+					: result.error.message;
+				return;
+			}
+			if (label === SANDBOX_RESTART_LABEL) {
+				const result = await this.actions.restartSandbox();
+				if (result === null) return;
+				this.flashMessage = result.ok
+					? "Restarting the sandbox — teardown done; a fresh boot is starting (the row flips to booting)."
+					: result.error.message;
+				return;
+			}
+			if (label === SANDBOX_SERIAL_LABEL) {
+				const result = await this.actions.readSerial();
+				if (!result.ok) {
+					this.flashMessage = result.error.message; // incl. "no serial yet" (no session / no file)
+					return;
+				}
+				this.serialTail = serialTailOf(result.value.content, result.value.totalBytes);
+				this.screen = { kind: "serial" };
+				this.focus = 0;
+				return;
+			}
 		}
 	}
 

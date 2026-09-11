@@ -22,7 +22,7 @@ import type { ClientInfo } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings, VmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
 import type { VmStateLine } from "../../observability/status-socket.ts";
-import { formatEvent, formatVmState } from "../monitor-view.ts";
+import { formatBytes, formatEvent, formatVmState } from "../monitor-view.ts";
 import type { ChannelLiveState, ServerStatusState } from "./store.ts";
 
 /** A labeled key/value row (status, channel detail, settings). `value` is plain text. */
@@ -244,4 +244,62 @@ export function sandboxHeaderRows(line: VmStateLine | null, guestRoot: string | 
 	const rows = [sandboxStateRow(line)];
 	if (guestRoot !== null) rows.push(`guest root: ${guestRoot}`);
 	return rows;
+}
+
+// ---- the serial tail (spec 28, box 28b) -----------------------------------------
+
+/**
+ * The serial-tail window: the drill-in renders the LAST {@link SERIAL_TAIL_LINES}
+ * lines of the session's serial.log — bounded and tail-biased (a boot's verdict
+ * and a guest's last words sit at the END), a static snapshot, never a live follow.
+ */
+export const SERIAL_TAIL_LINES = 200;
+
+/**
+ * The raw serial-log read the dashboard's `readSerial` action seam returns: the
+ * file's full text plus its exact byte size (the byte note the serial screen shows).
+ */
+export interface SerialSource {
+	readonly content: string;
+	readonly totalBytes: number;
+}
+
+/** The bounded serial view the serial drill-in screen renders. */
+export interface SerialTail {
+	/** The tail-biased lines (≤ {@link SERIAL_TAIL_LINES}), `\r`-stripped. */
+	readonly lines: string[];
+	readonly totalBytes: number;
+	/** True when the log had more lines than the window (the head was dropped). */
+	readonly truncated: boolean;
+	/** The log's full line count (what `truncated` is measured against). */
+	readonly lineCount: number;
+}
+
+/**
+ * Tail-bias a raw serial read into the bounded view: split on `\r?\n` (the guest
+ * writes CRLF), drop the trailing-newline artifact, keep the last
+ * {@link SERIAL_TAIL_LINES} lines. Pure.
+ */
+export function serialTailOf(content: string, totalBytes: number): SerialTail {
+	const all = content.split(/\r?\n/);
+	if (all.length > 0 && all[all.length - 1] === "") all.pop();
+	const truncated = all.length > SERIAL_TAIL_LINES;
+	return {
+		lines: truncated ? all.slice(-SERIAL_TAIL_LINES) : all,
+		totalBytes,
+		truncated,
+		lineCount: all.length,
+	};
+}
+
+/**
+ * The serial screen's one-line summary: the window ("last N of M lines" when
+ * truncated, "M lines" when whole), the total-bytes note, and the not-live
+ * posture (a snapshot — re-open it for a fresher one). Pure.
+ */
+export function serialTailNote(tail: SerialTail): string {
+	const window = tail.truncated
+		? `last ${tail.lines.length} of ${tail.lineCount} lines`
+		: `${tail.lineCount} ${tail.lineCount === 1 ? "line" : "lines"}`;
+	return `serial.log — ${window} · ${formatBytes(tail.totalBytes)} total · read-only snapshot (not live)`;
 }

@@ -27,6 +27,8 @@
  * + logged to stderr — the terminal is already restored, so the message surfaces
  * in the operator's shell rather than corrupting the dashboard screen.
  */
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
 import {
 	type ClientInfo,
@@ -43,11 +45,14 @@ import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
 import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
+import type { VmBootGate } from "../vm/boot-backend.ts";
+import { resolveVmDirs } from "../vm/session.ts";
 import type { BannerStream } from "./banner.ts";
 import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
 import { type DashboardActions, DashboardRoot } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
+import type { SerialSource } from "./dashboard/view.ts";
 import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
@@ -116,6 +121,28 @@ export interface DashboardDeps {
 	 * actions then persist the change but skip the restart.
 	 */
 	restartServer?: () => Promise<Result<void, Error>>;
+	/**
+	 * The VM access seam (spec 28, box 28b) — the OWNED-server gate behind the
+	 * Sandbox screen's actions (Stop / Restart / Serial tail). Returns the live
+	 * `VmService` handle when the dashboard acts on a server whose process it is
+	 * IN (the service handle exists here); `null` (or an absent dep) when the
+	 * dashboard is a view over ANOTHER process's server — attached via the status
+	 * socket, read-only telemetry, no action path exists (the default today: the
+	 * CLI wiring runs the server as a child process, so no handle lives here).
+	 * Unowned activations surface the unowned hint; the service is never touched.
+	 *
+	 * Typed as {@link VmBootGate} — the repo's structural `VmService` alias
+	 * (`VmService` satisfies it; boot-backend.ts names it for exactly this) — so
+	 * tests inject a scripted gate with no cast, the `server-control.ts`
+	 * `ServerChild` rationale.
+	 */
+	vmService?: () => VmBootGate | null;
+	/**
+	 * Override the session serial-log reader (tests inject fixture content).
+	 * Default: {@link readSerialLog} — the real
+	 * `<HOME>/.openhammer/vm/sessions/<sessionId>/serial.log` read.
+	 */
+	readSerial?: (sessionId: string) => Promise<Result<SerialSource, Error>>;
 }
 
 /**
@@ -232,6 +259,128 @@ export async function runDashboard(deps: DashboardDeps): Promise<void> {
 		// actions.quit() keypress). The renderer's refresh cadence keeps the event loop
 		// alive while the dashboard runs.
 	});
+}
+
+// ---- the Sandbox actions (spec 28, box 28b) -------------------------------------
+
+/**
+ * The unowned-server hint — the exact line a Sandbox action activation flashes
+ * when the dashboard holds no VM service handle (it is a view over another
+ * process's server). ServerControl.restart()'s refusal voice ("cannot restart a
+ * server the dashboard did not start"), pointed at the fix.
+ */
+export const VM_UNOWNED_HINT = "the dashboard doesn't own this server — restart openhammer to manage the sandbox there";
+
+/**
+ * The single-flight line (spec 28 edge case): a second Sandbox action while one
+ * is in flight errs with this, flashed inline. The UI guard is for UX only —
+ * `VmService` itself is the single-flight authority (one VM per process, spec
+ * 27e: `start()` while booting awaits the in-flight boot; `stop()` owns teardown
+ * via the epoch guard).
+ */
+export const VM_IN_FLIGHT_HINT = "a sandbox action is already in flight — wait for it to settle";
+
+/** The Stop confirmation's modal message (the matrix-row-4 semantics, restated). */
+export const SANDBOX_STOP_CONFIRM_MESSAGE =
+	"Stop the sandbox now? The boot-scoped mode re-boots it on the next server start — the lasting stop is mode off + restart.";
+
+/** The session dir's serial-log file name — service.ts's SESSION_SERIAL_NAME, restated (not exported there). */
+const SERIAL_LOG_FILE = "serial.log";
+
+/**
+ * The default serial-log reader: `<HOME>/.openhammer/vm/sessions/<sessionId>/serial.log`
+ * (spec 28's Serial tail source). A missing file is the expected empty case →
+ * `err("no serial yet")`; any other read failure names its cause. `homeDir`
+ * overrides `os.homedir()` (tests point the whole vm tree at a temp HOME).
+ */
+export async function readSerialLog(sessionId: string, homeDir?: string): Promise<Result<SerialSource, Error>> {
+	const path = join(resolveVmDirs({ homeDir }).sessions, sessionId, SERIAL_LOG_FILE);
+	try {
+		const bytes = await readFile(path);
+		return ok({ content: bytes.toString("utf8"), totalBytes: bytes.byteLength });
+	} catch (e) {
+		if (e instanceof Error && "code" in e && e.code === "ENOENT") {
+			return err(new Error("no serial yet"));
+		}
+		return err(new Error(`cannot read the session serial log: ${e instanceof Error ? e.message : String(e)}`));
+	}
+}
+
+/** Deps for {@link createSandboxActions} (the exported, unit-testable core the buildActions wiring wraps). */
+export interface SandboxActionDeps {
+	/** The owned-server gate ({@link DashboardDeps.vmService}). Absent/null → unowned. */
+	readonly vmService?: () => VmBootGate | null;
+	/** The serial-log reader. Default: {@link readSerialLog} over the real HOME. */
+	readonly readSerial?: (sessionId: string) => Promise<Result<SerialSource, Error>>;
+	/** The live store — the serial read's sessionId comes from the latest vm-state line. */
+	readonly store: Pick<DashboardStore, "latestVmState">;
+}
+
+/**
+ * The Sandbox actions' core (spec 28, box 28b): the owned-server gate, the UI
+ * single-flight guard, and the service calls. Exported so the hermetic trio can
+ * drive them on a scripted gate (the buildActions wiring wraps Stop's `io.confirm`
+ * modal around this and honors the per-action overrides).
+ *
+ * Semantics: `stopSandbox` = `service.stop()` — the clean ACPI powerdown + stop
+ * ladder + persist teardown (27e). `restartSandbox` = `await service.stop()` then
+ * `void service.start()` — a fresh boot per the persist rules (retain reuses the
+ * overlay, discard is fresh; the service owns those semantics). Surfaced results
+ * flow through the vm-state line (service transitions → status socket → socket
+ * client → store, 27h), so no direct render poke exists or is needed. The
+ * in-flight guard covers only the action's awaited window; the service is the
+ * authority beyond it (`start()` is idempotent while booting).
+ */
+export function createSandboxActions(
+	deps: SandboxActionDeps,
+): Pick<DashboardActions, "stopSandbox" | "restartSandbox" | "readSerial"> {
+	const owned = (): Result<VmBootGate, Error> => {
+		const gate = deps.vmService?.() ?? null;
+		return gate === null ? err(new Error(VM_UNOWNED_HINT)) : ok(gate);
+	};
+	let inFlight = false; // the UX guard — VmService itself is the single-flight authority (27e)
+
+	const stopSandbox: DashboardActions["stopSandbox"] = async () => {
+		const gate = owned();
+		if (!gate.ok) return gate;
+		if (inFlight) return err(new Error(VM_IN_FLIGHT_HINT));
+		inFlight = true;
+		try {
+			await gate.value.stop();
+			return ok(undefined);
+		} catch (e) {
+			return err(e instanceof Error ? e : new Error(String(e)));
+		} finally {
+			inFlight = false;
+		}
+	};
+
+	const restartSandbox: DashboardActions["restartSandbox"] = async () => {
+		const gate = owned();
+		if (!gate.ok) return gate;
+		if (inFlight) return err(new Error(VM_IN_FLIGHT_HINT));
+		inFlight = true;
+		try {
+			await gate.value.stop(); // teardown now — the 27e clean stop
+			void gate.value.start(); // fresh boot per the persist rules; the vm-state line reports booting
+			return ok(undefined);
+		} catch (e) {
+			return err(e instanceof Error ? e : new Error(String(e)));
+		} finally {
+			inFlight = false;
+		}
+	};
+
+	const readSerial: DashboardActions["readSerial"] = async () => {
+		const gate = owned();
+		if (!gate.ok) return err(gate.error); // same hint — a remote server's serial file isn't here
+		const sessionId = deps.store.latestVmState?.sessionId ?? null;
+		if (sessionId === null) return err(new Error("no serial yet"));
+		const read = deps.readSerial ?? ((id: string) => readSerialLog(id));
+		return read(sessionId);
+	};
+
+	return { stopSandbox, restartSandbox, readSerial };
 }
 
 /**
@@ -401,6 +550,22 @@ function buildActions(
 			return ok(undefined);
 		});
 
+	// The Sandbox actions (spec 28, box 28b): the exported core carries the
+	// owned-gate + single-flight + service calls; the wiring adds Stop's one
+	// confirmation step — the dashboard's confirm idiom (the `io.confirm` primitive
+	// run as a modal on the shared terminal, the setLogin prompts' flow). Declined
+	// or aborted → `null` (the cancelled-modal idiom: silent).
+	const sandbox = createSandboxActions({ vmService: deps.vmService, readSerial: deps.readSerial, store });
+	const stopSandboxAction: DashboardActions["stopSandbox"] =
+		overrides.stopSandbox ??
+		(async () => {
+			const confirmed = await withModal(() => io.confirm({ message: SANDBOX_STOP_CONFIRM_MESSAGE }));
+			if (confirmed !== true) return null;
+			return sandbox.stopSandbox();
+		});
+	const restartSandboxAction: DashboardActions["restartSandbox"] = overrides.restartSandbox ?? sandbox.restartSandbox;
+	const readSerialAction: DashboardActions["readSerial"] = overrides.readSerial ?? sandbox.readSerial;
+
 	// `quit` is assigned by runDashboard (it owns the lifecycle/`onQuit`); a placeholder
 	// here satisfies the interface so the root can be constructed before that wiring.
 	const actions: DashboardActions = {
@@ -412,6 +577,9 @@ function buildActions(
 		removeClient: removeClientAction,
 		setLogin: setLoginAction,
 		runDoctor: runDoctorAction,
+		stopSandbox: stopSandboxAction,
+		restartSandbox: restartSandboxAction,
+		readSerial: readSerialAction,
 		quit: () => {},
 	};
 	return actions;

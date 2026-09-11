@@ -256,6 +256,46 @@ export function doctorItems(): ListItem[] {
 	];
 }
 
+// ---- the Sandbox screen's action rows (spec 28, box 28b) ------------------------
+
+/**
+ * The Sandbox screen's action-row labels — matched by EXACT match in the root's
+ * dispatch (the SET_LOGIN_LABEL precedent: no glyph, portable, unambiguous).
+ * Exported so the root and {@link sandboxItems} share the single source.
+ */
+export const SANDBOX_STOP_LABEL = "Stop sandbox…";
+export const SANDBOX_RESTART_LABEL = "Restart sandbox…";
+export const SANDBOX_SERIAL_LABEL = "Serial tail";
+
+/**
+ * The Stop row's subtitle — the matrix-row-4 semantics verbatim: a stop is a
+ * teardown NOW; the boot-scoped mode re-boots the sandbox on the next server
+ * start, and the lasting stop is mode `off` + restart (with the row-1 channel
+ * warning when a public channel is configured).
+ */
+export const SANDBOX_STOP_TEXT =
+	"power down now — the boot-scoped mode re-boots the sandbox on the next server start (lasting stop: mode off + restart)";
+
+/**
+ * The Sandbox screen's action list: Stop / Restart / Serial tail, then Back.
+ * Off-mode users never see these — the actions live inside the drill-in screen,
+ * which inherits 28a's off-mode invisibility (the menu row is hidden entirely).
+ * Owned-vs-unowned does NOT change the list: an unowned dashboard renders the
+ * same rows and surfaces the unowned hint on activation (never a dead button).
+ * Pure.
+ */
+export function sandboxItems(): ListItem[] {
+	return [
+		{ label: SANDBOX_STOP_LABEL, description: SANDBOX_STOP_TEXT },
+		{
+			label: SANDBOX_RESTART_LABEL,
+			description: "stop, then a fresh boot (retain reuses the overlay, discard is fresh)",
+		},
+		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
+		{ label: "Back", description: "to menu" },
+	];
+}
+
 /**
  * Render a focused list: the selected row gets a `→ ` marker + accent+bold, others
  * a `  ` marker; labels are aligned to the widest, descriptions follow in muted.
