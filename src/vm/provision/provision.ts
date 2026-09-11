@@ -262,12 +262,15 @@ export function flavorForMode(mode: "off" | "vm" | "agent"): ManifestFlavor {
 }
 
 /**
- * The default {@link ProvisionDeps.resolveVmMode}: the product's OWN config resolution
- * (config.ts's `resolveConfig` — `MCP_VM_MODE` > `settings.vm.mode`, so the TUI's mode
- * select participates, and an invalid value throws the config layer's fail-fatal error)
- * with no CLI flags — the provision command has none.
+ * The default {@link ProvisionDeps.resolveVmMode} — SHARED with snapshot.ts, whose flavor
+ * must derive IDENTICALLY (an agent-provisioned build must snapshot into an agent-flavored
+ * manifest, never a silent "base"): the product's OWN config resolution (config.ts's
+ * `resolveConfig` — `MCP_VM_MODE` > `settings.vm.mode`, so the TUI's mode select
+ * participates, and an invalid value throws the config layer's fail-fatal error) with no
+ * CLI flags — neither vm command has any.
  */
-const resolveVmModeDefault = (): "off" | "vm" | "agent" => resolveConfig({}, process.env, loadSettings()).vm.mode;
+export const resolveVmModeDefault = (): "off" | "vm" | "agent" =>
+	resolveConfig({}, process.env, loadSettings()).vm.mode;
 
 /** Finding 3's conf, verbatim shape: `[Autologin]\nUser=<user>\nSession=hyprland\n`. */
 export function sddmAutologinConf(username: string): string {

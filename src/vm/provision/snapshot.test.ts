@@ -41,6 +41,8 @@ interface HarnessOptions {
 	readonly goldenExists?: boolean;
 	/** The qemu-img info result (default: rc 0 with virtual-size VIRTUAL_SIZE). */
 	readonly qemuImgResult?: { readonly code: number | null; readonly stdoutTail: string; readonly stderrTail: string };
+	/** The injected resolved VM mode (default "vm" — hermetic; the real default resolver reads env + settings). */
+	readonly vmMode?: "off" | "vm" | "agent";
 }
 
 /**
@@ -80,6 +82,7 @@ function harness(options: HarnessOptions = {}) {
 		homeDir: home,
 		log: (line) => logs.push(line),
 		scanActiveSessions: async () => options.scan ?? [],
+		resolveVmMode: () => options.vmMode ?? "vm",
 		runQemuImg: async (args) => {
 			qemuImgCalls.push([...args]);
 			return (
@@ -283,17 +286,42 @@ describe("runSnapshot — the manifest", () => {
 		}
 	});
 
-	it("flavor option: 'agent' records + round-trips, with the baked agent beside it; the flavor line is logged", async () => {
-		const h = harness();
+	it("flavor DERIVED from the resolved VM mode: agent mode → 'agent' with NO options; off → 'base'", async () => {
+		const agent = harness({ vmMode: "agent" });
 		try {
-			const result = await runSnapshot(h.deps, { flavor: "agent" });
+			const result = await runSnapshot(agent.deps);
 			const raw = JSON.parse(readFileSync(result.manifestPath, "utf8")) as Record<string, unknown>;
 			expect(raw.flavor).toBe("agent");
 			expect(raw.agent).toBe("claude"); // defaultGuestConfig()'s agent — what 26d's pass bakes
 			const back = readManifest(result.manifestPath);
 			expect(back?.flavor).toBe("agent");
 			expect(back?.agent).toBe("claude");
-			expect(h.logs.some((line) => line.includes("flavor agent, agent claude"))).toBe(true);
+			expect(agent.logs.some((line) => line.includes("flavor agent (derived from the resolved VM mode)"))).toBe(
+				true,
+			);
+		} finally {
+			agent.cleanup();
+		}
+		const off = harness({ vmMode: "off" });
+		try {
+			const result = await runSnapshot(off.deps);
+			const raw = JSON.parse(readFileSync(result.manifestPath, "utf8")) as Record<string, unknown>;
+			expect(raw.flavor).toBe("base");
+			expect(off.logs.some((line) => line.includes("flavor base (derived from the resolved VM mode)"))).toBe(true);
+		} finally {
+			off.cleanup();
+		}
+	});
+
+	it("an explicit options.flavor wins over the derived mode; the baked agent is recorded beside it", async () => {
+		const h = harness({ vmMode: "vm" });
+		try {
+			const result = await runSnapshot(h.deps, { flavor: "agent" });
+			const back = readManifest(result.manifestPath);
+			expect(back?.flavor).toBe("agent");
+			expect(back?.agent).toBe("claude");
+			// Explicit: NO derivation suffix on the flavor line.
+			expect(h.logs).toContain("snapshot: flavor agent, agent claude (both recorded in the manifest — spec 29)");
 		} finally {
 			h.cleanup();
 		}

@@ -44,8 +44,10 @@
  * license terms apply to redistributed images, not personal use.
  *
  * THE SPEC-29 FLAVOR/AGENT FIELDS: the manifest also records the golden's FLAVOR
- * (`options.flavor`, default "base" — `vm provision`'s agent flavor bakes pre-warmed
- * caches and asserts the agent binary) and the baked AGENT (guest.json's `agent` at
+ * (`options.flavor`; when UNSET it derives exactly like provision does — the resolved VM
+ * mode via the shared {@link resolveVmModeDefault} + {@link flavorForMode}, so an
+ * agent-provisioned golden's manifest reads "agent", never a silently-downgraded "base";
+ * an explicit option wins) and the baked AGENT (guest.json's `agent` at
  * build time — the file `omarchy default agent` reads). The agent field closes 28d's
  * drift gap: manage's note now compares config.agent vs manifest.agent. LEGACY manifests
  * (26e goldens, written before the field existed) normalize with the documented
@@ -76,6 +78,7 @@ import { type RunQemuImg, resolveVmDirs } from "../session.ts";
 import { loadGuestConfig } from "./guest-config.ts";
 import { type ScanActiveSessions, scanActiveVmSessions } from "./install.ts";
 import { ISO_NAME, ISO_SHA256, ISO_URL, runBinDefault, sha256OfFile } from "./iso.ts";
+import { flavorForMode, resolveVmModeDefault } from "./provision.ts";
 
 // ---- the fixed names (26c/26d's session shape, restated: the session this promotes) ----
 
@@ -179,14 +182,22 @@ export interface SnapshotDeps {
 	readonly log?: (line: string) => void;
 	/** Override the single-flight pid scan (tests script a hit or a miss). */
 	readonly scanActiveSessions?: ScanActiveSessions;
+	/**
+	 * The resolved VM mode the spec-29 flavor derives from when `options.flavor` is unset
+	 * (default: the shared {@link resolveVmModeDefault} — the SAME resolution provision
+	 * uses, so the two ends can never disagree). Tests inject.
+	 */
+	readonly resolveVmMode?: () => "off" | "vm" | "agent";
 }
 
 export interface SnapshotOptions {
 	/** The provisioned session to promote (default: the most recent complete `build-*`). */
 	readonly sessionName?: string;
 	/**
-	 * The golden's flavor to record (spec 29; default "base"). The operator passes
-	 * "agent" when promoting a provision run whose asserted agent pre-warm passed.
+	 * The golden's flavor to record (spec 29). Default: DERIVED exactly like provision —
+	 * the resolved VM mode (agent → "agent", off/vm → "base"); an explicit value wins
+	 * (the operator passes "agent" when promoting a provision run whose asserted
+	 * agent pre-warm passed).
 	 */
 	readonly flavor?: ManifestFlavor;
 }
@@ -337,8 +348,16 @@ export async function runSnapshot(deps: SnapshotDeps = {}, options: SnapshotOpti
 	log(`snapshot: session ${sessionDir} (the provisioned build — promoting it to the golden)`);
 
 	const config = loadGuestConfig(dirs);
-	const flavor = options.flavor ?? "base";
-	log(`snapshot: flavor ${flavor}, agent ${config.agent} (both recorded in the manifest — spec 29)`);
+	// The spec-29 flavor: an explicit option wins; otherwise it derives EXACTLY like
+	// provision does (the shared resolveVmModeDefault seam) — an agent-provisioned build
+	// must snapshot into an agent-flavored manifest, never a silent "base".
+	const resolveVmMode = deps.resolveVmMode ?? resolveVmModeDefault;
+	const flavorDerived = options.flavor === undefined;
+	const flavor: ManifestFlavor = options.flavor ?? flavorForMode(resolveVmMode());
+	log(
+		`snapshot: flavor ${flavor}${flavorDerived ? " (derived from the resolved VM mode)" : ""}, ` +
+			`agent ${config.agent} (both recorded in the manifest — spec 29)`,
+	);
 	if (config.encrypt) {
 		// The documented limitation (see the module header): the session does not record its
 		// build config, so the flag comes from the CURRENT doc — say so, loudly.
