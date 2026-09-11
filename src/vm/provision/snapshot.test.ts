@@ -11,6 +11,7 @@ import {
 	GOLDEN_DISK_FILE,
 	goldenIdFor,
 	isoVersionOf,
+	LEGACY_AGENT_DEFAULT,
 	type Manifest,
 	normalizeManifest,
 	readManifest,
@@ -199,6 +200,7 @@ describe("runSnapshot — the manifest", () => {
 			const result = await runSnapshot(h.deps);
 			const raw = JSON.parse(readFileSync(result.manifestPath, "utf8")) as Record<string, unknown>;
 			expect(Object.keys(raw).sort()).toEqual([
+				"agent",
 				"builtAt",
 				"diskVirtualSizeBytes",
 				"encrypt",
@@ -214,6 +216,7 @@ describe("runSnapshot — the manifest", () => {
 			expect(raw).toEqual({
 				id: result.goldenId,
 				flavor: "base",
+				agent: "claude",
 				guestUser: "sandbox",
 				rootDir: "/home/sandbox",
 				isoVersion: "4.0.3",
@@ -237,6 +240,7 @@ describe("runSnapshot — the manifest", () => {
 			const result = await runSnapshot(h.deps);
 			const raw = JSON.parse(readFileSync(result.manifestPath, "utf8")) as Record<string, unknown>;
 			expect(Object.keys(raw).sort()).toEqual([
+				"agent",
 				"builtAt",
 				"diskVirtualSizeBytes",
 				"encrypt",
@@ -276,6 +280,22 @@ describe("runSnapshot — the manifest", () => {
 		} finally {
 			withScript.cleanup();
 			without.cleanup();
+		}
+	});
+
+	it("flavor option: 'agent' records + round-trips, with the baked agent beside it; the flavor line is logged", async () => {
+		const h = harness();
+		try {
+			const result = await runSnapshot(h.deps, { flavor: "agent" });
+			const raw = JSON.parse(readFileSync(result.manifestPath, "utf8")) as Record<string, unknown>;
+			expect(raw.flavor).toBe("agent");
+			expect(raw.agent).toBe("claude"); // defaultGuestConfig()'s agent — what 26d's pass bakes
+			const back = readManifest(result.manifestPath);
+			expect(back?.flavor).toBe("agent");
+			expect(back?.agent).toBe("claude");
+			expect(h.logs.some((line) => line.includes("flavor agent, agent claude"))).toBe(true);
+		} finally {
+			h.cleanup();
 		}
 	});
 });
@@ -384,6 +404,7 @@ describe("readManifest / normalizeManifest — the strict boundary", () => {
 	const valid = {
 		id: "golden-4.0.3-20260910-070809",
 		flavor: "base",
+		agent: "claude",
 		guestUser: "sandbox",
 		rootDir: "/home/sandbox",
 		isoVersion: "4.0.3",
@@ -395,9 +416,17 @@ describe("readManifest / normalizeManifest — the strict boundary", () => {
 		encrypt: false,
 	};
 
-	it("accepts the canonical shape (and the agent flavor)", () => {
+	it("accepts the canonical shape (and the agent flavor, with any recorded agent)", () => {
 		expect(normalizeManifest(valid)).toEqual(valid);
-		expect(normalizeManifest({ ...valid, flavor: "agent" })?.flavor).toBe("agent");
+		const agentFlavor = { ...valid, flavor: "agent", agent: "codex" };
+		expect(normalizeManifest(agentFlavor)).toEqual(agentFlavor);
+	});
+
+	it("a LEGACY manifest without agent normalizes to the documented default (26e goldens predate the field)", () => {
+		const legacy: Record<string, unknown> = { ...valid };
+		delete legacy.agent;
+		expect(normalizeManifest(legacy)).toEqual(valid);
+		expect(normalizeManifest(legacy)?.agent).toBe(LEGACY_AGENT_DEFAULT);
 	});
 
 	it("rejects each invalid variant", () => {
@@ -411,6 +440,9 @@ describe("readManifest / normalizeManifest — the strict boundary", () => {
 			["unsafe id", { ...valid, id: "../evil" }],
 			["empty id", { ...valid, id: "" }],
 			["unknown flavor", { ...valid, flavor: "custom" }],
+			["unsafe agent", { ...valid, agent: "not a user" }],
+			["empty agent", { ...valid, agent: "" }],
+			["non-string agent", { ...valid, agent: 42 }],
 			["bad guestUser", { ...valid, guestUser: "not a user" }],
 			["relative rootDir", { ...valid, rootDir: "home/sandbox" }],
 			["empty isoVersion", { ...valid, isoVersion: "" }],
@@ -455,6 +487,7 @@ describe("readManifest / normalizeManifest — the strict boundary", () => {
 			expect(back).not.toBeNull();
 			expect(back?.id).toBe(result.goldenId);
 			expect(back?.flavor).toBe("base");
+			expect(back?.agent).toBe("claude");
 			expect(back?.guestUser).toBe("sandbox");
 			expect(back?.rootDir).toBe("/home/sandbox");
 			expect(back?.isoVersion).toBe("4.0.3");

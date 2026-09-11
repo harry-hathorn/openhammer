@@ -44,6 +44,15 @@
  * trailing command argv with spaces and the remote shell evaluates the result, so the
  * command travels as exactly one authored element, never split.
  *
+ * THE SPEC-29 FLAVOR AMENDMENT: the pass takes `options.flavor` (default DERIVED from the
+ * resolved VM mode — `MCP_VM_MODE` > `settings.vm.mode` via config.ts's own resolution,
+ * injected as {@link ProvisionDeps.resolveVmMode}). The AGENT flavor adds exactly ONE
+ * behavior to the base pass: the agent pre-warm step (i) becomes AUTHORITATIVE — the
+ * golden must resolve the agent binary (`~/.local/bin/<agent> --version` rc 0 is
+ * asserted; that run IS the mise install, so asserting it asserts the pre-warmed cache's
+ * seed). The flavor is recorded in the result + the log lines. The base flavor's pass is
+ * byte-identical to 26d's.
+ *
  * TEARDOWN (finding 2, the corrupt-golden lesson — doubly load-bearing here: this boot
  * writes to the real disk): clean guest poweroff (`sudo -S systemctl poweroff`, recovery
  * password on stdin) waited out ≤180 s; the stop ladder only as the fallback, and a ladder
@@ -61,6 +70,8 @@
 import type { Dirent } from "node:fs";
 import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { loadSettings } from "../../config/settings.ts";
+import { resolveConfig } from "../../config.ts";
 import { captureOnTeardown } from "../capture.ts";
 import { qemuBootArgs } from "../qemu/args.ts";
 import {
@@ -85,6 +96,7 @@ import {
 	scanActiveVmSessions,
 } from "./install.ts";
 import { runBinDefault } from "./iso.ts";
+import type { ManifestFlavor } from "./snapshot.ts";
 
 // ---- tunables (26c's constants, reused; the boot is a proven ~31 s to ssh) ----
 
@@ -196,6 +208,13 @@ export interface ProvisionDeps {
 	readonly now?: () => number;
 	/** Override the single-flight pid scan (tests script a hit or a miss). */
 	readonly scanActiveSessions?: ScanActiveSessions;
+	/**
+	 * The resolved VM mode the spec-29 flavor derives from (default: config.ts's own
+	 * resolution — `MCP_VM_MODE` > `settings.vm.mode`, the TUI's mode select included,
+	 * fail-fatal on an invalid value). Tests inject. `agent` derives the agent flavor
+	 * ({@link flavorForMode}); `vm`/`off` derive base.
+	 */
+	readonly resolveVmMode?: () => "off" | "vm" | "agent";
 }
 
 export interface ProvisionOptions {
@@ -203,6 +222,13 @@ export interface ProvisionOptions {
 	readonly sessionName?: string;
 	/** The boot budget in minutes (default {@link DEFAULT_BUDGET_MINUTES}; must be finite > 0). */
 	readonly budgetMinutes?: number;
+	/**
+	 * The golden flavor this pass bakes (spec 29). `"agent"` makes the pre-warm step
+	 * authoritative — the agent binary MUST resolve (`~/.local/bin/<agent> --version`
+	 * rc 0) or the pass fails. Default: derived from the resolved VM mode
+	 * ({@link ProvisionDeps.resolveVmMode}); an explicit value wins over the derivation.
+	 */
+	readonly flavor?: ManifestFlavor;
 }
 
 /** One in-pass verification assertion (the spec's manual gate, promoted to a check). */
@@ -218,9 +244,30 @@ export interface ProvisionResult {
 	readonly wallClockSeconds: number;
 	/** Every verify assertion, in run order — all ok on a resolving run. */
 	readonly checks: readonly ProvisionCheck[];
-	/** The pre-warm step's best-effort outcome (a summary string; never gates). */
+	/** The pre-warm step's outcome (a summary string; best-effort on base, asserted on agent). */
 	readonly agentPrewarm: string;
+	/** The flavor this pass baked (spec 29) — the explicit option or the mode derivation. */
+	readonly flavor: ManifestFlavor;
 }
+
+// ---- the spec-29 flavor ----
+
+/**
+ * Spec 29's flavor derivation: the resolved VM mode chooses the golden's flavor.
+ * `agent` mode provisions the agent flavor (the pre-warm asserted); `vm` and `off`
+ * provision base — the operator-facing workspace flavor.
+ */
+export function flavorForMode(mode: "off" | "vm" | "agent"): ManifestFlavor {
+	return mode === "agent" ? "agent" : "base";
+}
+
+/**
+ * The default {@link ProvisionDeps.resolveVmMode}: the product's OWN config resolution
+ * (config.ts's `resolveConfig` — `MCP_VM_MODE` > `settings.vm.mode`, so the TUI's mode
+ * select participates, and an invalid value throws the config layer's fail-fatal error)
+ * with no CLI flags — the provision command has none.
+ */
+const resolveVmModeDefault = (): "off" | "vm" | "agent" => resolveConfig({}, process.env, loadSettings()).vm.mode;
 
 /** Finding 3's conf, verbatim shape: `[Autologin]\nUser=<user>\nSession=hyprland\n`. */
 export function sddmAutologinConf(username: string): string {
@@ -325,6 +372,14 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 	const sleep = deps.sleep ?? sleepDefault;
 	const now = deps.now ?? Date.now;
 	const config = loadGuestConfig(dirs);
+
+	// The spec-29 flavor: an explicit option wins; otherwise the resolved VM mode derives
+	// it. Resolved EARLY (before anything boots) so a malformed MCP_VM_MODE fails the
+	// config layer's fail-fatal way — before QEMU, before a single guest command.
+	const resolveVmMode = deps.resolveVmMode ?? resolveVmModeDefault;
+	const flavorDerived = options.flavor === undefined;
+	const flavor: ManifestFlavor = options.flavor ?? flavorForMode(resolveVmMode());
+	log(`provision: flavor ${flavor}${flavorDerived ? " (derived from the resolved VM mode)" : ""}`);
 
 	// Single-flight (26c's guard): a live session and a provisioning boot would fight over
 	// the same disk — the one thing this pass must never race.
@@ -589,14 +644,27 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 		chmodSync(knownHostsPath, 0o600); // writeFileSync mode only applies at creation
 		log(`provision: host key captured → ${knownHostsPath} (0600)`);
 
-		// ---- (i) agent pre-warm: BEST-EFFORT — resolve the mise stub once so the first
-		// real invocation does not pay the stub setup. Full cache warming (the measured
-		// ~206 MB first-run growth) is the operator's provision.sh territory. ----
-		const prewarmCommand = `~/.local/bin/${config.agent} --version || true`;
+		// ---- (i) agent pre-warm: resolve the mise stub once so the first real invocation
+		// does not pay the stub setup — the `--version` run IS the mise install (22e's
+		// first-launch growth). BASE flavor: BEST-EFFORT, exactly 26d's pass — full cache
+		// warming (the measured ~206 MB) is the operator's provision.sh territory. AGENT
+		// flavor (spec 29): the pre-warm is the one behavior the flavor adds, so it is
+		// ASSERTED — a non-zero rc fails the pass (an agent golden whose binary does not
+		// resolve is not an agent golden), before the operator's provision.sh runs. ----
+		const prewarmVersion = `~/.local/bin/${config.agent} --version`;
+		const prewarmCommand = flavor === "agent" ? prewarmVersion : `${prewarmVersion} || true`;
 		const prewarmed = await exec(prewarmCommand);
+		if (flavor === "agent" && prewarmed.code !== 0) {
+			throw new Error(
+				`vm provision: agent-flavor pre-warm failed: '${prewarmVersion}' exited ` +
+					`${prewarmed.code ?? "spawn error"}: ${prewarmed.stderrTail.trim()} — the agent golden must ` +
+					`resolve ${config.agent} — ${evidence()} — rerun \`openhammer vm provision\` (idempotent)`,
+			);
+		}
 		agentPrewarm =
 			prewarmed.code === 0
-				? `'${prewarmCommand}' exited 0 (${prewarmed.stdoutTail.trim().split(/\r?\n/)[0] ?? ""})`
+				? `'${prewarmCommand}' exited 0 (${prewarmed.stdoutTail.trim().split(/\r?\n/)[0] ?? ""})` +
+					(flavor === "agent" ? " — asserted (agent flavor)" : "")
 				: `'${prewarmCommand}' exited ${prewarmed.code} (best-effort, logged): ${prewarmed.stderrTail.trim()}`;
 
 		// ---- (j) the operator's provision.sh: streamed to the guest and run with bash;
@@ -730,6 +798,7 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 	const logLines = [
 		`# ${sessionName} (direct boot of ${sessionDir})`,
 		`started: ${new Date(startedAt).toISOString()}  wall-clock: ${wallClockSeconds.toFixed(1)} s`,
+		`flavor: ${flavor}`,
 		`guest user: ${config.username}  agent: ${config.agent}  bootCommands: ${config.bootCommands.length}`,
 		`argv: ${JSON.stringify(argv)}`,
 		...sshEvents.map((line) => `ssh| ${line}`),
@@ -751,5 +820,5 @@ export async function runProvision(deps: ProvisionDeps = {}, options: ProvisionO
 		`provision: pass complete — wall-clock ${wallClockSeconds.toFixed(1)} s, ${checks.length} checks passed, ` +
 			`host key pinned at ${knownHostsPath}; session left intact at ${sessionDir}`,
 	);
-	return { sessionDir, wallClockSeconds, checks, agentPrewarm };
+	return { sessionDir, wallClockSeconds, checks, agentPrewarm, flavor };
 }

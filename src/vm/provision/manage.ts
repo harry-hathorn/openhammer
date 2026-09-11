@@ -8,12 +8,12 @@
  * BAKED — guest.json edits after a golden exists apply on the NEXT build, and `vm
  * list` is where that truth surfaces. Every golden gets a row; a manifest that is
  * missing or fails {@link readManifest} is a SURFACED `corrupt:` row (never hidden),
- * and a golden whose recorded guestUser/encrypt differ from the CURRENT guest.json
+ * and a golden whose recorded guestUser/encrypt/agent differ from the CURRENT guest.json
  * carries the drift note (`guest.json changed since this golden was baked (…) —
  * edits apply on the next vm install`). The comparison covers exactly the fields the
- * manifest records — guestUser + encrypt; the 26e manifest does NOT record the agent
- * (flavor is base|agent, not the agent name), so agent drift is undetectable against
- * it; when a later manifest records the agent, it joins the comparison list. The
+ * manifest records — guestUser + encrypt + agent (spec 29 added the agent field, closing
+ * 28d's gap; 26e goldens predate it and normalize to the documented `claude` default,
+ * so an agent note against a legacy golden reflects that assumption). The
  * actual disk size is measured LIVE (qemu-img info -U on the golden.qcow2) because it
  * grows with every session's overlay commits — 0 means unmeasured (the InstallResult
  * convention), never a claim of emptiness.
@@ -299,12 +299,15 @@ export interface GoldenSummary {
 /**
  * The drift note (spec 26's edge case): the manifest is what was baked; when the
  * fields it records differ from the CURRENT guest.json, the row says so and where
- * the edit lands (the NEXT build). See the module header for the agent gap.
+ * the edit lands (the NEXT build). Spec 29 added the agent to the recorded set
+ * (28d's gap closed); a legacy manifest's normalized `claude` default rides that
+ * documented assumption (see the module header).
  */
-function driftNote(manifest: Manifest, username: string, encrypt: boolean): string | null {
+function driftNote(manifest: Manifest, username: string, encrypt: boolean, agent: string): string | null {
 	const changes: string[] = [];
 	if (manifest.guestUser !== username) changes.push(`guestUser: ${manifest.guestUser}→${username}`);
 	if (manifest.encrypt !== encrypt) changes.push(`encrypt: ${manifest.encrypt}→${encrypt}`);
+	if (manifest.agent !== agent) changes.push(`agent: ${manifest.agent}→${agent}`);
 	if (changes.length === 0) return null;
 	return `guest.json changed since this golden was baked (${changes.join(", ")}) — edits apply on the next vm install`;
 }
@@ -333,7 +336,7 @@ export async function vmList(deps: ManageDeps = {}): Promise<GoldenSummary[]> {
 			isoVersion: manifest?.isoVersion ?? null,
 			diskVirtualSizeBytes: manifest?.diskVirtualSizeBytes ?? null,
 			diskActualBytes: actualSizeOf(info.stdoutTail),
-			note: manifest === null ? null : driftNote(manifest, config.username, config.encrypt),
+			note: manifest === null ? null : driftNote(manifest, config.username, config.encrypt, config.agent),
 		});
 	}
 	return rows;

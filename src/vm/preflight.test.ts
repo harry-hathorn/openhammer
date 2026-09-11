@@ -49,6 +49,7 @@ function manifestOf(id: string): Manifest {
 	return {
 		id,
 		flavor: "base",
+		agent: "claude",
 		guestUser: "sandbox",
 		rootDir: "/home/sandbox",
 		isoVersion: "4.0.3",
