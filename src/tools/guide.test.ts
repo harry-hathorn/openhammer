@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ToolOk } from "../mcp/types.ts";
+import { fakeBackend } from "./backend.fake.ts";
 import { createLocalBackend } from "./backend.ts";
 import { buildGuide, guideTool } from "./guide.ts";
 
@@ -8,6 +9,9 @@ import { buildGuide, guideTool } from "./guide.ts";
 // of orientation markdown built from the working root (spec 18, Phase A).
 
 const ROOT = "/srv/openhammer-root";
+// A guest-flavored root for the vm-variant pins (27b: in a VM mode MCP_ROOT_DIR is a
+// guest absolute path — `/home/<guestUser>` by default).
+const GUEST_ROOT = "/home/guest";
 
 // One local backend per file (spec 23) — LocalBackend is stateless, matching the
 // boot-scoped seam without per-test machinery.
@@ -73,6 +77,119 @@ describe("buildGuide", () => {
 		const other = "/a/different/abs/root";
 		expect(buildGuide(other)).toContain(other);
 		expect(buildGuide(other)).not.toContain(ROOT);
+	});
+});
+
+// The spec-27 vm variant: a VM-mode boot's backend reports kind "vm" (the
+// DelegatingBackend over the guest), and the guide responds to that alone — the
+// working-root line names the GUEST root (27b reinterprets MCP_ROOT_DIR as a guest
+// path) and the container note becomes the VM boundary note. Agent mode shares the
+// variant for now (its six doctrine blocks are spec 29). The off-mode text is
+// byte-pinned below so the local path cannot drift.
+describe("buildGuide vm variant (spec 27)", () => {
+	it("names the passed rootDir as the guest root in the working-root line", () => {
+		const md = buildGuide(GUEST_ROOT, "vm");
+		expect(md).toContain(`All file paths resolve under **\`${GUEST_ROOT}\`**`);
+		expect(md).not.toContain(ROOT);
+	});
+
+	it("replaces the container line with the VM boundary line (the three clauses)", () => {
+		const md = buildGuide(GUEST_ROOT, "vm");
+		expect(md).toContain(
+			"The VM is the boundary — `bash` reaches anything in the guest, nothing on the host; all paths are guest paths.",
+		);
+		expect(md).not.toContain("container");
+	});
+
+	it("differs from the off-mode guide in exactly one line — the boundary line", () => {
+		const off = buildGuide(GUEST_ROOT).split("\n");
+		const vm = buildGuide(GUEST_ROOT, "vm").split("\n");
+		expect(vm).toHaveLength(off.length);
+		const differing = off.flatMap((line, i) => (line === vm[i] ? [] : [{ index: i, off: line, vm: vm[i] }]));
+		expect(differing).toEqual([
+			{
+				index: 22,
+				off: "- `bash` can reach anything the OS user can. Run OpenHammer in a container to jail it.",
+				vm: "- The VM is the boundary — `bash` reaches anything in the guest, nothing on the host; all paths are guest paths.",
+			},
+		]);
+	});
+
+	it("off-mode text is byte-identical to the pre-27 pin", () => {
+		expect(buildGuide(ROOT)).toBe(
+			[
+				"# OpenHammer",
+				"",
+				"OpenHammer is a stateless MCP server with **no LLM** — it only executes tools. It does not think, plan, or remember; the agent loop lives in the client you connected from.",
+				"",
+				"## Working root",
+				"",
+				`All file paths resolve under **\`${ROOT}\`**. \`bash\` runs here, but its working directory **does not persist** between calls — every call resets to the root. **Use absolute paths** to avoid landing in the wrong directory.`,
+				"",
+				"## Tools",
+				"",
+				"- `read` — read a text or image file (use offset/limit for large files).",
+				"- `bash` — run a shell command in the working root (cwd resets each call).",
+				"- `edit` — replace exact text blocks in a file.",
+				"- `write` — create or overwrite a file (creates parent directories).",
+				"- `grep` — search file contents for a pattern (ripgrep).",
+				"- `find` — find files by glob pattern (fd).",
+				"- `ls` — list directory entries.",
+				"",
+				"## Notes",
+				"",
+				"- Output is bounded: each tool truncates large results, and an oversized whole response is replaced with a single `response_too_large` notice.",
+				"- There is no memory between calls — state lives in files under the working root, not in the server.",
+				"- `bash` can reach anything the OS user can. Run OpenHammer in a container to jail it.",
+				"",
+				"_This guide evolves as OpenHammer grows._",
+			].join("\n"),
+		);
+	});
+
+	it("vm variant matches its byte pin (guest root named, boundary swapped, all else identical)", () => {
+		expect(buildGuide(GUEST_ROOT, "vm")).toBe(
+			[
+				"# OpenHammer",
+				"",
+				"OpenHammer is a stateless MCP server with **no LLM** — it only executes tools. It does not think, plan, or remember; the agent loop lives in the client you connected from.",
+				"",
+				"## Working root",
+				"",
+				`All file paths resolve under **\`${GUEST_ROOT}\`**. \`bash\` runs here, but its working directory **does not persist** between calls — every call resets to the root. **Use absolute paths** to avoid landing in the wrong directory.`,
+				"",
+				"## Tools",
+				"",
+				"- `read` — read a text or image file (use offset/limit for large files).",
+				"- `bash` — run a shell command in the working root (cwd resets each call).",
+				"- `edit` — replace exact text blocks in a file.",
+				"- `write` — create or overwrite a file (creates parent directories).",
+				"- `grep` — search file contents for a pattern (ripgrep).",
+				"- `find` — find files by glob pattern (fd).",
+				"- `ls` — list directory entries.",
+				"",
+				"## Notes",
+				"",
+				"- Output is bounded: each tool truncates large results, and an oversized whole response is replaced with a single `response_too_large` notice.",
+				"- There is no memory between calls — state lives in files under the working root, not in the server.",
+				"- The VM is the boundary — `bash` reaches anything in the guest, nothing on the host; all paths are guest paths.",
+				"",
+				"_This guide evolves as OpenHammer grows._",
+			].join("\n"),
+		);
+	});
+
+	it("execute returns the vm variant when the backend kind is vm (fakeBackend kind seed)", async () => {
+		const r = await guideTool.execute({}, { rootDir: GUEST_ROOT, backend: fakeBackend({ kind: "vm" }) });
+		expect(r.ok).toBe(true);
+		expect(textOf(r)).toBe(buildGuide(GUEST_ROOT, "vm"));
+	});
+
+	it("execute keeps the off-mode guide for the default fake (kind local)", async () => {
+		const r = await guideTool.execute({}, { rootDir: ROOT, backend: fakeBackend() });
+		expect(r.ok).toBe(true);
+		expect(textOf(r)).toBe(buildGuide(ROOT));
+		expect(textOf(r)).toContain("container");
 	});
 });
 
