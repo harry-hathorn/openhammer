@@ -54,6 +54,12 @@
 // DISK-CAP HOOK: `qemu-img info` actual-size vs `diskCapGb` at boot and teardown — a
 // WARNING log line only, never fatal (low-disk is degradation over a session's lifetime;
 // doctor owns loudness — the preflight disk-check posture).
+//
+// BOOT SWEEP (24d wired for 27k's next-boot reaper): runBoot's FIRST act is session.ts's
+// sweepStaleSessions — the crash recovery that SIGKILLs orphaned QEMUs and reclaims the
+// stale dirs of a killed server's sessions BEFORE this boot touches the tree. Retain's
+// reuse dirs ride in as the preserve set (sweepPreserve): swept (the orphan inside still
+// dies) but never removed, so the recovery path prepareOrReuse is about to take survives.
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, rm, writeFile } from "node:fs/promises";
@@ -78,7 +84,7 @@ import {
 	stopQemu,
 	tailText,
 } from "./qemu/process.ts";
-import { prepareSession, type RunQemuImg, resolveVmDirs, type SessionPaths } from "./session.ts";
+import { prepareSession, type RunQemuImg, resolveVmDirs, type SessionPaths, sweepStaleSessions } from "./session.ts";
 import { type SshTarget, sshExec } from "./ssh.ts";
 import { discoverSshPort } from "./usernet.ts";
 
@@ -227,6 +233,8 @@ export interface VmServiceDeps {
 	readonly listGoldenNames?: (imagesDir: string) => readonly string[];
 	/** Override the session preparation (default: session.ts's prepareSession). */
 	readonly prepareSession?: typeof prepareSession;
+	/** Override the boot-time stale sweep (default: session.ts's sweepStaleSessions). */
+	readonly sweepStaleSessions?: typeof sweepStaleSessions;
 	/** Override the QEMU spawn+connect (default: qemu/process.ts's startQemu). */
 	readonly startQemu?: (argv: readonly string[], opts: StartQemuOptions) => Promise<QemuHandle>;
 	/** Override the stop ladder (default: qemu/process.ts's stopQemu). */
@@ -548,6 +556,19 @@ export class VmService {
 		let paths: SessionPaths | null = null;
 		let handle: QemuHandle | null = null;
 		try {
+			// The boot sweep is the FIRST act (24d/27k): reap the crashed server's orphans
+			// and reclaim its stale dirs before this boot resolves a golden or a session.
+			const sweep = await (this.deps.sweepStaleSessions ?? sweepStaleSessions)(
+				{ homeDir: this.deps.homeDir },
+				{ preserve: this.sweepPreserve() },
+			);
+			const preserved = sweep.preserved ?? 0;
+			if (sweep.killed > 0 || sweep.removedDirs > 0 || preserved > 0) {
+				this.log(
+					`vm: boot: sweep killed ${sweep.killed} orphan(s), removed ${sweep.removedDirs} stale dir(s), ` +
+						`preserved ${preserved} retained`,
+				);
+			}
 			const golden = this.locateGolden();
 			const sessionId = this.resolveSessionId();
 			paths = await this.prepareOrReuse(sessionId, golden);
@@ -668,6 +689,22 @@ export class VmService {
 			return this.mintedSessionId;
 		}
 		return this.config.sessionId ?? mintSessionId(this.mode(), this.now());
+	}
+
+	/**
+	 * The boot sweep's preserve set — session dirs the sweep must never REMOVE. A pinned
+	 * retain session (MCP_VM_SESSION_ID) is preserved by name; so is the service's own
+	 * current session under retain: its dir is the recovery path the relaunch/restart
+	 * reuses (prepareOrReuse), and a kill -9'd qemu leaves its pidfile behind — without
+	 * this, the sweep would read that dead pid and destroy the retained overlay+VARS in
+	 * the very boot that intends to reuse them. The orphan inside a preserved dir still
+	 * dies; only the removal is suppressed. A fresh unpinned boot (and every discard
+	 * boot) preserves nothing — the sweep is free to reclaim all orphans.
+	 */
+	private sweepPreserve(): ReadonlySet<string> {
+		if (this.persistPolicy() !== "retain") return new Set<string>();
+		const id = this.config.sessionId ?? this.sessionId;
+		return id === null ? new Set<string>() : new Set([id]);
 	}
 
 	/**

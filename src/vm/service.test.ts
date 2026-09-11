@@ -229,6 +229,8 @@ interface HarnessOptions {
 	qemuImgActualSize?: number | null;
 	/** Session ids whose VARS half is missing (the incomplete-retained-session refusal). */
 	varsMissingFor?: ReadonlySet<string>;
+	/** The fake boot sweep's report numbers (default: a quiet zero report — nothing logged). */
+	sweepReport?: { killed?: number; removedDirs?: number; preserved?: number };
 }
 
 interface Harness {
@@ -250,6 +252,10 @@ interface Harness {
 		removedDirs: string[];
 		createBackend: number;
 		closeMux: number;
+		/** One entry per boot sweep: the homeDir it was pointed at + the preserve set. */
+		sweep: Array<{ homeDir: string | undefined; preserve: ReadonlySet<string> }>;
+		/** Cross-seam call order (the boot sweep's "before locateGolden" pin). */
+		order: string[];
 	};
 }
 
@@ -279,6 +285,8 @@ function harness(options: HarnessOptions = {}): Harness {
 		removedDirs: [],
 		createBackend: 0,
 		closeMux: 0,
+		sweep: [],
+		order: [],
 	};
 	const handles: FakeVmHandle[] = [];
 	const existingSessions = new Set<string>();
@@ -293,7 +301,10 @@ function harness(options: HarnessOptions = {}): Harness {
 			}
 			return null;
 		},
-		listGoldenNames: () => goldens.map((golden) => golden.id),
+		listGoldenNames: () => {
+			calls.order.push("locateGolden");
+			return goldens.map((golden) => golden.id);
+		},
 		prepareSession: async (id, opts, prepareDeps) => {
 			calls.prepareSession.push({
 				id,
@@ -393,6 +404,20 @@ function harness(options: HarnessOptions = {}): Harness {
 				code: 0,
 				stdoutTail: JSON.stringify({ "actual-size": options.qemuImgActualSize ?? 200_704 }),
 				stderrTail: "",
+			};
+		},
+		// The boot sweep as a recording no-op: the kill/keep MECHANISM is pinned by
+		// session.test.ts's preserve units; these fakes pin the service's WIRING of it.
+		sweepStaleSessions: async (sweepDeps, sweepOpts) => {
+			calls.order.push("sweep");
+			calls.sweep.push({ homeDir: sweepDeps?.homeDir, preserve: new Set(sweepOpts?.preserve ?? []) });
+			const report = options.sweepReport;
+			return {
+				killed: report?.killed ?? 0,
+				skippedForeign: 0,
+				removedDirs: report?.removedDirs ?? 0,
+				bytesReclaimed: 0,
+				preserved: report?.preserved ?? 0,
 			};
 		},
 		afterReady: options.afterReady,
@@ -909,6 +934,53 @@ describe("VmService — the mode-A extras hook (a no-op parameter here)", () => 
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.message).toContain("mode-A extras exploded");
 		expect(h.calls.capture.length).toBe(1);
+	});
+});
+
+describe("VmService — boot-time stale sweep (24d wired into start; 27k's next-boot reaper)", () => {
+	it("sweeps FIRST — before locateGolden — pointed at the vm tree's home", async () => {
+		const h = harness();
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(h.calls.order.slice(0, 2)).toEqual(["sweep", "locateGolden"]);
+		expect(h.calls.sweep).toEqual([{ homeDir: HOME, preserve: new Set() }]);
+	});
+
+	it("pinned-retain: MCP_VM_SESSION_ID rides in preserve (the sweep's kill-not-remove dir)", async () => {
+		const h = harness({ config: { sessionId: "pinned-session" } });
+		await h.service.start();
+		expect(h.calls.sweep[0]?.preserve).toEqual(new Set(["pinned-session"]));
+	});
+
+	it("discard boots and fresh unpinned boots sweep with an EMPTY preserve set", async () => {
+		const discard = harness({ config: { persist: "discard" } });
+		await discard.service.start();
+		expect(discard.calls.sweep[0]?.preserve).toEqual(new Set());
+
+		const unpinned = harness(); // vm/retain, no pin — a fresh service preserves nothing yet
+		await unpinned.service.start();
+		expect(unpinned.calls.sweep[0]?.preserve).toEqual(new Set());
+	});
+
+	it("a retain service's own session dir joins preserve on the next boot (its reuse dir survives the sweep)", async () => {
+		const h = harness(); // retain, minted id
+		await h.service.start();
+		const id = h.service.status().sessionId ?? "";
+		await h.service.stop();
+		await h.service.start();
+		expect(h.calls.sweep.length).toBe(2);
+		expect(h.calls.sweep[1]?.preserve).toEqual(new Set([id]));
+		expect(h.service.status().sessionId).toBe(id);
+	});
+
+	it("the sweep report is logged once, and only when something happened", async () => {
+		const noisy = harness({ sweepReport: { killed: 1, removedDirs: 2, preserved: 1 } });
+		await noisy.service.start();
+		expect(noisy.logs).toContain("vm: boot: sweep killed 1 orphan(s), removed 2 stale dir(s), preserved 1 retained");
+
+		const quiet = harness();
+		await quiet.service.start();
+		expect(quiet.logs.some((line) => line.includes("sweep killed"))).toBe(false);
 	});
 });
 

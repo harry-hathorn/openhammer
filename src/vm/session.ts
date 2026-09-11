@@ -17,6 +17,13 @@
 //   garbage (non-numeric) pidfile is likewise left alone — unverifiable is not stale.
 // - A dir whose pidfile names a LIVE FOREIGN process is KEPT and reported: removing data
 //   because a PID got recycled is the one unrecoverable mistake available to a sweeper.
+// - A dir NAMED in `opts.preserve` is SWEPT but NEVER REMOVED (spec 24d/27k wiring): its
+//   live-ours orphan is still verified and SIGKILLed, but the dir itself — a retained
+//   session's overlay+VARS that the next boot intends to REUSE — survives. Preserve
+//   suppresses only the removal decisions (the stale removal and the killed-and-removed);
+//   a foreign-pid dir stays skippedForeign and a pidfile-less dir stays left. The report's
+//   `preserved` count is present only when a preserve set was supplied, so the no-preserve
+//   report stays byte-identical to the pre-preserve shape.
 //
 // Error model: process layer, not tools. prepareSession rejects (with the qemu-img stderr
 // tail on overlay failure — the same ShellResult-to-throw shape as qemu/process.ts); the
@@ -178,6 +185,23 @@ export interface SweepReport {
 	readonly removedDirs: number;
 	/** Bytes reclaimed by those removals. */
 	readonly bytesReclaimed: number;
+	/**
+	 * Preserve-set dirs that were swept but KEPT (the retained recovery dirs a pinned
+	 * boot reuses — their orphans still count in `killed`). Present only when the sweep
+	 * ran with a preserve set; absent otherwise so the no-preserve report keeps today's
+	 * exact shape.
+	 */
+	readonly preserved?: number;
+}
+
+/** Options for the boot-time sweep — the preserve carve-out for retain's reuse dirs. */
+export interface SweepOptions {
+	/**
+	 * Session-dir NAMES whose sweep outcome is never a removal: a live-ours orphan inside
+	 * one still gets verified and SIGKILLed, but the dir itself (the retained overlay+VARS
+	 * the next boot reuses) is kept and counted in the report's `preserved`.
+	 */
+	readonly preserve?: ReadonlySet<string>;
 }
 
 /** What /proc says about a pid; `undefined` fields mean unreadable (gone, or hidden). */
@@ -205,10 +229,13 @@ export interface SweepDeps {
 type SweepAction =
 	| { readonly kind: "killed-and-removed"; readonly bytes: number }
 	| { readonly kind: "removed"; readonly bytes: number }
+	| { readonly kind: "killed-and-preserved" }
+	| { readonly kind: "preserved" }
 	| { readonly kind: "skipped-foreign" }
 	| { readonly kind: "left" };
 
 const LEFT: SweepAction = { kind: "left" };
+const PRESERVED: SweepAction = { kind: "preserved" };
 
 /**
  * Is this pid provably OUR qemu? /proc `<pid>/comm` truncates at 15 chars
@@ -232,10 +259,12 @@ export function isOurQemu(identity: ProcIdentity): boolean {
  * The boot-time sweep over `sessions/`: for each session dir, read its pidfile, verify the
  * pid is ours before anything else, then either SIGKILL it and remove the dir (live+ours),
  * remove the dir (dead/stale), or keep it (live+foreign → skippedForeign; no pidfile or a
- * garbage one → left alone, see the module header). Never rejects: a missing sessions root
- * is an empty sweep, and one bad dir stays put for the next boot instead of aborting the rest.
+ * garbage one → left alone, see the module header). A dir NAMED in `opts.preserve` is
+ * swept but never removed — its orphan still dies, the dir lands in the report's
+ * `preserved`. Never rejects: a missing sessions root is an empty sweep, and one bad dir
+ * stays put for the next boot instead of aborting the rest.
  */
-export async function sweepStaleSessions(deps: SweepDeps = {}): Promise<SweepReport> {
+export async function sweepStaleSessions(deps: SweepDeps = {}, opts: SweepOptions = {}): Promise<SweepReport> {
 	const dirs = resolveVmDirs({ homeDir: deps.homeDir });
 	const readProc = deps.readProc ?? readProcDefault;
 	const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
@@ -244,14 +273,16 @@ export async function sweepStaleSessions(deps: SweepDeps = {}): Promise<SweepRep
 	let skippedForeign = 0;
 	let removedDirs = 0;
 	let bytesReclaimed = 0;
+	let preserved = 0;
 	const entries = await readdir(dirs.sessions, { withFileTypes: true }).catch(() => []);
 	for (const entry of entries) {
 		if (!entry.isDirectory()) {
 			continue; // stray files in sessions/ are not sessions
 		}
 		const sessionDir = join(dirs.sessions, entry.name);
+		const isPreserved = opts.preserve?.has(entry.name) ?? false;
 		try {
-			const action = await sweepOneSession(sessionDir, readProc, kill);
+			const action = await sweepOneSession(sessionDir, readProc, kill, isPreserved);
 			if (action.kind === "killed-and-removed") {
 				killed += 1;
 				removedDirs += 1;
@@ -261,16 +292,27 @@ export async function sweepStaleSessions(deps: SweepDeps = {}): Promise<SweepRep
 				bytesReclaimed += action.bytes;
 			} else if (action.kind === "skipped-foreign") {
 				skippedForeign += 1;
+			} else if (action.kind === "killed-and-preserved") {
+				killed += 1;
+				preserved += 1;
+			} else if (action.kind === "preserved") {
+				preserved += 1;
 			}
 		} catch {
 			// One un-sweepable dir (e.g. a removal that failed) must not abort the boot
 			// sweep — it stays exactly as it is for the next boot or the operator.
 		}
 	}
-	return { killed, skippedForeign, removedDirs, bytesReclaimed };
+	const report: SweepReport = { killed, skippedForeign, removedDirs, bytesReclaimed };
+	return opts.preserve === undefined ? report : { ...report, preserved };
 }
 
-async function sweepOneSession(sessionDir: string, readProc: ReadProc, kill: KillPid): Promise<SweepAction> {
+async function sweepOneSession(
+	sessionDir: string,
+	readProc: ReadProc,
+	kill: KillPid,
+	preserve: boolean,
+): Promise<SweepAction> {
 	const pidText = await readFile(join(sessionDir, PIDFILE_NAME), "utf8").catch(() => undefined);
 	if (pidText === undefined) {
 		return LEFT; // no pidfile — mid-prepare or not ours to judge (no mtime heuristics)
@@ -282,7 +324,7 @@ async function sweepOneSession(sessionDir: string, readProc: ReadProc, kill: Kil
 	const identity = readProc(pid);
 	if (identity.comm === undefined) {
 		// No /proc entry — ESRCH: the process is gone, the dir is stale.
-		return { kind: "removed", bytes: await removeSessionDir(sessionDir) };
+		return staleOutcome(sessionDir, preserve);
 	}
 	if (!isOurQemu(identity)) {
 		return { kind: "skipped-foreign" };
@@ -292,14 +334,24 @@ async function sweepOneSession(sessionDir: string, readProc: ReadProc, kill: Kil
 	} catch (error) {
 		if (error instanceof Error && error.message.includes("ESRCH")) {
 			// Died in the window between the /proc read and the kill — stale after all.
-			return { kind: "removed", bytes: await removeSessionDir(sessionDir) };
+			return staleOutcome(sessionDir, preserve);
 		}
 		throw error; // e.g. EPERM on a name-verified qemu — surface it, don't guess
+	}
+	if (preserve) {
+		// The orphan dies; the dir survives — it is the retained recovery path the next
+		// boot reuses, and the removal is the only thing preserve suppresses.
+		return { kind: "killed-and-preserved" };
 	}
 	// A killed session dir is removed without waiting for the reaper: SIGKILL is
 	// uninterruptible, the orphan's parent (pid 1) reaps promptly, and nothing in the dir
 	// is trusted after a forced kill anyway.
 	return { kind: "killed-and-removed", bytes: await removeSessionDir(sessionDir) };
+}
+
+/** A stale dir's outcome: removed and reclaimed — unless preserve keeps it for its boot. */
+async function staleOutcome(sessionDir: string, preserve: boolean): Promise<SweepAction> {
+	return preserve ? PRESERVED : { kind: "removed", bytes: await removeSessionDir(sessionDir) };
 }
 
 // Size then remove — the reclaim is counted only for removals that actually finished.
