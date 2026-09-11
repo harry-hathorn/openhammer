@@ -15,9 +15,12 @@ import {
 	menuSectionAt,
 	renderFieldRows,
 	renderList,
+	SANDBOX_APPLY_AGENT_LABEL,
+	SANDBOX_APPLY_THEME_LABEL,
 	SANDBOX_CONFIGURE_LABEL,
 	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
+	SANDBOX_PROVISION_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SECRETS_LABEL,
 	SANDBOX_SERIAL_LABEL,
@@ -141,8 +144,8 @@ describe("screens — settings/doctor items", () => {
 	});
 });
 
-describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f)", () => {
-	it("with a golden: Stop, Restart, Configure, Guest setup, Secrets, Serial tail, Back — no Install row", () => {
+describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", () => {
+	it("with a golden: Stop, Restart, Configure, Guest setup, Secrets, Edit provision.sh, Serial tail, Back — no Install row", () => {
 		const labels = sandboxItems(true).map((i) => i.label);
 		expect(labels).toEqual([
 			SANDBOX_STOP_LABEL,
@@ -150,6 +153,7 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f)", () => 
 			SANDBOX_CONFIGURE_LABEL,
 			SANDBOX_GUEST_SETUP_LABEL,
 			SANDBOX_SECRETS_LABEL,
+			SANDBOX_PROVISION_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);
@@ -174,6 +178,38 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f)", () => 
 		expect(items[secrets]?.description).toContain("sandbox boot");
 	});
 
+	it("the Edit provision.sh row sits beside Secrets and names the escape hatch (box 28g)", () => {
+		const items = sandboxItems(true);
+		const secrets = items.findIndex((i) => i.label === SANDBOX_SECRETS_LABEL);
+		const provision = items.findIndex((i) => i.label === SANDBOX_PROVISION_LABEL);
+		expect(provision).toBe(secrets + 1); // beside Secrets, before Serial tail
+		expect(items[provision]?.description).toContain("provision.sh");
+		expect(items[provision]?.description).toContain("$EDITOR");
+	});
+
+	it("the apply-to-running rows are HIDDEN unless the session is ready enough; shown they sit after Serial tail (box 28g)", () => {
+		const hidden = sandboxItems(true, true, false).map((i) => i.label);
+		expect(hidden).not.toContain(SANDBOX_APPLY_AGENT_LABEL);
+		expect(hidden).not.toContain(SANDBOX_APPLY_THEME_LABEL);
+
+		const items = sandboxItems(true, true, true);
+		expect(items.map((i) => i.label)).toEqual([
+			SANDBOX_STOP_LABEL,
+			SANDBOX_RESTART_LABEL,
+			SANDBOX_CONFIGURE_LABEL,
+			SANDBOX_GUEST_SETUP_LABEL,
+			SANDBOX_SECRETS_LABEL,
+			SANDBOX_PROVISION_LABEL,
+			SANDBOX_SERIAL_LABEL,
+			SANDBOX_APPLY_AGENT_LABEL,
+			SANDBOX_APPLY_THEME_LABEL,
+			"Back",
+		]);
+		const serial = items.findIndex((i) => i.label === SANDBOX_SERIAL_LABEL);
+		expect(items[serial + 1]?.description).toContain("ssh"); // the direct ssh exec posture
+		expect(items[serial + 2]?.description).toContain("omarchy theme set");
+	});
+
 	it("without a golden the Install row APPEARS (hidden when one exists — never a disabled row)", () => {
 		const labels = sandboxItems(false).map((i) => i.label);
 		expect(labels).toContain(SANDBOX_INSTALL_LABEL);
@@ -195,6 +231,7 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f)", () => 
 			SANDBOX_CONFIGURE_LABEL,
 			SANDBOX_GUEST_SETUP_LABEL,
 			SANDBOX_SECRETS_LABEL,
+			SANDBOX_PROVISION_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);

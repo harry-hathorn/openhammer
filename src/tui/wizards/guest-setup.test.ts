@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { VmStateLine } from "../../observability/status-socket.ts";
 import {
 	defaultGuestConfig,
 	GUEST_AGENTS,
@@ -10,11 +11,16 @@ import {
 	loadGuestConfig,
 	saveGuestConfig,
 } from "../../vm/provision/guest-config.ts";
+import { ISO_SHA256, ISO_URL } from "../../vm/provision/iso.ts";
 import { loadSecrets, type SecretFileMapping, type SecretsStore, saveSecrets } from "../../vm/provision/secrets.ts";
 import { resolveVmDirs, type VmDirs } from "../../vm/session.ts";
+import { remoteQuote, type SshExecResult, type SshTarget, sshExecArgv } from "../../vm/ssh.ts";
 import { BANNER } from "../banner.ts";
 import type { WizardIo } from "../wizard.ts";
 import {
+	AGENT_DEFAULTS_ARGV,
+	APPLY_TO_RUNNING_HINT,
+	applyToRunningReady,
 	envKeyLine,
 	envPairError,
 	envSummary,
@@ -23,14 +29,26 @@ import {
 	goldenWarningMessage,
 	guestConfigFromAnswers,
 	guestSetupFields,
+	newestGoldenGuestUser,
+	PROVISION_NO_EDITOR_ERROR,
 	parseBootCommands,
 	parsePackageList,
+	parseThemeList,
+	provisionScriptPath,
+	provisionTemplate,
+	type RunEditor,
+	runApplyAgent,
+	runApplyTheme,
 	runGuestSetup,
+	runProvisionEditor,
 	runSecretsSetup,
 	SECRETS_EDIT_CHOICE,
 	SECRETS_LIVE_HINT,
 	SECRETS_RESTART_CHOICE,
 	secretsModelLines,
+	sshTargetForVmLine,
+	THEME_LIST_ARGV,
+	themeSetRemoteArgv,
 } from "./guest-setup.ts";
 
 /** A fresh HOME per test — resolveVmDirs({homeDir}) roots the whole vm tree inside it; nothing real is touched. */
@@ -926,6 +944,496 @@ describe("runSecretsSetup — the row-6 interstitial (spec 28, matrix row 6)", (
 
 			expect(io.calls[0]?.message.startsWith("Secrets editor")).toBe(true);
 			expect(io.calls.some((c) => c.message === SECRETS_LIVE_HINT)).toBe(false);
+		});
+	});
+});
+
+// ---- tier (c) + apply-to-running (spec 28, box 28g) -------------------------------
+
+/** The first-open template, pinned VERBATIM — header (what it is / whose it is / authoritative) + the two-line example. */
+const TEMPLATE = [
+	"#!/usr/bin/env bash",
+	"# OpenHammer's provision.sh — the operator's escape hatch (specs 26/28).",
+	"# Runs as bash IN THE GUEST during `vm provision`, after the base provisioning.",
+	"# Operator-authored and authoritative: a non-zero exit FAILS the provision run.",
+	"#",
+	"# Example:",
+	"#   pacman -Sy --noconfirm htop",
+	"#   git config --global init.defaultBranch main",
+	"",
+].join("\n");
+
+describe("runProvisionEditor — the tier-(c) escape hatch (spec 28, box 28g)", () => {
+	it("first open creates the file from the commented template (content pinned) and opens $EDITOR on it", async () => {
+		await withTempDirs(async (dirs) => {
+			expect(provisionTemplate()).toBe(TEMPLATE); // the template itself is the pinned string
+			const editorArgv: string[][] = [];
+			const runEditor: RunEditor = async (argv) => {
+				editorArgv.push([...argv]);
+				writeFileSync(argv[1] ?? "", `${TEMPLATE}\necho edited\n`); // the editor "saves an edit"
+			};
+
+			const result = await runProvisionEditor({ dirs, env: { EDITOR: "vi" }, runEditor });
+
+			expect(result).toEqual({ ok: true, value: undefined });
+			// The file existed BEFORE the editor ran (created from the template), and the
+			// editor's save is what's on disk after.
+			expect(editorArgv).toEqual([["vi", provisionScriptPath(dirs)]]);
+			expect(readFileSync(provisionScriptPath(dirs), "utf8")).toBe(`${TEMPLATE}\necho edited\n`);
+			expect(provisionScriptPath(dirs)).toBe(join(dirs.root, "provision.sh")); // provision.ts step (j)'s exact path
+		});
+	});
+
+	it("second open edits the existing file — the template never overwrites operator content", async () => {
+		await withTempDirs(async (dirs) => {
+			mkdirSync(dirs.root, { recursive: true, mode: 0o700 }); // the operator's file already exists
+			writeFileSync(provisionScriptPath(dirs), "# my own script\n");
+			const runEditor: RunEditor = async () => {}; // opened, changed nothing
+
+			const result = await runProvisionEditor({ dirs, env: { EDITOR: "vi" }, runEditor });
+
+			expect(result).toEqual({ ok: true, value: undefined });
+			expect(readFileSync(provisionScriptPath(dirs), "utf8")).toBe("# my own script\n");
+		});
+	});
+
+	it("EDITOR unset errs with the exact actionable message BEFORE anything is written", async () => {
+		await withTempDirs(async (dirs) => {
+			let ran = false;
+			const never: RunEditor = async () => {
+				ran = true;
+			};
+			const result = await runProvisionEditor({ dirs, env: {}, runEditor: never });
+			const blank = await runProvisionEditor({ dirs, env: { EDITOR: "   " }, runEditor: async () => {} });
+
+			expect(result).toEqual({ ok: false, error: new Error(PROVISION_NO_EDITOR_ERROR) });
+			expect(blank).toEqual({ ok: false, error: new Error(PROVISION_NO_EDITOR_ERROR) });
+			expect(existsSync(provisionScriptPath(dirs))).toBe(false); // the gate precedes any write
+			expect(ran).toBe(false);
+		});
+	});
+
+	it("an editor failure surfaces as err naming the editor (the flash renders it inline)", async () => {
+		await withTempDirs(async (dirs) => {
+			const failed: RunEditor = async () => {
+				throw new Error("exited 1");
+			};
+
+			const result = await runProvisionEditor({ dirs, env: { EDITOR: "vi" }, runEditor: failed });
+
+			expect(result).toEqual({ ok: false, error: new Error('cannot run $EDITOR ("vi"): exited 1') });
+		});
+	});
+});
+
+/** A vm-state line fixture — the 27h wire shape, ready with a session + port by default. */
+function applyLine(over: Partial<VmStateLine> = {}): VmStateLine {
+	return {
+		type: "vm-state",
+		state: "ready",
+		sessionId: "vm-20260911T101112Z-ab",
+		phase: null,
+		sshPort: 42255,
+		error: null,
+		...over,
+	};
+}
+
+/** One recorded ssh exec — the fake's assertion surface. */
+interface RecordedExec {
+	target: SshTarget;
+	remoteArgv: readonly string[];
+	stdin: string | undefined;
+}
+
+/**
+ * A scripted ssh exec: records (target, argv, stdin) per call and answers from the
+ * script in order (the last entry repeats), the SshExecResult shape. Never touches a
+ * real ssh — the argv IS the contract under test.
+ */
+function fakeSshExec(
+	script: Array<{ code: number; stdout?: string; stderr?: string }>,
+	calls: RecordedExec[],
+): (target: SshTarget, remoteArgv: readonly string[], opts?: { stdin?: string }) => Promise<SshExecResult> {
+	let i = 0;
+	return async (target, remoteArgv, opts) => {
+		calls.push({ target, remoteArgv, stdin: opts?.stdin });
+		const next = script[Math.min(i, script.length - 1)] ?? { code: 0 };
+		i += 1;
+		return { exitCode: next.code, timedOut: false, stdoutTail: next.stdout ?? "", stderrTail: next.stderr ?? "" };
+	};
+}
+
+describe("apply-to-running — the pure pieces (spec 28, box 28g)", () => {
+	it("applyToRunningReady: booting/ready WITH a session id and a discovered port; anything else is not ready", () => {
+		expect(applyToRunningReady(applyLine())).toBe(true);
+		expect(applyToRunningReady(applyLine({ state: "booting" }))).toBe(true); // the post-discovery booting window
+		expect(applyToRunningReady(applyLine({ state: "booting", sshPort: null }))).toBe(false); // port not yet found
+		expect(applyToRunningReady(applyLine({ sessionId: null }))).toBe(false);
+		expect(applyToRunningReady(applyLine({ state: "stopped" }))).toBe(false);
+		expect(applyToRunningReady(applyLine({ state: "failed" }))).toBe(false);
+		expect(applyToRunningReady(null)).toBe(false);
+	});
+
+	it("sshTargetForVmLine builds the pinned target from the line + the vm tree (loopback, session pin, mux socket)", () => {
+		const dirs = resolveVmDirs({ homeDir: "/h" });
+		const target = sshTargetForVmLine(dirs, applyLine(), "sandbox");
+		expect(target).toEqual({
+			ok: true,
+			value: {
+				user: "sandbox", // the manifest's guestUser — never the host user's name
+				host: "127.0.0.1", // loopback-only by TYPE
+				port: 42255, // the LIVE port from the vm-state line
+				keyPath: join(dirs.root, "id_ed25519"),
+				knownHostsPath: join(dirs.sessions, "vm-20260911T101112Z-ab", "known_hosts"), // re-keyed per boot
+				controlPath: join(dirs.sessions, "vm-20260911T101112Z-ab", "cm.sock"),
+			},
+		});
+	});
+
+	it("sshTargetForVmLine refuses — no line/port/id, an unsafe id, no guest user — each before any exec", () => {
+		const dirs = resolveVmDirs({ homeDir: "/h" });
+		expect(sshTargetForVmLine(dirs, null, "sandbox")).toEqual({
+			ok: false,
+			error: new Error("no ready sandbox session to apply to — boot one first (Configure → set the boot mode)"),
+		});
+		expect(sshTargetForVmLine(dirs, applyLine({ sshPort: null }), "sandbox")).toMatchObject({ ok: false });
+		expect(sshTargetForVmLine(dirs, applyLine({ sessionId: "../escape" }), "sandbox")).toEqual({
+			ok: false,
+			error: new Error(
+				"the vm-state line's session id is not a safe path segment — refusing to address the session tree",
+			),
+		});
+		expect(sshTargetForVmLine(dirs, applyLine(), undefined)).toEqual({
+			ok: false,
+			error: new Error(
+				"cannot resolve the guest user — no readable golden manifest under the vm tree (images/<id>/manifest.json)",
+			),
+		});
+	});
+
+	it("AGENT_DEFAULTS_ARGV is the constant direct-write command; the agent itself never rides it", () => {
+		expect([...AGENT_DEFAULTS_ARGV]).toEqual([
+			"bash",
+			"-c",
+			'mkdir -p "$HOME/.config/omarchy/defaults" && cat > "$HOME/.config/omarchy/defaults/agent"',
+		]);
+		expect([...THEME_LIST_ARGV]).toEqual(["omarchy", "theme", "list"]);
+		expect(themeSetRemoteArgv("tokyo night")).toEqual(["omarchy", "theme", "set", "tokyo night"]); // one argument
+	});
+
+	it("the spawn-level argv pins the transport (loopback destination, port, pin file, BatchMode, key-only) and remoteQuote's the command", () => {
+		const target: SshTarget = {
+			user: "sandbox",
+			host: "127.0.0.1",
+			port: 42255,
+			keyPath: "/h/.openhammer/vm/id_ed25519",
+			knownHostsPath: "/h/.openhammer/vm/sessions/vm-x/known_hosts",
+			controlPath: "/h/.openhammer/vm/sessions/vm-x/cm.sock",
+		};
+		const argv = sshExecArgv(target, AGENT_DEFAULTS_ARGV);
+		expect(argv[0]).toBe("ssh");
+		expect(argv).toContain("-p");
+		expect(argv).toContain("42255");
+		expect(argv).toContain("BatchMode=yes"); // never prompt — unattended
+		expect(argv).toContain("StrictHostKeyChecking=yes"); // the pin, enforced
+		expect(argv).toContain(`UserKnownHostsFile=${target.knownHostsPath}`); // the session's CURRENT-port pin
+		expect(argv).toContain(`IdentityFile=${target.keyPath}`); // key-only
+		expect(argv).toContain("IdentitiesOnly=yes");
+		expect(argv.at(-2)).toBe("sandbox@127.0.0.1");
+		// ONE pre-joined command element, each word remoteQuote'd — the write command
+		// arrives verbatim (no host shell string was ever built).
+		expect(argv.at(-1)).toBe(AGENT_DEFAULTS_ARGV.map(remoteQuote).join(" "));
+	});
+
+	it("parseThemeList takes every non-empty trimmed line", () => {
+		expect(parseThemeList("tokyo-night\ncatppuccin\n\n  gruvbox  \r\n")).toEqual([
+			"tokyo-night",
+			"catppuccin",
+			"gruvbox",
+		]);
+		expect(parseThemeList("  \n")).toEqual([]);
+	});
+
+	it("newestGoldenGuestUser: the newest golden manifest's guestUser; absent/corrupt → undefined (never throws)", () => {
+		const home = mkdtempSync(join(tmpdir(), "openhammer-apply-user-"));
+		try {
+			const dirs = resolveVmDirs({ homeDir: home });
+			expect(newestGoldenGuestUser(home)).toBeUndefined(); // no golden at all
+			const goldenDir = join(dirs.images, "golden-4.0.3-20260911T101112Z");
+			mkdirSync(goldenDir, { recursive: true });
+			writeFileSync(
+				join(goldenDir, "manifest.json"),
+				JSON.stringify({
+					id: "golden-4.0.3-20260911T101112Z",
+					flavor: "base",
+					guestUser: "sandbox",
+					rootDir: "/home/sandbox",
+					isoVersion: "4.0.3",
+					isoUrl: ISO_URL,
+					isoSha256: ISO_SHA256,
+					diskVirtualSizeBytes: 42_949_672_960,
+					provisionScriptHashes: null,
+					builtAt: "2026-09-11T10:11:12.000Z",
+					encrypt: false,
+				}),
+			);
+			expect(newestGoldenGuestUser(home)).toBe("sandbox");
+			writeFileSync(join(goldenDir, "manifest.json"), "{ not json");
+			expect(newestGoldenGuestUser(home)).toBeUndefined(); // corrupt → the flow's actionable err, never a wrong user
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("runApplyAgent — the DIRECT FILE WRITE (spec 28, box 28g; 22-measured finding 12)", () => {
+	it("one ssh exec: the constant write argv, the agent on stdin, the pinned target; the ok report carries the hint", async () => {
+		await withTempDirs(async (dirs) => {
+			const calls: RecordedExec[] = [];
+			const exec = fakeSshExec([{ code: 0 }], calls);
+			const io = scriptedIo([{ match: "default agent", answer: "codex" }]);
+
+			const result = await runApplyAgent({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: exec,
+			});
+
+			// The result text IS the surfaced report — the row-7 hint appended.
+			expect(result).toEqual({
+				ok: true,
+				value: `default agent written to ~/.config/omarchy/defaults/agent (codex) — ${APPLY_TO_RUNNING_HINT}`,
+			});
+			// The seeded select ran, and NOTHING else.
+			expect(io.calls.map((c) => c.message)).toEqual([
+				"Set the default agent — written to ~/.config/omarchy/defaults/agent in the guest",
+			]);
+			// Exactly ONE exec: destination/port/pin from the vm-state line + vm tree.
+			expect(calls).toHaveLength(1);
+			expect(calls[0]?.target).toEqual({
+				user: "sandbox",
+				host: "127.0.0.1",
+				port: 42255,
+				keyPath: join(dirs.root, "id_ed25519"),
+				knownHostsPath: join(dirs.sessions, "vm-20260911T101112Z-ab", "known_hosts"),
+				controlPath: join(dirs.sessions, "vm-20260911T101112Z-ab", "cm.sock"),
+			});
+			expect([...(calls[0]?.remoteArgv ?? [])]).toEqual([...AGENT_DEFAULTS_ARGV]);
+			expect(calls[0]?.stdin).toBe("codex\n"); // the agent rides stdin — no shell string ever carries it
+		});
+	});
+
+	it("the select is seeded from the LOCAL guest.json's agent (what the next install bakes)", async () => {
+		await withTempDirs(async (dirs) => {
+			saveGuestConfig(dirs, fullConfig); // agent: "codex"
+			const calls: RecordedExec[] = [];
+			let seeded: string | undefined;
+			const io = scriptedIo([{ match: "default agent", answer: "codex" }]);
+			// Wrap the recorded select to capture the initialValue the flow seeded.
+			const wrapped: typeof io = {
+				...io,
+				async select(o) {
+					seeded = o.initialValue;
+					return io.select(o);
+				},
+			};
+
+			await runApplyAgent({
+				dirs,
+				io: wrapped,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 0 }], calls),
+			});
+
+			expect(seeded).toBe("codex"); // fullConfig.agent
+		});
+	});
+
+	it("a cancel at the select is null and the guest is never touched", async () => {
+		await withTempDirs(async (dirs) => {
+			const calls: RecordedExec[] = [];
+			const io = scriptedIo([]); // no answers — every prompt cancels
+
+			const result = await runApplyAgent({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 0 }], calls),
+			});
+
+			expect(result).toBeNull();
+			expect(calls).toHaveLength(0);
+		});
+	});
+
+	it("a failed write surfaces the exit code, the guest's words, and the hint STILL appended", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([{ match: "default agent", answer: "claude" }]);
+
+			const result = await runApplyAgent({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 1, stderr: "bash: permission denied" }], []),
+			});
+
+			expect(result).toEqual({
+				ok: false,
+				error: new Error(
+					`writing the default agent failed in the guest (exit 1: bash: permission denied) — ${APPLY_TO_RUNNING_HINT}`,
+				),
+			});
+		});
+	});
+
+	it("no ready session errs BEFORE any prompt (the rows are hidden; the flow still refuses)", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([]);
+			const calls: RecordedExec[] = [];
+
+			const result = await runApplyAgent({
+				dirs,
+				io,
+				vmLine: null,
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 0 }], calls),
+			});
+
+			expect(result).toEqual({
+				ok: false,
+				error: new Error("no ready sandbox session to apply to — boot one first (Configure → set the boot mode)"),
+			});
+			expect(io.calls).toHaveLength(0); // no prompt ever ran
+			expect(calls).toHaveLength(0);
+		});
+	});
+});
+
+describe("runApplyTheme — list, degrade, set (spec 28, box 28g)", () => {
+	it("a fetched list offers the select; the chosen theme sets with the exact argv; the report carries the hint", async () => {
+		await withTempDirs(async (dirs) => {
+			const calls: RecordedExec[] = [];
+			const io = scriptedIo([{ match: "omarchy theme list", answer: "catppuccin" }]);
+
+			const result = await runApplyTheme({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 0, stdout: "tokyo-night\ncatppuccin\n\n  gruvbox  \n" }, { code: 0 }], calls),
+			});
+
+			expect(result).toEqual({ ok: true, value: `theme set to catppuccin — ${APPLY_TO_RUNNING_HINT}` });
+			// The select offered the guest's own list — trimmed, blanks dropped.
+			const selectCall = io.calls.find((c) => c.kind === "select");
+			expect(selectCall?.rendered).toContain("tokyo-night");
+			expect(selectCall?.rendered).toContain("catppuccin");
+			expect(selectCall?.rendered).toContain("gruvbox");
+			// TWO execs: the list fetch, then the set (arg array — a spaced theme is ONE argument).
+			expect(calls).toHaveLength(2);
+			expect([...(calls[0]?.remoteArgv ?? [])]).toEqual([...THEME_LIST_ARGV]);
+			expect([...(calls[1]?.remoteArgv ?? [])]).toEqual(["omarchy", "theme", "set", "catppuccin"]);
+			expect(calls[1]?.stdin).toBeUndefined();
+		});
+	});
+
+	it("a failed list DEGRADES to a text field carrying the failure as the hint; the set still runs (never blocks)", async () => {
+		await withTempDirs(async (dirs) => {
+			const calls: RecordedExec[] = [];
+			const io = scriptedIo([{ match: "theme list failed", answer: "tokyo-night" }]);
+
+			const result = await runApplyTheme({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 1, stderr: "omarchy: command not found" }, { code: 0 }], calls),
+			});
+
+			expect(result).toEqual({ ok: true, value: `theme set to tokyo-night — ${APPLY_TO_RUNNING_HINT}` });
+			// The degrade prompt named the failure (the spec's hint-on-degrade posture).
+			const textCall = io.calls.find((c) => c.kind === "text");
+			expect(textCall?.message).toContain("the guest's theme list failed");
+			expect(textCall?.message).toContain("exit 1: omarchy: command not found");
+			expect([...(calls[1]?.remoteArgv ?? [])]).toEqual(["omarchy", "theme", "set", "tokyo-night"]);
+		});
+	});
+
+	it("an EMPTY list degrades too; the answer is trimmed before the set", async () => {
+		await withTempDirs(async (dirs) => {
+			const calls: RecordedExec[] = [];
+			const io = scriptedIo([{ match: "theme list failed", answer: "  tokyo  " }]);
+
+			const result = await runApplyTheme({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 0, stdout: "   \n" }, { code: 0 }], calls),
+			});
+
+			expect(result).toEqual({ ok: true, value: `theme set to tokyo — ${APPLY_TO_RUNNING_HINT}` });
+			expect([...(calls[1]?.remoteArgv ?? [])]).toEqual(["omarchy", "theme", "set", "tokyo"]);
+		});
+	});
+
+	it("a failed set surfaces the failure with the hint STILL appended (matrix row 7)", async () => {
+		await withTempDirs(async (dirs) => {
+			const io = scriptedIo([{ match: "omarchy theme list", answer: "tokyo-night" }]);
+
+			const result = await runApplyTheme({
+				dirs,
+				io,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec(
+					[
+						{ code: 0, stdout: "tokyo-night\n" },
+						{ code: 1, stderr: "no such theme" },
+					],
+					[],
+				),
+			});
+
+			expect(result).toEqual({
+				ok: false,
+				error: new Error(
+					`omarchy theme set tokyo-night failed in the guest (exit 1: no such theme) — ${APPLY_TO_RUNNING_HINT}`,
+				),
+			});
+		});
+	});
+
+	it("a cancel at either choice is null and the set exec never runs", async () => {
+		await withTempDirs(async (dirs) => {
+			const calls: RecordedExec[] = [];
+			const listedCancel = scriptedIo([]); // the list select cancels
+			const resultA = await runApplyTheme({
+				dirs,
+				io: listedCancel,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 0, stdout: "tokyo-night\n" }, { code: 0 }], calls),
+			});
+			const degradeCancel = scriptedIo([]); // the degrade text cancels
+			const resultB = await runApplyTheme({
+				dirs,
+				io: degradeCancel,
+				vmLine: applyLine(),
+				guestUser: "sandbox",
+				sshExec: fakeSshExec([{ code: 1 }, { code: 0 }], calls),
+			});
+
+			expect(resultA).toBeNull();
+			expect(resultB).toBeNull();
+			expect(calls).toHaveLength(2); // only the two list fetches — no set exec ever ran
+			expect(calls.every((c) => [...c.remoteArgv].join(" ") === THEME_LIST_ARGV.join(" "))).toBe(true);
 		});
 	});
 });

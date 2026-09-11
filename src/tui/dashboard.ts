@@ -77,7 +77,14 @@ import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
-import { runGuestSetup, runSecretsSetup } from "./wizards/guest-setup.ts";
+import {
+	newestGoldenGuestUser,
+	runApplyAgent,
+	runApplyTheme,
+	runGuestSetup,
+	runProvisionEditor,
+	runSecretsSetup,
+} from "./wizards/guest-setup.ts";
 import { type SetSectionResult, setSection } from "./wizards/section.ts";
 
 export { DASHBOARD_MONITOR_LIMIT } from "./dashboard/store.ts";
@@ -802,6 +809,51 @@ function buildActions(
 				}),
 			));
 
+	// The tier-(c) escape hatch (spec 28, box 28g): $EDITOR over the operator's
+	// provision.sh (created from the commented template on first open) — OWNED-AGNOSTIC
+	// like Guest setup/Secrets (a local build input of this machine's tree). The flow
+	// never executes the script; the root's flash carries the runs-at-next-provision
+	// honesty. No io: the editor inherits the terminal across the modal handoff.
+	const editProvisionAction: DashboardActions["editProvision"] =
+		overrides.editProvision ?? (async () => withModal(() => runProvisionEditor()));
+
+	// The apply-to-running actions (spec 28, box 28g, matrix row 7) — UNOWNED-FRIENDLY
+	// by design, and this is the recorded rationale: 28c resolved that the VmService
+	// handle only ever exists in the server's child process, so the Sandbox lifecycle
+	// actions gate on it and are hint-only today. The GUEST, however, is reachable from
+	// ANY process holding three local facts the dashboard already has: the live ssh
+	// port + session id (the vm-state line, in this store), the pinned key
+	// `<vm root>/id_ed25519`, and the session dir's known_hosts — re-keyed per boot by
+	// the service's repinKnownHosts to `[127.0.0.1]:<current port>`, so it pins exactly
+	// the live guest. So, unlike Stop/Restart/Serial, these take NO vmService gate: the
+	// target is loopback-only by type, BatchMode, key-only (no passwords anywhere), and
+	// the execs ride the existing src/vm/ssh.ts exports composed on the dashboard side
+	// (src/vm/** untouched). guestUser resolves fresh per activation from the newest
+	// golden's manifest (the vm-state line carries no user); `undefined` becomes the
+	// flow's actionable target err, never a wrong-user exec.
+	const applyAgentAction: DashboardActions["applyAgent"] =
+		overrides.applyAgent ??
+		(async () =>
+			withModal(() =>
+				runApplyAgent({
+					io,
+					stream: silentStream,
+					vmLine: store.latestVmState,
+					guestUser: newestGoldenGuestUser(),
+				}),
+			));
+	const applyThemeAction: DashboardActions["applyTheme"] =
+		overrides.applyTheme ??
+		(async () =>
+			withModal(() =>
+				runApplyTheme({
+					io,
+					stream: silentStream,
+					vmLine: store.latestVmState,
+					guestUser: newestGoldenGuestUser(),
+				}),
+			));
+
 	// `quit` is assigned by runDashboard (it owns the lifecycle/`onQuit`); a placeholder
 	// here satisfies the interface so the root can be constructed before that wiring.
 	const actions: DashboardActions = {
@@ -819,6 +871,9 @@ function buildActions(
 		configureVm: configureVmAction,
 		guestSetup: guestSetupAction,
 		secretsSetup: secretsSetupAction,
+		editProvision: editProvisionAction,
+		applyAgent: applyAgentAction,
+		applyTheme: applyThemeAction,
 		installSandbox: installSandboxAction,
 		quit: () => {},
 	};
