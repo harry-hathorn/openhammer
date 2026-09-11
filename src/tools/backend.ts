@@ -48,7 +48,14 @@ export interface ShellResult {
 }
 
 export interface ToolBackend {
-	kind: "local" | "vm";
+	/**
+	 * Informational mode label: `"local"` (the host backend), `"vm"` (a VM-mode
+	 * boot's guest session), `"agent"` (agent mode — spec 29: the same vm-shaped
+	 * guest session with the inner agent running; behavior is identical). Tools
+	 * must not branch on it — the one sanctioned exception is `guide`'s variant
+	 * switch.
+	 */
+	kind: "local" | "vm" | "agent";
 	homedir(): string;
 	fs: FsBackend;
 	runShell(

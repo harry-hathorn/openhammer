@@ -83,9 +83,13 @@ export interface DelegatingBackendDeps {
  * service's readiness — ready delegates to the live session's VmBackend, not-ready answers
  * per the module header's mapping table. Constructed by {@link prepareVmBoot}; `close()` is
  * the shutdown slot's VM stop.
+ *
+ * `kind` is the informational mode label (spec 29): `"vm"` for a plain sandbox boot,
+ * `"agent"` when the resolved mode is agent — identical vm-shaped behavior either way;
+ * only `guide`'s variant switch reads it.
  */
 export class DelegatingBackend implements ToolBackend {
-	readonly kind: "vm" = "vm";
+	readonly kind: "vm" | "agent";
 
 	private readonly gate: VmBootGate;
 	private readonly fallbackHome: string;
@@ -105,9 +109,10 @@ export class DelegatingBackend implements ToolBackend {
 		exists: (path) => this.gateFs((fs) => fs.exists(path)),
 	};
 
-	constructor(gate: VmBootGate, fallbackHome: string, deps: DelegatingBackendDeps = {}) {
+	constructor(gate: VmBootGate, fallbackHome: string, deps: DelegatingBackendDeps = {}, kind: "vm" | "agent" = "vm") {
 		this.gate = gate;
 		this.fallbackHome = fallbackHome;
+		this.kind = kind;
 		this.logLine = deps.log ?? console.log;
 		this.unsubscribe = gate.onTransition((transition) => {
 			if (transition.to === "ready") {
@@ -251,8 +256,9 @@ export function createDelegatingBackend(
 	gate: VmBootGate,
 	fallbackHome: string,
 	deps: DelegatingBackendDeps = {},
+	kind: "vm" | "agent" = "vm",
 ): DelegatingBackend {
-	return new DelegatingBackend(gate, fallbackHome, deps);
+	return new DelegatingBackend(gate, fallbackHome, deps, kind);
 }
 
 // ---- main's assembly (27f) ----
@@ -302,5 +308,8 @@ export function prepareVmBoot(config: ResolvedConfig, deps: PrepareVmBootDeps = 
 		throw new Error(verdict.message);
 	}
 	const service = (deps.createService ?? createServiceDefault(config.rootDir))(config.vm);
-	return { service, backend: createDelegatingBackend(service, config.rootDir, { log: deps.log }) };
+	// The mode is known here (spec 29): agent mode reports kind "agent" so the guide
+	// can add its supervision doctrine — behavior stays vm-shaped either way.
+	const kind = config.vm.mode === "agent" ? "agent" : "vm";
+	return { service, backend: createDelegatingBackend(service, config.rootDir, { log: deps.log }, kind) };
 }

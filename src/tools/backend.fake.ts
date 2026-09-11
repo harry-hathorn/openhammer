@@ -140,8 +140,9 @@ export interface FakeBackendSeed {
 	 * The reported `ToolBackend.kind` (spec 27's kind seam). Defaults to
 	 * `"local"`; the fake always *behaves* locally — nothing here runs a guest —
 	 * so this only relabels `backend.kind` for tools that legitimately branch on
-	 * it (guide's vm variant), letting their tests express the mode without a
-	 * real sandbox.
+	 * it (guide's vm/agent variants), letting their tests express the mode
+	 * without a real sandbox. `"agent"` is the same relabeled-local behavior as
+	 * `"vm"` (spec 29 — the label is informational).
 	 */
 	kind?: ToolBackend["kind"];
 }
@@ -149,8 +150,9 @@ export interface FakeBackendSeed {
 /** The scripted, spawn-free backend (see the module comment for fidelity rules). */
 export class FakeBackend implements ToolBackend {
 	// `kind` defaults to "local" (the fake imitates the local backend's shape and
-	// always behaves locally); the seed may relabel it "vm" (spec 27) for the one
-	// tool that legitimately branches on kind — guide's vm variant. Spec 23's
+	// always behaves locally); the seed may relabel it "vm" (spec 27) or "agent"
+	// (spec 29 — same vm-shaped behavior, informational label only) for the one
+	// tool that legitimately branches on kind — guide's variant switch. Spec 23's
 	// "tools don't branch on kind" rule now has exactly one sanctioned exception.
 	readonly kind: ToolBackend["kind"];
 

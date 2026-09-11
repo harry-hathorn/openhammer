@@ -14,7 +14,8 @@
 //   is never handed out); close stops the service exactly once and silences re-warming.
 // - prepareVmBoot: off assembles NOTHING (null before any seam is consulted — the
 //   zero-VM-code pin), a preflight miss throws the one actionable line (main's
-//   boot-failure path prints it), a pass wires service + delegating backend.
+//   boot-failure path prints it), a pass wires service + delegating backend (kind
+//   "vm", or "agent" in agent mode — spec 29's informational relabel).
 import { describe, expect, it } from "vitest";
 import type { ResolvedConfig, ResolvedVmConfig } from "../config.ts";
 import { createVmBackend, type VmBackend } from "./backend.ts";
@@ -310,7 +311,7 @@ describe("DelegatingBackend — close", () => {
 
 // ---- prepareVmBoot ----
 
-function vmConfig(mode: "off" | "vm"): ResolvedVmConfig {
+function vmConfig(mode: "off" | "vm" | "agent"): ResolvedVmConfig {
 	return {
 		mode,
 		image: null,
@@ -329,7 +330,7 @@ function vmConfig(mode: "off" | "vm"): ResolvedVmConfig {
 	};
 }
 
-function resolvedConfig(mode: "off" | "vm"): ResolvedConfig {
+function resolvedConfig(mode: "off" | "vm" | "agent"): ResolvedConfig {
 	return {
 		port: 3000,
 		host: "127.0.0.1",
@@ -384,5 +385,15 @@ describe("prepareVmBoot", () => {
 		expect(plan.service).toBe(gate);
 		expect(plan.backend.kind).toBe("vm");
 		expect(plan.backend.homedir()).toBe("/home/sandbox"); // ResolvedConfig.rootDir, 27b's guest root
+	});
+
+	it('agent mode reports kind "agent" — the same vm-shaped backend, informational relabel (spec 29)', () => {
+		const plan = prepareVmBoot(resolvedConfig("agent"), {
+			preflight: () => ({ ok: true }),
+			createService: () => new FakeGate(),
+		});
+		expect(plan).not.toBeNull();
+		if (plan === null) throw new Error("unreachable");
+		expect(plan.backend.kind).toBe("agent");
 	});
 });
