@@ -63,6 +63,7 @@ function manifestFixture(overrides: Partial<Manifest> = {}): Manifest {
 	return {
 		id: GOLDEN_ID,
 		flavor: "base",
+		agent: "claude",
 		guestUser: "sandbox",
 		rootDir: "/home/sandbox",
 		isoVersion: "4.0.3",

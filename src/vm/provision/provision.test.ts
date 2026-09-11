@@ -12,6 +12,7 @@ import type { ActiveSession } from "./install.ts";
 import {
 	AGENT_DEFAULTS_PATH,
 	BOOT_HOOK_PATH,
+	flavorForMode,
 	LOGIND_POWERKEY_CONF,
 	LOGIND_POWERKEY_DEST,
 	type ProvisionDeps,
@@ -38,6 +39,8 @@ interface GuestOptions {
 	readonly skipRipgrep?: boolean;
 	/** The `bash /tmp/openhammer-provision.sh` outcome (default: rc 0 with output). */
 	readonly scriptResult?: BinRunResult;
+	/** The bare (asserted) agent pre-warm result — the agent flavor's exact command (default: rc 0). */
+	readonly prewarmResult?: BinRunResult;
 }
 
 /**
@@ -106,6 +109,7 @@ function statefulGuest(options: GuestOptions = {}) {
 			return ok();
 		}
 		if (command === "~/.local/bin/claude --version || true") return ok("1.0.99");
+		if (command === "~/.local/bin/claude --version") return options.prewarmResult ?? ok("1.0.99");
 		const which = /^command -v (rg|fd|tmux)$/.exec(command);
 		if (which !== null) {
 			const bin = which[1] ?? "";
@@ -136,6 +140,8 @@ interface HarnessOptions {
 	readonly olderSession?: boolean;
 	/** The keyscan result's stdout (default: one host-key line). */
 	readonly keyscanStdout?: string;
+	/** The injected resolved VM mode (default "vm" — hermetic; the real default resolver reads env + settings). */
+	readonly vmMode?: "off" | "vm" | "agent";
 }
 
 /**
@@ -215,6 +221,7 @@ function harness(options: HarnessOptions = {}) {
 			stopCalls.push(h);
 			return { path: "quit", detail: "fake ladder" };
 		},
+		resolveVmMode: () => options.vmMode ?? "vm",
 	};
 
 	return {
@@ -283,6 +290,7 @@ describe("runProvision — happy path", () => {
 			expect(result.sessionDir).toBe(h.sessionDir);
 			expect(result.wallClockSeconds).toBe(10); // the one sleep: the 10 s confirm gap
 			expect(result.agentPrewarm).toBe("'~/.local/bin/claude --version || true' exited 0 (1.0.99)");
+			expect(result.flavor).toBe("base");
 			// The exact ordered (command, stdin) sequence — every step, in pass order.
 			expect(h.guest.calls.map((call) => [call.command, call.stdin] as const)).toEqual(happyCalls(PASSWORD));
 			// The direct boot: the session-boot disk shape pointed at the install disk, with
@@ -611,5 +619,76 @@ describe("runProvision — verify + failure paths", () => {
 		} finally {
 			h.cleanup();
 		}
+	});
+});
+
+describe("runProvision — the agent flavor (spec 29)", () => {
+	it("mode agent (derived) → the pre-warm is ASSERTED: the bare --version, flavor in result + logs", async () => {
+		const h = harness({ vmMode: "agent" });
+		try {
+			const result = await runProvision(h.deps);
+			expect(result.flavor).toBe("agent");
+			const commands = h.guest.calls.map((call) => call.command);
+			expect(commands).toContain("~/.local/bin/claude --version");
+			expect(commands).not.toContain("~/.local/bin/claude --version || true");
+			expect(result.agentPrewarm).toBe(
+				"'~/.local/bin/claude --version' exited 0 (1.0.99) — asserted (agent flavor)",
+			);
+			expect(h.logs).toContain("provision: flavor agent (derived from the resolved VM mode)");
+			const runLog = readFileSync(join(h.sessionDir, "provision.log"), "utf8");
+			expect(runLog).toContain("flavor: agent");
+			// Everything else about the pass is the base pass — same steps, same checks, clean end.
+			expect(result.checks.every((check) => check.ok)).toBe(true);
+			expect(h.guest.calls.at(-1)?.command).toBe("sudo -S -p '' systemctl poweroff");
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("agent flavor + the binary not resolving → the pass FAILS (and the guest still powers off cleanly)", async () => {
+		const h = harness({
+			vmMode: "agent",
+			guest: { prewarmResult: { code: 127, stdoutTail: "", stderrTail: "bash: command not found" } },
+		});
+		try {
+			await expect(runProvision(h.deps)).rejects.toThrow(
+				/agent-flavor pre-warm failed: '~\/\.local\/bin\/claude --version' exited 127: bash: command not found/s,
+			);
+			// This boot writes the real disk — the clean teardown still ran.
+			expect(h.guest.calls.at(-1)?.command).toBe("sudo -S -p '' systemctl poweroff");
+			const runLog = readFileSync(join(h.sessionDir, "provision.log"), "utf8");
+			expect(runLog).toContain("result: FAIL");
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("an explicit options.flavor overrides the derived mode (both directions)", async () => {
+		const derivedAgent = harness({ vmMode: "agent" });
+		try {
+			const base = await runProvision(derivedAgent.deps, { flavor: "base" });
+			expect(base.flavor).toBe("base");
+			expect(derivedAgent.guest.calls.map((call) => call.command)).toContain(
+				"~/.local/bin/claude --version || true",
+			);
+			expect(derivedAgent.logs).toContain("provision: flavor base");
+		} finally {
+			derivedAgent.cleanup();
+		}
+		const derivedBase = harness({ vmMode: "vm" });
+		try {
+			const agent = await runProvision(derivedBase.deps, { flavor: "agent" });
+			expect(agent.flavor).toBe("agent");
+			expect(derivedBase.guest.calls.map((call) => call.command)).toContain("~/.local/bin/claude --version");
+			expect(derivedBase.logs).toContain("provision: flavor agent");
+		} finally {
+			derivedBase.cleanup();
+		}
+	});
+
+	it("flavorForMode: agent mode → agent flavor; vm/off → base", () => {
+		expect(flavorForMode("agent")).toBe("agent");
+		expect(flavorForMode("vm")).toBe("base");
+		expect(flavorForMode("off")).toBe("base");
 	});
 });

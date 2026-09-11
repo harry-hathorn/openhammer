@@ -43,6 +43,15 @@
  * LICENSING (spec 26): one log line — the golden is a personal artifact; Omarchy's ISO
  * license terms apply to redistributed images, not personal use.
  *
+ * THE SPEC-29 FLAVOR/AGENT FIELDS: the manifest also records the golden's FLAVOR
+ * (`options.flavor`, default "base" — `vm provision`'s agent flavor bakes pre-warmed
+ * caches and asserts the agent binary) and the baked AGENT (guest.json's `agent` at
+ * build time — the file `omarchy default agent` reads). The agent field closes 28d's
+ * drift gap: manage's note now compares config.agent vs manifest.agent. LEGACY manifests
+ * (26e goldens, written before the field existed) normalize with the documented
+ * {@link LEGACY_AGENT_DEFAULT} — 26d's guest-config default "claude" is the only agent
+ * any legacy golden could have baked; new writes always record it explicitly.
+ *
  * Error model: process layer, not a tool. Expected failures THROW actionable errors naming
  * the missing file and the next command; the CLI boundary maps them to exit 1. SINGLE-FLIGHT
  * is 26c's guard (refuse when any qemu.pid under `<sessions>/` names a live verified-ours
@@ -100,6 +109,13 @@ const SESSION_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 export type ManifestFlavor = "base" | "agent";
 
 /**
+ * The manifest `agent` default for LEGACY manifests (spec 29): 26e goldens predate the
+ * field, and 26d's guest-config default — the only agent such a golden could have baked —
+ * was "claude". New writes always record the agent explicitly.
+ */
+export const LEGACY_AGENT_DEFAULT = "claude";
+
+/**
  * `images/<id>/manifest.json` (0600) — the golden's provenance: which pinned ISO built it,
  * which guest user it owns, how big the disk is, and (encrypted builds only) the LUKS
  * passphrase + unlock prompt. Hand-validated at the {@link readManifest} boundary; unknown
@@ -109,6 +125,12 @@ export interface Manifest {
 	/** The golden dir's name (`golden-<isoVersion>-<stamp>` — a single safe path segment). */
 	readonly id: string;
 	readonly flavor: ManifestFlavor;
+	/**
+	 * The agent baked into the golden (guest.json's `agent` at build time — the file
+	 * `omarchy default agent` reads). Spec 29 added the field; LEGACY manifests predate
+	 * it and normalize to {@link LEGACY_AGENT_DEFAULT}.
+	 */
+	readonly agent: string;
 	/** The Linux user the installer created (26a's guest.json at build time). */
 	readonly guestUser: string;
 	/** The guest home — `MCP_ROOT_DIR` in vm modes (spec 27: `/home/<guestUser>`). */
@@ -162,6 +184,11 @@ export interface SnapshotDeps {
 export interface SnapshotOptions {
 	/** The provisioned session to promote (default: the most recent complete `build-*`). */
 	readonly sessionName?: string;
+	/**
+	 * The golden's flavor to record (spec 29; default "base"). The operator passes
+	 * "agent" when promoting a provision run whose asserted agent pre-warm passed.
+	 */
+	readonly flavor?: ManifestFlavor;
 }
 
 export interface SnapshotResult {
@@ -310,6 +337,8 @@ export async function runSnapshot(deps: SnapshotDeps = {}, options: SnapshotOpti
 	log(`snapshot: session ${sessionDir} (the provisioned build — promoting it to the golden)`);
 
 	const config = loadGuestConfig(dirs);
+	const flavor = options.flavor ?? "base";
+	log(`snapshot: flavor ${flavor}, agent ${config.agent} (both recorded in the manifest — spec 29)`);
 	if (config.encrypt) {
 		// The documented limitation (see the module header): the session does not record its
 		// build config, so the flag comes from the CURRENT doc — say so, loudly.
@@ -406,7 +435,8 @@ export async function runSnapshot(deps: SnapshotDeps = {}, options: SnapshotOpti
 	// invariant coming back). ----
 	const core: Omit<Manifest, "unlockPrompt" | "luksPassphrase"> = {
 		id: goldenId,
-		flavor: "base",
+		flavor,
+		agent: config.agent,
 		guestUser: config.username,
 		rootDir: `/home/${config.username}`,
 		isoVersion,
@@ -463,6 +493,19 @@ export function normalizeManifest(v: unknown): Manifest | null {
 	const o = v;
 	if (!("id" in o) || typeof o.id !== "string" || !GOLDEN_ID_PATTERN.test(o.id)) return null;
 	if (!("flavor" in o) || !isManifestFlavor(o.flavor)) return null;
+	// The agent field (spec 29): LEGACY manifests predate it — absent normalizes to the
+	// documented {@link LEGACY_AGENT_DEFAULT} (26d's guest-config default, the only agent
+	// such a golden could have baked). A PRESENT-but-invalid agent is corruption, not
+	// legacy — the guest-config segment shape keeps it a single safe token in every
+	// surface it is printed to (the drift note).
+	const rawAgent: unknown = "agent" in o ? o.agent : undefined;
+	const agent =
+		rawAgent === undefined
+			? LEGACY_AGENT_DEFAULT
+			: typeof rawAgent === "string" && USER_SEGMENT_PATTERN.test(rawAgent)
+				? rawAgent
+				: null;
+	if (agent === null) return null;
 	if (!("guestUser" in o) || typeof o.guestUser !== "string" || !USER_SEGMENT_PATTERN.test(o.guestUser)) return null;
 	if (!("rootDir" in o) || typeof o.rootDir !== "string" || !o.rootDir.startsWith("/home/")) return null;
 	if (!("isoVersion" in o) || !isNonEmptyString(o.isoVersion)) return null;
@@ -488,6 +531,7 @@ export function normalizeManifest(v: unknown): Manifest | null {
 	const core = {
 		id: o.id,
 		flavor: o.flavor,
+		agent,
 		guestUser: o.guestUser,
 		rootDir: o.rootDir,
 		isoVersion: o.isoVersion,

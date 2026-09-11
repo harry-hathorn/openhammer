@@ -33,6 +33,7 @@ function validManifest(id: string): Record<string, unknown> {
 	return {
 		id,
 		flavor: "base",
+		agent: "claude",
 		guestUser: "sandbox",
 		rootDir: "/home/sandbox",
 		isoVersion: "4.0.3",
@@ -237,6 +238,43 @@ describe("vmList — the golden table", () => {
 			const rows = await vmList(h.deps);
 			expect(rows[0].note).toBe(
 				"guest.json changed since this golden was baked (encrypt: false→true) — " +
+					"edits apply on the next vm install",
+			);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("the drift note fires on an agent change (spec 29 records the agent — 28d's gap closed)", async () => {
+		const h = harness();
+		try {
+			saveGuestConfig(h.dirs, { ...defaultGuestConfig(), agent: "codex" });
+			seedGolden(h.dirs, NEWEST);
+			const rows = await vmList(h.deps);
+			expect(rows[0].note).toBe(
+				"guest.json changed since this golden was baked (agent: claude→codex) — " +
+					"edits apply on the next vm install",
+			);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	it("a LEGACY manifest (no agent field) drifts via its normalized default when the config moves off claude", async () => {
+		const h = harness();
+		try {
+			saveGuestConfig(h.dirs, { ...defaultGuestConfig(), agent: "codex" });
+			const legacy = validManifest(NEWEST);
+			delete legacy.agent; // a 26e-era manifest, before the field existed
+			// seedGolden only writes manifests for its "valid"/"corrupt" sentinels — a custom
+			// record is written explicitly (the legacy shape, verbatim).
+			const dir = seedGolden(h.dirs, NEWEST, "none");
+			writeFileSync(join(dir, "manifest.json"), `${JSON.stringify(legacy, null, 2)}\n`);
+			const rows = await vmList(h.deps);
+			// The note compares the NORMALIZED legacy default ("claude") — the documented
+			// assumption, not an invented value.
+			expect(rows[0].note).toBe(
+				"guest.json changed since this golden was baked (agent: claude→codex) — " +
 					"edits apply on the next vm install",
 			);
 		} finally {
