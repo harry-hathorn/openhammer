@@ -9,10 +9,13 @@ import {
 	channelRows,
 	clientRows,
 	monitorRows,
+	SERIAL_TAIL_LINES,
 	sandboxEntryVisible,
 	sandboxHeaderRows,
 	sandboxStateRow,
 	secretRevealRows,
+	serialTailNote,
+	serialTailOf,
 	settingsRows,
 	statusRows,
 } from "./view.ts";
@@ -227,5 +230,41 @@ describe("view — sandbox rows (spec 28)", () => {
 		expect(sandboxEntryVisible("off", true)).toBe(true); // the mode-flipped-at-boot escape hatch
 		expect(sandboxEntryVisible("vm", false)).toBe(true); // from settings, before any line
 		expect(sandboxEntryVisible("agent", false)).toBe(true);
+	});
+});
+
+describe("view — serial tail (spec 28, box 28b)", () => {
+	it("keeps the LAST 200 lines of a longer log and flags the truncation", () => {
+		const lines = Array.from({ length: 250 }, (_, i) => `line-${i + 1}`);
+		const tail = serialTailOf(`${lines.join("\n")}\n`, 1234);
+		expect(tail.truncated).toBe(true);
+		expect(tail.lineCount).toBe(250);
+		expect(tail.lines.length).toBe(SERIAL_TAIL_LINES);
+		expect(tail.lines[0]).toBe("line-51");
+		expect(tail.lines.at(-1)).toBe("line-250");
+		expect(tail.totalBytes).toBe(1234);
+	});
+
+	it("keeps a whole log; drops the trailing-newline artifact and \\r", () => {
+		expect(serialTailOf("a\nb\r\nc\n", 7)).toEqual({
+			lines: ["a", "b", "c"],
+			totalBytes: 7,
+			truncated: false,
+			lineCount: 3,
+		});
+	});
+
+	it("an empty log is zero lines, not one", () => {
+		expect(serialTailOf("", 0)).toEqual({ lines: [], totalBytes: 0, truncated: false, lineCount: 0 });
+	});
+
+	it("serialTailNote names the window, the byte total, and the not-live posture", () => {
+		const lines = Array.from({ length: 250 }, (_, i) => `l${i}`);
+		expect(serialTailNote(serialTailOf(lines.join("\n"), 2048))).toBe(
+			"serial.log — last 200 of 250 lines · 2048B total · read-only snapshot (not live)",
+		);
+		expect(serialTailNote(serialTailOf("one\n", 4))).toBe(
+			"serial.log — 1 line · 4B total · read-only snapshot (not live)",
+		);
 	});
 });

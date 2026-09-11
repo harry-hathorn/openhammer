@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultVmSettings } from "../../config/settings.ts";
-import { ok, type Result } from "../../tools/result.ts";
+import { err, ok, type Result } from "../../tools/result.ts";
+import { createSandboxActions, VM_UNOWNED_HINT } from "../dashboard.ts";
 import { createStyle } from "../style.ts";
 import { type DashboardActions, DashboardRoot } from "./root.ts";
 import { DashboardStore } from "./store.ts";
+import type { SerialSource } from "./view.ts";
 
 // Raw pi-tui key sequences (see packages/tui/src/keys.ts).
 const DOWN = "\x1b[B";
@@ -55,6 +57,18 @@ function fakeActions(log: string[]): DashboardActions {
 		runDoctor: async () => {
 			log.push("runDoctor");
 			return "doctor-report-line";
+		},
+		stopSandbox: async () => {
+			log.push("stopSandbox");
+			return ok(undefined) as Result<void, Error>;
+		},
+		restartSandbox: async () => {
+			log.push("restartSandbox");
+			return ok(undefined) as Result<void, Error>;
+		},
+		readSerial: async () => {
+			log.push("readSerial");
+			return ok({ content: "boot line one\nboot line two\n", totalBytes: 28 }) as Result<SerialSource, Error>;
 		},
 		quit: () => log.push("quit"),
 	};
@@ -281,36 +295,43 @@ describe("DashboardRoot — hjkl navigation (nvim-style)", () => {
 	});
 });
 
-describe("DashboardRoot — Sandbox screen (spec 28)", () => {
-	/** A root whose store is in the given vm mode; the vm case has a ready line + a
-	 *  hermetic guest root (env-injected — the store never reads the real guest doc). */
-	function vmRooted(log: string[], mode: "off" | "vm"): DashboardRoot {
-		const store = new DashboardStore(
-			{ env: { MCP_ROOT_DIR: "/srv/guest-work" } },
-			{
-				version: 1,
-				channels: [],
-				defaultChannel: null,
-				mcp: { allowedClients: [] },
-				vm: { ...defaultVmSettings(), mode },
-			},
+/** A root whose store is in the given vm mode; the vm case has a ready line + a
+ *  hermetic guest root (env-injected — the store never reads the real guest doc).
+ *  `actionsOver` swaps in real action implementations over the same store (e.g.
+ *  the unowned createSandboxActions defaults) on top of the recording fakes. */
+function vmRooted(
+	log: string[],
+	mode: "off" | "vm",
+	actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+): DashboardRoot {
+	const store = new DashboardStore(
+		{ env: { MCP_ROOT_DIR: "/srv/guest-work" } },
+		{
+			version: 1,
+			channels: [],
+			defaultChannel: null,
+			mcp: { allowedClients: [] },
+			vm: { ...defaultVmSettings(), mode },
+		},
+	);
+	if (mode === "vm") {
+		store.applyVmStateLine(
+			JSON.stringify({
+				type: "vm-state",
+				state: "ready",
+				sessionId: "vm-20260911T101112Z-ab",
+				phase: null,
+				sshPort: 42255,
+				error: null,
+			}),
 		);
-		if (mode === "vm") {
-			store.applyVmStateLine(
-				JSON.stringify({
-					type: "vm-state",
-					state: "ready",
-					sessionId: "vm-20260911T101112Z-ab",
-					phase: null,
-					sshPort: 42255,
-					error: null,
-				}),
-			);
-		}
-		return new DashboardRoot({ store, style: createStyle(false), actions: fakeActions(log) });
 	}
+	const actions: DashboardActions = { ...fakeActions(log), ...(actionsOver?.(store) ?? {}) };
+	return new DashboardRoot({ store, style: createStyle(false), actions });
+}
 
-	it("the Sandbox row drills into the read-only state screen (state row + guest root)", async () => {
+describe("DashboardRoot — Sandbox screen (spec 28)", () => {
+	it("the Sandbox row drills into the state screen (state row + guest root + the 28b action rows)", async () => {
 		const log: string[] = [];
 		const root = vmRooted(log, "vm");
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // -> Sandbox (index 6, after Doctor)
@@ -330,5 +351,92 @@ describe("DashboardRoot — Sandbox screen (spec 28)", () => {
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(log).toContain("quit"); // the row after Doctor IS Quit — nothing new for an off user
+	});
+});
+
+describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
+	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter). */
+	async function sandboxed(
+		log: string[],
+		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+	): Promise<DashboardRoot> {
+		const root = vmRooted(log, "vm", actionsOver);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		return root;
+	}
+
+	it("the screen lists Stop / Restart / Serial tail / Back, the stop subtitle carrying the re-boot semantics", async () => {
+		// Rendered wide (200): renderList truncates each row to the width, and the stop
+		// subtitle only fits its full semantics text on a wide terminal — at 80 the
+		// first clause ("power down now — the boot-scoped mode re-boots…") is what shows.
+		const lines = (await sandboxed([])).render(200);
+		expect(lines.some((l) => l.includes("Stop sandbox…"))).toBe(true);
+		expect(lines.some((l) => l.includes("Restart sandbox…"))).toBe(true);
+		expect(lines.some((l) => l.includes("Serial tail"))).toBe(true);
+		expect(lines.some((l) => l.includes("Back"))).toBe(true);
+		expect(lines.some((l) => l.includes("re-boots the sandbox on the next server start"))).toBe(true);
+		expect(lines.some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
+	});
+
+	it("enter on Stop runs stopSandbox once and flashes the lasting-stop semantics (matrix row 4)", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		root.handleInput(ENTER); // focus 0 = Stop
+		await flushActions();
+		expect(log).toEqual(["stopSandbox"]);
+		expect(root.render(80).some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
+	});
+
+	it("enter on Restart runs restartSandbox (the stop→start order is pinned at the action level)", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["restartSandbox"]);
+		expect(root.render(80).some((l) => l.includes("fresh boot"))).toBe(true);
+	});
+
+	it("Serial tail opens the read-only drill-in (note + tail lines); Back returns to the sandbox", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 2 = Serial tail
+		await flushActions();
+		expect(log).toEqual(["readSerial"]);
+		expect(root.screen).toEqual({ kind: "serial" });
+		const lines = root.render(80);
+		expect(lines.some((l) => l.includes("serial.log — 2 lines · 28B total · read-only snapshot (not live)"))).toBe(
+			true,
+		);
+		expect(lines.some((l) => l.includes("boot line one"))).toBe(true);
+		expect(lines.some((l) => l.includes("boot line two"))).toBe(true);
+		root.handleInput(ESC);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+	});
+
+	it("a failed serial read flashes inline (the no-serial-yet case) and stays on the sandbox screen", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, () => ({
+			readSerial: async () => err(new Error("no serial yet")) as Result<SerialSource, Error>,
+		}));
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		expect(root.render(80).some((l) => l.includes("no serial yet"))).toBe(true);
+	});
+
+	it("the REAL unowned actions (no vmService dep) surface the exact hint — no fake action fires", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, (store) => createSandboxActions({ store }));
+		root.handleInput(ENTER); // Stop
+		await flushActions();
+		expect(log).toEqual([]); // the fake never ran — the wired default gated first
+		expect(root.render(80).some((l) => l.includes(VM_UNOWNED_HINT))).toBe(true);
 	});
 });

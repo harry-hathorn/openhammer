@@ -15,7 +15,11 @@ import {
 	menuSectionAt,
 	renderFieldRows,
 	renderList,
+	SANDBOX_RESTART_LABEL,
+	SANDBOX_SERIAL_LABEL,
+	SANDBOX_STOP_LABEL,
 	SET_LOGIN_LABEL,
+	sandboxItems,
 	settingsItems,
 	visibleMenuSections,
 } from "./screens.ts";
@@ -130,6 +134,23 @@ describe("screens — settings/doctor items", () => {
 	});
 	it("doctorItems: Run + Back", () => {
 		expect(doctorItems().map((i) => i.label)).toEqual(["Run doctor", "Back"]);
+	});
+});
+
+describe("screens — sandboxItems (spec 28, box 28b)", () => {
+	it("the Sandbox screen's rows: Stop, Restart, Serial tail, Back", () => {
+		expect(sandboxItems().map((i) => i.label)).toEqual([
+			SANDBOX_STOP_LABEL,
+			SANDBOX_RESTART_LABEL,
+			SANDBOX_SERIAL_LABEL,
+			"Back",
+		]);
+	});
+
+	it("the stop subtitle carries the matrix-row-4 semantics (re-boots on next start; lasting stop = off + restart)", () => {
+		const stop = sandboxItems()[0];
+		expect(stop?.description).toContain("re-boots the sandbox on the next server start");
+		expect(stop?.description).toContain("lasting stop: mode off + restart");
 	});
 });
 
