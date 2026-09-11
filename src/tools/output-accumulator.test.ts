@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -144,6 +144,51 @@ describe("tempFilePath (spec 23: backend overflowPath wiring)", () => {
 		expect(snap.truncation.truncated).toBe(false);
 		expect(snap.fullOutputPath).toBeUndefined();
 		expect(existsSync(provided)).toBe(false); // the file is opened lazily, only on spill
+	});
+});
+
+// Spec 25: in VM mode bash passes `spill: "external"` — the guest-side tee owns
+// the full output at the provided (guest) path, so the accumulator must never
+// touch the host fs, while still REPORTING that path for the footer.
+describe("spill: external (the caller owns the full-output copy)", () => {
+	it("never creates a host file over the caps; fullOutputPath reports the provided path", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "openhammer-acc-ext-"));
+		try {
+			// Guest-shaped name: in vm mode this path lives in the GUEST.
+			const provided = join(dir, "openhammer-deadbeef00000000.log");
+			const payload = "z".repeat(60 * 1024);
+			const acc = new OutputAccumulator({ tempFilePath: provided, spill: "external" });
+			acc.append(Buffer.from(payload));
+			const snap = acc.snapshot({ persistIfTruncated: true });
+			expect(snap.truncation.truncated).toBe(true);
+			expect(snap.truncation.totalBytes).toBe(payload.length);
+			expect(snap.fullOutputPath).toBe(provided); // the external copy's path, verbatim
+			await acc.closeTempFile(); // no-op — no host stream was ever opened
+			expect(existsSync(provided)).toBe(false); // no host file at the guest path
+			expect(readdirSync(dir)).toEqual([]); // the temp dir stays untouched: no spill, no mint
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("without a provided path it mints nothing: fullOutputPath stays undefined even when truncated", () => {
+		const acc = new OutputAccumulator({ spill: "external" });
+		acc.append(Buffer.from("y".repeat(60 * 1024)));
+		const snap = acc.snapshot({ persistIfTruncated: true });
+		expect(snap.truncation.truncated).toBe(true);
+		expect(snap.fullOutputPath).toBeUndefined(); // no external copy was named — and no host mint either
+	});
+
+	it("spill: 'host' spelled explicitly is the default (today's behavior, unchanged)", async () => {
+		const provided = join(tmpdir(), `openhammer-acc-host-${process.pid}.log`);
+		created.push(provided);
+		const payload = "h".repeat(60 * 1024);
+		const acc = new OutputAccumulator({ tempFilePath: provided, spill: "host" });
+		acc.append(Buffer.from(payload));
+		const snap = acc.snapshot({ persistIfTruncated: true });
+		expect(snap.fullOutputPath).toBe(provided);
+		await acc.closeTempFile();
+		expect(readFileSync(provided, "utf-8")).toBe(payload);
 	});
 });
 

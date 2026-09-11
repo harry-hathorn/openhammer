@@ -27,13 +27,18 @@
  *   remaining throw path) → the same final `err(e)` narrowing the old catch
  *   produced.
  *
- * Output streams into one `OutputAccumulator` whose overflow temp file is
- * minted by `ctx.backend.overflowPath("openhammer")` — identical shape to the
+ * Output streams into one `OutputAccumulator` whose overflow path comes from
+ * `ctx.backend.overflowPath("openhammer")` — identical shape to the
  * accumulator's internal default on the host (prefix + 8 hex + `.log` under
- * the tmpdir); a guest path in VM mode (spec 25). (Abort is unreachable in
- * v1: the `ToolModule.execute` signature carries no `AbortSignal`, so only the
- * timeout path can kill.) The `try/catch` here stays ONLY for the spawn-error
- * rejection — the at-the-end `Result` narrowing.
+ * the tmpdir); a guest path in VM mode (spec 25). The spill ownership follows
+ * `kind`: locally the accumulator owns the host spill at the path it names
+ * (`spill: "host"`, byte-identical to before); in vm/agent mode the runShell
+ * wrapper's guest tee already owns the full output at that path, so the
+ * accumulator's spill is "external" — it never creates a host file, and the
+ * `Full output:` footer names the GUEST path, fetchable via `read`. (Abort is
+ * unreachable in v1: the `ToolModule.execute` signature carries no
+ * `AbortSignal`, so only the timeout path can kill.) The `try/catch` here
+ * stays ONLY for the spawn-error rejection — the at-the-end `Result` narrowing.
  */
 import type { ToolModule } from "../mcp/types.ts";
 import { OutputAccumulator, type OutputSnapshot } from "./output-accumulator.ts";
@@ -106,7 +111,19 @@ export const bashTool: ToolModule = {
 			return err(new Error(`Working directory does not exist: ${ctx.rootDir}\nCannot execute bash commands.`));
 		}
 
-		const output = new OutputAccumulator({ tempFilePath: ctx.backend.overflowPath("openhammer") });
+		// Who owns the full-output copy follows `kind` — the honest signal for
+		// where `overflowPath` lives. Local: the accumulator spills the host file
+		// itself (today's behavior, byte-identical). VM/agent: the path is a GUEST
+		// path and the runShell wrapper's tee already owns the full output there
+		// (spec 25), so the spill is "external" — without it the accumulator would
+		// createWriteStream a HOST file at the guest-looking path (or ENOENT when
+		// the host dir is absent). Second sanctioned branch on `kind` (guide's
+		// variant switch is the first): the spill decision is exactly the fact the
+		// label carries.
+		const output = new OutputAccumulator({
+			tempFilePath: ctx.backend.overflowPath("openhammer"),
+			spill: ctx.backend.kind === "local" ? "host" : "external",
+		});
 
 		try {
 			const result = await ctx.backend.runShell(command, {
