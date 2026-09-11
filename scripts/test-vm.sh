@@ -85,7 +85,7 @@ SESSION_DIR="${HOME}/.openhammer/vm/sessions/${SESSION_ID}"
 
 SERVER_WAIT_S=30    # banner token (post-listen) — a miss means the boot failed fast
 VM_READY_WAIT_S=240 # the sandbox's own boot budget is 180 s; this adds poll slack
-EXIT_WAIT_S=90      # SIGINT → exit 0 (ACPI powerdown + stop ladder + persist teardown)
+EXIT_WAIT_S=240     # SIGINT → exit 0 (ACPI powerdown budget is 180 s by design + persist teardown)
 ORPHAN_SETTLE_S=10  # grace for a just-reaped qemu before the no-orphan verdict
 POLL_INTERVAL_S=5
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/openhammer-test-vm.XXXXXX")"
@@ -202,6 +202,10 @@ echo "[test-vm] gate open — qemu-system-x86_64 on PATH, /dev/kvm writable, gol
 echo "[test-vm] (the server picks the NEWEST golden by manifest builtAt; session id: ${SESSION_ID}, port: ${PORT})"
 
 # --- boot the real server -----------------------------------------------------
+# The throwaway discard session never approaches the 45G default cap (the overlay is
+# sparse over a 6.6G golden) — pin a working cap so modest-disk hosts can run the gated
+# tier at all (the first real gate run: preflight killed the boot at 14G free).
+MCP_VM_DISK_CAP_GB="${OPENHAMMER_TEST_VM_DISK_CAP_GB:-12}" \
 PORT="$PORT" MCP_VM_MODE=vm MCP_VM_PERSIST=discard MCP_VM_SESSION_ID="$SESSION_ID" \
 	"$TSX" src/main.ts >"$LOG" 2>&1 &
 SERVER_PID=$!
