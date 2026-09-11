@@ -12,6 +12,8 @@ import type { ActiveSession } from "./install.ts";
 import {
 	AGENT_DEFAULTS_PATH,
 	BOOT_HOOK_PATH,
+	LOGIND_POWERKEY_CONF,
+	LOGIND_POWERKEY_DEST,
 	type ProvisionDeps,
 	type ProvisionExec,
 	runProvision,
@@ -83,12 +85,21 @@ function statefulGuest(options: GuestOptions = {}) {
 			files.set("/etc/sddm.conf.d/99-openhammer-autologin.conf", staged);
 			return ok();
 		}
+		if (command === `sudo -S -p '' install -D -m 644 /tmp/openhammer-logind-powerkey.conf ${LOGIND_POWERKEY_DEST}`) {
+			const staged = files.get("/tmp/openhammer-logind-powerkey.conf");
+			if (staged === undefined) return miss("staging file missing");
+			files.set(LOGIND_POWERKEY_DEST, staged);
+			return ok();
+		}
 		if (command === "sudo -S -p '' sh -c 'groupadd -f autologin && usermod -aG autologin sandbox'") return ok();
 		if (command === "sudo -S -p '' systemctl restart sddm.service") return ok();
 		if (command.startsWith("mkdir -p ~/")) return ok();
 		const grep = /^grep -q openhammer\/env (~\/\.(?:bash|zsh)rc)$/.exec(command);
 		if (grep !== null) {
 			return (files.get(grep[1] ?? "") ?? "").includes("openhammer/env") ? ok() : miss();
+		}
+		if (command === `grep -q HandlePowerKey=poweroff ${LOGIND_POWERKEY_DEST}`) {
+			return (files.get(LOGIND_POWERKEY_DEST) ?? "").includes("HandlePowerKey=poweroff") ? ok() : miss();
 		}
 		if (command === `chmod +x ${BOOT_HOOK_PATH}`) {
 			executable.add(BOOT_HOOK_PATH);
@@ -242,6 +253,11 @@ function happyCalls(password: string): Array<readonly [string, string | undefine
 		["cat >> ~/.bashrc", `${ENV_LINE}\n`],
 		["grep -q openhammer/env ~/.zshrc", undefined],
 		["cat >> ~/.zshrc", `${ENV_LINE}\n`],
+		["cat > /tmp/openhammer-logind-powerkey.conf", LOGIND_POWERKEY_CONF],
+		[
+			"sudo -S -p '' install -D -m 644 /tmp/openhammer-logind-powerkey.conf /etc/systemd/logind.conf.d/99-openhammer-powerkey.conf",
+			sudoStdin,
+		],
 		["mkdir -p ~/.config/omarchy/hooks/post-boot.d", undefined],
 		["cat > ~/.config/omarchy/hooks/post-boot.d/openhammer.sh", "#!/bin/bash\necho one\necho two\n"],
 		["chmod +x ~/.config/omarchy/hooks/post-boot.d/openhammer.sh", undefined],
@@ -254,6 +270,7 @@ function happyCalls(password: string): Array<readonly [string, string | undefine
 		["test -x ~/.config/omarchy/hooks/post-boot.d/openhammer.sh", undefined],
 		["grep -q openhammer/env ~/.bashrc", undefined],
 		["grep -q openhammer/env ~/.zshrc", undefined],
+		[`grep -q HandlePowerKey=poweroff ${LOGIND_POWERKEY_DEST}`, undefined],
 		["sudo -S -p '' systemctl poweroff", sudoStdin],
 	];
 }
@@ -292,7 +309,16 @@ describe("runProvision — happy path", () => {
 				},
 				{ name: ".bashrc-env-line", ok: true, detail: "grep -q openhammer/env ~/.bashrc exited 0" },
 				{ name: ".zshrc-env-line", ok: true, detail: "grep -q openhammer/env ~/.zshrc exited 0" },
+				{
+					name: "powerkey-dropin",
+					ok: true,
+					detail:
+						"grep -q HandlePowerKey=poweroff /etc/systemd/logind.conf.d/99-openhammer-powerkey.conf exited 0",
+				},
 			]);
+			// The logind power-key drop-in landed in the fake guest exactly (27k: QMP
+			// system_powerdown must reach a real poweroff in every later session boot).
+			expect(h.guest.files.get(LOGIND_POWERKEY_DEST)).toBe(LOGIND_POWERKEY_CONF);
 			// Teardown: clean guest poweroff, no stop ladder.
 			expect(h.stopCalls).toEqual([]);
 			expect(h.guest.calls.at(-1)?.command).toBe("sudo -S -p '' systemctl poweroff");
@@ -402,6 +428,7 @@ describe("runProvision — bootCommands variants", () => {
 				"default-agent",
 				".bashrc-env-line",
 				".zshrc-env-line",
+				"powerkey-dropin",
 			]);
 		} finally {
 			h.cleanup();
