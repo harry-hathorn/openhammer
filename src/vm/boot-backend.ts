@@ -273,8 +273,13 @@ export interface PrepareVmBootDeps {
 	readonly log?: (line: string) => void;
 }
 
-// The typed default (an explicit adapter so the union of signatures stays callable as one).
-const createServiceDefault = (config: ResolvedVmConfig): VmBootGate => createVmService(config);
+// The typed default, parameterized by the guest rootDir so the injected seam's one-arg shape
+// stays callable as one union: threads `config.rootDir` (27b's guest reinterpretation of
+// MCP_ROOT_DIR) into the service — the agent-mode tmux session (spec 29) starts there.
+const createServiceDefault =
+	(rootDir: string) =>
+	(config: ResolvedVmConfig): VmBootGate =>
+		createVmService(config, { guestRootDir: rootDir });
 
 /**
  * Assemble a VM-mode boot (spec 27f, called from `main` right after config resolution):
@@ -296,6 +301,6 @@ export function prepareVmBoot(config: ResolvedConfig, deps: PrepareVmBootDeps = 
 	if (!verdict.ok) {
 		throw new Error(verdict.message);
 	}
-	const service = (deps.createService ?? createServiceDefault)(config.vm);
+	const service = (deps.createService ?? createServiceDefault(config.rootDir))(config.vm);
 	return { service, backend: createDelegatingBackend(service, config.rootDir, { log: deps.log }) };
 }
