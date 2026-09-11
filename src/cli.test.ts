@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,6 +13,8 @@ import {
 	loadSettings,
 	type Settings,
 } from "./config/settings.ts";
+import { RequestRecorder } from "./mcp/telemetry.ts";
+import { startStatusSocket } from "./observability/status-socket.ts";
 import { BANNER } from "./tui/banner.ts";
 import { defaultGuestConfig, saveGuestConfig } from "./vm/provision/guest-config.ts";
 import { resolveVmDirs } from "./vm/session.ts";
@@ -677,7 +680,9 @@ describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 			const err = recordingStream();
 			const code = await dispatch(parsed("vm"), { stderr: err.stream });
 			expect(code).toBe(2);
-			expect(err.text()).toContain("Usage: openhammer vm { install | provision | snapshot | list | reset | gc }");
+			expect(err.text()).toContain(
+				"Usage: openhammer vm { install | provision | snapshot | list | reset | gc | status }",
+			);
 		});
 	});
 
@@ -687,7 +692,7 @@ describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 			const code = await dispatch(parsed("vm", ["teleport"]), { stderr: err.stream });
 			expect(code).toBe(2);
 			expect(err.text()).toContain(
-				"vm: unknown subcommand 'teleport' (available: install, provision, snapshot, list, reset, gc)",
+				"vm: unknown subcommand 'teleport' (available: install, provision, snapshot, list, reset, gc, status)",
 			);
 		});
 	});
@@ -722,6 +727,7 @@ describe("dispatch — `vm` subcommands (spec 26c/26d/26e)", () => {
 		expect(text).toContain("list");
 		expect(text).toContain("reset [--yes]");
 		expect(text).toContain("gc [--yes] [--keep-goldens <n>]");
+		expect(text).toContain("Show the live VM session state");
 	});
 });
 
@@ -846,6 +852,89 @@ describe("dispatch — `vm` subcommands (spec 26f: list/reset/gc)", () => {
 			expect(code).toBe(2);
 			expect(err.text()).toContain('--keep-goldens must be an integer >= 1 (got "0")');
 		});
+	});
+});
+
+describe("dispatch — `vm status` (spec 27h: the vm-state row from the live status socket)", () => {
+	/** Bind a net server on a Unix path, resolving once it listens. */
+	function listen(server: ReturnType<typeof createServer>, path: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(path, () => {
+				server.off("error", reject);
+				resolve();
+			});
+		});
+	}
+
+	it("routes `vm status` to the vm handler with sub + trailing rest", async () => {
+		const vm = fakeHandler();
+		await dispatch(parsed("vm", ["status"]), { vm: vm.handler });
+		expect(vm.calls).toEqual([{ sub: "status", rest: [] }]);
+	});
+
+	it("socket unreachable → the no-info line on stdout, exit 0 (a status peek never fails)", async () => {
+		await withTempHome(async () => {
+			const out = recordingStream();
+			const err = recordingStream();
+			const code = await dispatch(parsed("vm", ["status"]), { stdout: out.stream, stderr: err.stream });
+			expect(code).toBe(0);
+			expect(out.text()).toBe("vm: no live session info (server not running or mode off)\n");
+			expect(err.text()).toBe("");
+		});
+	});
+
+	it("reachable socket with a vm-state dump → the rendered row, exit 0", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "oh-vm-status-"));
+		const path = join(dir, "openhammer.sock");
+		try {
+			const handle = await startStatusSocket(new RequestRecorder(), {
+				path,
+				vmState: () => ({
+					type: "vm-state",
+					state: "ready",
+					sessionId: "vm-20260911T101112Z-ab",
+					phase: null,
+					sshPort: 42255,
+					error: null,
+				}),
+				warn: () => {},
+			});
+			expect(handle).not.toBeNull();
+			if (handle === null) return;
+			const out = recordingStream();
+			const code = await dispatch(parsed("vm", ["status"]), { stdout: out.stream, vmStatusPath: path });
+			expect(code).toBe(0);
+			expect(out.text()).toBe("VM  ready · session vm-20260911T101112Z-ab · ssh :42255\n");
+			await handle.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("reachable socket with NO vm-state in its dump (an off-mode server) → the no-info line, exit 0", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "oh-vm-status-"));
+		const path = join(dir, "openhammer.sock");
+		const server = createServer((socket) => {
+			socket.end(); // an off-mode dump: no vm-state line (here: nothing at all) — then close
+		});
+		try {
+			await listen(server, path);
+			const out = recordingStream();
+			const code = await dispatch(parsed("vm", ["status"]), { stdout: out.stream, vmStatusPath: path });
+			expect(code).toBe(0);
+			expect(out.text()).toBe("vm: no live session info (server not running or mode off)\n");
+		} finally {
+			server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("`vm status --nope` is a usage error before anything runs (exit 2)", async () => {
+		const err = recordingStream();
+		const code = await dispatch(parsed("vm", ["status", "--nope"]), { stderr: err.stream });
+		expect(code).toBe(2);
+		expect(err.text()).toContain("Usage: openhammer vm status\n");
 	});
 });
 

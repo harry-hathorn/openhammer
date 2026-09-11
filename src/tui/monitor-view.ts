@@ -10,9 +10,15 @@
  * The event shape is {@link RequestEvent} from `src/mcp/telemetry.ts` — the
  * status socket emits exactly those, one compact JSON per line (see
  * `formatEventLine` in `status-socket.ts`). So this module is the client-side
- * counterpart to the recorder's wire format.
+ * counterpart to the recorder's wire format. The socket's typed lines ride the
+ * same NDJSON stream (`channel-state`, and spec 27h's `vm-state`): the vm-state
+ * row renderer ({@link formatVmState}) lives here for the spec-28 dashboard and
+ * `openhammer vm status`; the wire parsers stay in `status-socket.ts` beside
+ * the shapes they parse, and each parser nulls out the kinds it doesn't own
+ * (the additive-parse rule — a future line kind is skipped, never fatal).
  */
 import type { ClientStat, RequestEvent } from "../mcp/telemetry.ts";
+import type { VmStateLine } from "../observability/status-socket.ts";
 
 /** Is `v` a plain object (not an array, not null)? */
 function isStringRecord(v: unknown): v is Record<string, unknown> {
@@ -119,6 +125,36 @@ export function formatClientHeader(stats: ClientStat[]): string {
 	if (stats.length === 0) return "active clients: (none yet)";
 	const summary = stats.map((s) => `${s.client}×${s.calls}`).join(", ");
 	return `active clients: ${summary}`;
+}
+
+/**
+ * Format one vm-state line (spec 27h) as the monitor/dashboard row — a mode-ish
+ * line in the feed, one shape per state:
+ *
+ *     VM  ready · session vm-20260911T101112Z-ab · ssh :42255
+ *     VM  booting (phase ssh)
+ *     VM  failed — sandbox boot failed: … — see the VM serial log: …
+ *     VM  stopped
+ *
+ * The line carries no clock (unlike a {@link RequestEvent}'s `ts`), so a
+ * `booting` row shows the boot phase without an elapsed count — the dashboard
+ * (spec 28) owns any time math. Null slots render as ABSENT clauses, never the
+ * string "null"; a multi-line error is flattened so the row stays one line.
+ */
+export function formatVmState(line: VmStateLine): string {
+	const head = `VM  ${line.state}`;
+	if (line.state === "ready") {
+		const parts = [`session ${line.sessionId ?? "(none)"}`];
+		if (line.sshPort !== null) parts.push(`ssh :${line.sshPort}`);
+		return `${head} · ${parts.join(" · ")}`;
+	}
+	if (line.state === "booting") {
+		return line.phase === null ? head : `${head} (phase ${line.phase})`;
+	}
+	if (line.state === "failed") {
+		return line.error === null ? head : `${head} — ${line.error.replace(/\r?\n/g, " ")}`;
+	}
+	return head; // stopped / off — nothing to add
 }
 
 /**

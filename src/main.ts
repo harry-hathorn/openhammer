@@ -45,7 +45,13 @@ import { loadSettings } from "./config/settings.ts";
 import { resolveConfig } from "./config.ts";
 import { isMainEntry } from "./entrypoint.ts";
 import { RequestRecorder } from "./mcp/telemetry.ts";
-import { type ChannelStateLine, startStatusSocket } from "./observability/status-socket.ts";
+import {
+	type ChannelStateLine,
+	type StatusSocketHandle,
+	startStatusSocket,
+	type VmStateLine,
+	vmStateLineFromStatus,
+} from "./observability/status-socket.ts";
 import { buildFastify } from "./server.ts";
 import { printStartup } from "./startup-print.ts";
 import { createLocalBackend } from "./tools/backend.ts";
@@ -133,16 +139,35 @@ export async function main(deps: MainDeps = {}): Promise<void> {
 	const fastify = await buildFastify(config, token, config.allowedClients, recorder, oauth, baseUrl, backend);
 	await fastify.listen({ port: config.port, host: config.host });
 
-	// The eager-async QEMU spawn (spec 27's boot posture): kicked off the moment
-	// the LAST fallible boot step has passed, never blocking `listen()` —
-	// `/health` serves from here on regardless of VM state (server health ≠ VM
-	// health). Starting any earlier would orphan the guest on a later boot
-	// failure (`ensureToken`/`EADDRINUSE` exit through the boot-failure path,
-	// which never runs the shutdown slot). `start()` resolves when the boot
-	// SETTLES (ready or failed) and never rejects — failures surface through
-	// `ensureReady`, never here.
+	// The vm-state observability line (spec 27 "Observability", wired 27h): every
+	// service transition becomes a `vm-state` NDJSON line — streamed to connected
+	// monitor/dashboard clients, and the LATEST snapshot dumped to each new
+	// connection. The ref lives HERE and the socket reads it back through a
+	// GETTER (`vmState: () => latestVmState` below): the socket binds AFTER this
+	// eager-async boot begins (the `booting` transition typically precedes the
+	// bind), so a snapshot captured at bind time could go stale. The handle is
+	// read through a holder because transitions can land in the start()-to-bind
+	// window — they update the ref immediately; once the handle exists they also
+	// stream. Off mode (`vmBoot === null`): no listener, null getter — no
+	// vm-state line is ever dumped or streamed (the zero-VM-code pin).
+	const socketHolder: { statusSocket: StatusSocketHandle | null } = { statusSocket: null };
+	let latestVmState: VmStateLine | null = null;
+	let unbindVmState: (() => void) | null = null;
 	if (vmBoot !== null) {
-		void vmBoot.service.start();
+		const { service } = vmBoot;
+		unbindVmState = service.onTransition(() => {
+			latestVmState = vmStateLineFromStatus(service.status());
+			socketHolder.statusSocket?.emitVmState(latestVmState);
+		});
+		// The eager-async QEMU spawn (spec 27's boot posture): kicked off the
+		// moment the LAST fallible boot step has passed, never blocking
+		// `listen()` — `/health` serves from here on regardless of VM state
+		// (server health ≠ VM health). Starting any earlier would orphan the
+		// guest on a later boot failure (`ensureToken`/`EADDRINUSE` exit through
+		// the boot-failure path, which never runs the shutdown slot). `start()`
+		// resolves when the boot SETTLES (ready or failed) and never rejects —
+		// failures surface through `ensureReady`, never here.
+		void service.start();
 	}
 
 	if (notice !== null) {
@@ -165,8 +190,10 @@ export async function main(deps: MainDeps = {}): Promise<void> {
 	// so a connecting dashboard reads each configured channel's up/down + URL.
 	const statusSocket = await startStatusSocket(recorder, {
 		channels: channelState,
+		vmState: () => latestVmState,
 		warn: (message) => fastify.log.warn(message),
 	});
+	socketHolder.statusSocket = statusSocket;
 	if (statusSocket === null) {
 		fastify.log.warn("status socket unavailable — `openhammer monitor` will not work");
 	}
@@ -191,6 +218,8 @@ export async function main(deps: MainDeps = {}): Promise<void> {
 			void statusSocket.close().catch(() => {});
 		}
 		recorder.close();
+		// Stop feeding vm-state transitions through the (now closed) socket.
+		unbindVmState?.();
 		// Best-effort teardown (the `12b` per-promise `.catch(()=>{})` idiom): a
 		// live channel's `stop` is idempotent; never block the exit on it.
 		const stop = handle?.stop;

@@ -4,15 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RequestEvent, RequestRecorder } from "../mcp/telemetry.ts";
+import type { VmStatus } from "../vm/service.ts";
 import {
 	type ChannelStateLine,
 	formatChannelStateLine,
 	formatEventLine,
+	formatVmStateLine,
 	handleConnection,
 	parseChannelStateLine,
+	parseVmStateLine,
 	type StatusSocket,
 	startStatusSocket,
 	statusSocketPath,
+	type VmStateLine,
+	vmStateLineFromStatus,
 } from "./status-socket.ts";
 
 /** A minimal recording socket conforming to {@link StatusSocket} (no real I/O). */
@@ -63,6 +68,35 @@ function event(ts: string, tool: string | null = null): RequestEvent {
 /** Build a channel-state line. */
 function channelState(id: string, up: boolean, url: string | null): ChannelStateLine {
 	return { type: "channel-state", id, up, url };
+}
+
+/** Build a vm-state line (spec 27h). */
+function vmState(over: Partial<VmStateLine> = {}): VmStateLine {
+	return {
+		type: "vm-state",
+		state: "ready",
+		sessionId: "vm-20260911T101112Z-ab",
+		phase: null,
+		sshPort: 42255,
+		error: null,
+		...over,
+	};
+}
+
+/** Build a full `VmStatus` (vm/service.ts's snapshot) for the mapper tests. */
+function vmStatus(over: Partial<VmStatus> = {}): VmStatus {
+	return {
+		state: "booting",
+		phase: "ssh",
+		sessionId: "vm-1",
+		sshPort: null,
+		bootStartedAt: 1000,
+		bootTimeoutMs: 180_000,
+		readyAt: null,
+		error: null,
+		relaunchUsed: false,
+		...over,
+	};
 }
 
 /** Clean up any temp dirs created during a test. */
@@ -121,6 +155,52 @@ describe("channel-state wire format", () => {
 			parseChannelStateLine(JSON.stringify({ type: "channel-state", id: "a", up: "yes", url: null })),
 		).toBeNull();
 		expect(parseChannelStateLine(JSON.stringify({ type: "event", id: "a", up: true, url: null }))).toBeNull();
+	});
+});
+
+describe("vm-state wire format (spec 27h)", () => {
+	it("serializes a vm-state line as compact JSON + newline", () => {
+		const line = formatVmStateLine(vmState());
+		expect(line.endsWith("\n")).toBe(true);
+		expect(JSON.parse(line)).toMatchObject({ type: "vm-state", state: "ready", sshPort: 42255 });
+	});
+
+	it("parses a well-formed vm-state line", () => {
+		const booting = vmState({ state: "booting", phase: "ssh", sessionId: null, sshPort: null });
+		expect(parseVmStateLine(formatVmStateLine(booting))).toEqual(booting);
+	});
+
+	it("returns null for blank / malformed / non-vm-state lines (the additive-parse rule)", () => {
+		expect(parseVmStateLine("")).toBeNull();
+		expect(parseVmStateLine("not-json")).toBeNull();
+		// A future/unknown line kind parses to null — never mis-rendered, never fatal.
+		expect(parseVmStateLine(JSON.stringify({ type: "future-thing" }))).toBeNull();
+		// The other line kinds share the socket but are not vm-state.
+		expect(parseVmStateLine(formatEventLine(event("1", "bash")))).toBeNull();
+		expect(parseVmStateLine(formatChannelStateLine(channelState("a", true, null)))).toBeNull();
+		// Right type, wrong value shapes → rejected (never mis-parsed).
+		expect(parseVmStateLine(JSON.stringify({ type: "vm-state", state: "FROBNICATED" }))).toBeNull();
+		expect(parseVmStateLine(JSON.stringify({ type: "vm-state", state: "ready", sshPort: "42255" }))).toBeNull();
+		expect(parseVmStateLine(JSON.stringify({ type: "vm-state", state: "ready", sessionId: 7 }))).toBeNull();
+	});
+
+	it("maps the service status snapshot to the wire line (phase none → null)", () => {
+		expect(vmStateLineFromStatus(vmStatus())).toEqual(
+			vmState({ state: "booting", phase: "ssh", sessionId: "vm-1", sshPort: null }),
+		);
+		expect(vmStateLineFromStatus(vmStatus({ state: "ready", phase: "none", sshPort: 42255 }))).toEqual(
+			vmState({ sessionId: "vm-1", phase: null, sshPort: 42255 }),
+		);
+		const failed = vmStatus({ state: "failed", error: "sandbox boot failed: no golden" });
+		expect(vmStateLineFromStatus(failed)).toEqual(
+			vmState({
+				state: "failed",
+				sessionId: "vm-1",
+				phase: "ssh",
+				sshPort: null,
+				error: "sandbox boot failed: no golden",
+			}),
+		);
 	});
 });
 
@@ -209,6 +289,29 @@ describe("handleConnection (fake socket)", () => {
 		expect(socket.lines).toHaveLength(0); // nothing buffered; unsubscribed before the event dump
 		recorder.record(event("2"));
 		expect(socket.lines).toHaveLength(0);
+	});
+
+	it("dumps the vm-state snapshot between channel-state and the event history", () => {
+		const recorder = new RequestRecorder();
+		recorder.record(event("1", "bash"));
+		const socket = fakeSocket();
+
+		const booting = vmState({ state: "booting", phase: "ssh", sessionId: null, sshPort: null });
+		handleConnection(socket, recorder, [channelState("deployed", true, "https://x")], booting);
+		expect(socket.lines).toHaveLength(3);
+		expect(JSON.parse(socket.lines[0] ?? "{}").type).toBe("channel-state");
+		expect(JSON.parse(socket.lines[1] ?? "{}")).toMatchObject({ type: "vm-state", state: "booting", phase: "ssh" });
+		expect(JSON.parse(socket.lines[2] ?? "{}").tool).toBe("bash");
+	});
+
+	it("dumps NO vm-state line when the snapshot is null (off mode — the additive rule)", () => {
+		const recorder = new RequestRecorder();
+		recorder.record(event("1", "bash"));
+		const socket = fakeSocket();
+
+		handleConnection(socket, recorder, [], null);
+		expect(socket.lines).toHaveLength(1); // only the event — no vm-state line
+		expect(JSON.parse(socket.lines[0] ?? "{}").tool).toBe("bash");
 	});
 });
 
@@ -326,6 +429,75 @@ describe("startStatusSocket (real net)", () => {
 				url: "https://edge.example/mcp",
 			});
 			expect(JSON.parse(collector.lines[1] ?? "{}").tool).toBe("bash");
+		} finally {
+			collector.close();
+		}
+		await handle.close();
+	});
+
+	it("dumps the latest vm-state per connect and streams transitions to connected clients (27h)", async () => {
+		const recorder = new RequestRecorder();
+		const path = join(tempDir(), "openhammer.sock");
+		// The caller-owned latest-state ref (main.ts holds it; the socket reads it
+		// PER connect via the getter) — mutable here to prove the dump carries the
+		// latest, not a bind-time copy.
+		let latest: VmStateLine | null = vmState({ state: "booting", phase: "ssh", sessionId: null, sshPort: null });
+
+		const handle = await startStatusSocket(recorder, { path, vmState: () => latest, warn: () => {} });
+		expect(handle).not.toBeNull();
+		if (handle === null) return;
+
+		const first = collectLines(path);
+		try {
+			await first.waitFor(1); // the vm-state dump (no channels, no events)
+			expect(JSON.parse(first.lines[0] ?? "{}")).toMatchObject({
+				type: "vm-state",
+				state: "booting",
+				phase: "ssh",
+			});
+
+			// A transition: the ref moves + emitVmState streams to the connected client.
+			latest = vmState({ state: "ready", sessionId: "vm-20260911T101112Z-ab", sshPort: 42255 });
+			handle.emitVmState(latest);
+			await first.waitFor(2);
+			expect(JSON.parse(first.lines[1] ?? "{}")).toMatchObject({
+				type: "vm-state",
+				state: "ready",
+				sessionId: "vm-20260911T101112Z-ab",
+				sshPort: 42255,
+			});
+		} finally {
+			first.close();
+		}
+
+		// A LATER connect dumps the latest state (not the state the socket was seeded with).
+		const second = collectLines(path);
+		try {
+			await second.waitFor(1);
+			expect(JSON.parse(second.lines[0] ?? "{}")).toMatchObject({ type: "vm-state", state: "ready" });
+		} finally {
+			second.close();
+		}
+
+		// Emitting to a gone client is best-effort — never a throw.
+		expect(() => handle.emitVmState(latest)).not.toThrow();
+		await handle.close();
+	});
+
+	it("carries no vm-state line without the getter (off mode → the stream is unchanged)", async () => {
+		const recorder = new RequestRecorder();
+		recorder.record(event("1", "bash"));
+		const path = join(tempDir(), "openhammer.sock");
+
+		const handle = await startStatusSocket(recorder, { path, warn: () => {} });
+		expect(handle).not.toBeNull();
+		if (handle === null) return;
+
+		const collector = collectLines(path);
+		try {
+			await collector.waitFor(1); // only the historical event — no vm-state line
+			expect(collector.lines).toHaveLength(1);
+			expect(JSON.parse(collector.lines[0] ?? "{}")).toMatchObject({ tool: "bash" });
 		} finally {
 			collector.close();
 		}

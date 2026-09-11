@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { RequestEvent } from "../mcp/telemetry.ts";
+import { parseVmStateLine, type VmStateLine } from "../observability/status-socket.ts";
 import {
 	formatBytes,
 	formatClientHeader,
 	formatDuration,
 	formatEvent,
 	formatStatusSuffix,
+	formatVmState,
 	isoTimeOf,
 	MonitorState,
 	parseEventLine,
@@ -154,5 +156,93 @@ describe("MonitorState", () => {
 		const stats = s.stats();
 		expect(stats).toContainEqual({ client: "a", calls: 2, lastSeen: "t2" });
 		expect(stats).toContainEqual({ client: "b", calls: 1, lastSeen: "t3" });
+	});
+});
+
+/** A minimal valid vm-state line for the vm-row tests (spec 27h). */
+function vmState(over: Partial<VmStateLine> = {}): VmStateLine {
+	return {
+		type: "vm-state",
+		state: "ready",
+		sessionId: "vm-20260911T101112Z-ab",
+		phase: null,
+		sshPort: 42255,
+		error: null,
+		...over,
+	};
+}
+
+describe("vm-state row (spec 27h)", () => {
+	it("parses a well-formed vm-state line", () => {
+		expect(parseVmStateLine(JSON.stringify(vmState()))).toEqual(vmState());
+	});
+
+	it("returns null for blank / malformed / wrong-shape lines", () => {
+		expect(parseVmStateLine("")).toBeNull();
+		expect(parseVmStateLine("{not json")).toBeNull();
+		// Missing fields (only the type) → rejected:
+		expect(parseVmStateLine(JSON.stringify({ type: "vm-state", state: "ready" }))).toBeNull();
+		// An out-of-union state → rejected:
+		expect(
+			parseVmStateLine(
+				JSON.stringify({
+					type: "vm-state",
+					state: "FROBNICATED",
+					sessionId: null,
+					phase: null,
+					sshPort: null,
+					error: null,
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("additive-parse regression: an unknown future line type parses to null — each parser skips the kinds it doesn't own, the feed never aborts", () => {
+		// The spec-28 matrix's other half: a line kind this build doesn't know is
+		// SKIPPED (null), never mis-rendered as an event or a vm row, never a throw.
+		expect(parseEventLine(JSON.stringify({ type: "future-thing" }))).toBeNull();
+		expect(parseVmStateLine(JSON.stringify({ type: "future-thing" }))).toBeNull();
+		// The two known kinds ignore each other too:
+		expect(parseEventLine(JSON.stringify(vmState()))).toBeNull(); // vm-state is not an event
+		expect(parseVmStateLine(JSON.stringify(event()))).toBeNull(); // an event is not vm-state
+	});
+
+	it("renders the ready row with session + ssh port", () => {
+		expect(formatVmState(vmState())).toBe("VM  ready · session vm-20260911T101112Z-ab · ssh :42255");
+	});
+
+	it("renders ready without the ssh clause while the port is unknown", () => {
+		expect(formatVmState(vmState({ sshPort: null }))).toBe("VM  ready · session vm-20260911T101112Z-ab");
+		expect(formatVmState(vmState({ sshPort: null, sessionId: null }))).toBe("VM  ready · session (none)");
+	});
+
+	it("renders the booting row with its boot phase", () => {
+		expect(formatVmState(vmState({ state: "booting", phase: "ssh", sessionId: null, sshPort: null }))).toBe(
+			"VM  booting (phase ssh)",
+		);
+		expect(formatVmState(vmState({ state: "booting", phase: null, sessionId: null, sshPort: null }))).toBe(
+			"VM  booting",
+		);
+	});
+
+	it("renders the failed row with the error flattened to one line", () => {
+		expect(
+			formatVmState(
+				vmState({
+					state: "failed",
+					sessionId: null,
+					sshPort: null,
+					error: "sandbox boot failed: no valid golden image\n— run: openhammer vm install",
+				}),
+			),
+		).toBe("VM  failed — sandbox boot failed: no valid golden image — run: openhammer vm install");
+		expect(formatVmState(vmState({ state: "failed", sessionId: null, sshPort: null, error: null }))).toBe(
+			"VM  failed",
+		);
+	});
+
+	it("renders stopped and off as bare rows", () => {
+		expect(formatVmState(vmState({ state: "stopped" }))).toBe("VM  stopped");
+		expect(formatVmState(vmState({ state: "off", sessionId: null, sshPort: null }))).toBe("VM  off");
 	});
 });
