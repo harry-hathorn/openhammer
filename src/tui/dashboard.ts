@@ -26,6 +26,24 @@
  * `onQuit` runs best-effort (stops the server child). A thrown `onQuit` is caught
  * + logged to stderr — the terminal is already restored, so the message surfaces
  * in the operator's shell rather than corrupting the dashboard screen.
+ *
+ * **The owned/unowned wiring state (spec 28, box 28c — recorded, not hidden):**
+ * NO production path today runs the dashboard and the `VmService` in ONE process.
+ * Bare `openhammer` in a terminal opens the dashboard, which starts the server as
+ * a CHILD process (`server-control.ts`'s `ensureServer` → `node dist/main.js`);
+ * `openhammer start` / the headless default run `main()` in-process but with NO
+ * dashboard. So `deps.vmService` is never wired in production and the Sandbox
+ * actions that gate on it (Stop / Restart / Serial tail / Install sandbox) are
+ * hint-only for v1 — activations surface {@link VM_UNOWNED_HINT}, never a dead
+ * button. Spec-28 follow-up: an in-process dashboard+server entry would thread
+ * `vmService` and light every action up at once (the 28h walkthrough gate
+ * exercises whatever exists by then). Restart-to-apply (matrix row 3) is the
+ * EXCEPTION — it rides `deps.restartServer` (`ServerControl.restart`, the child
+ * re-spawn whose fresh boot re-runs preflight + the eager VM boot), which the CLI
+ * wiring provides in production; a spawn-owned dashboard therefore applies vm
+ * settings live, an attached one gets the restart refusal surfaced + the
+ * "restart openhammer to apply" hint, and an unwired (hermetic) dashboard gets
+ * the hint alone.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -40,24 +58,26 @@ import {
 	setOperatorLogin,
 } from "../auth/oauth/clients.ts";
 import { credentialsPath } from "../config/credentials.ts";
+import { type ConfigSection, vmSection } from "../config/sections.ts";
 import { type Settings, saveSettings, settingsPath } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine } from "../observability/status-socket.ts";
 import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { VmBootGate } from "../vm/boot-backend.ts";
+import { runInstall } from "../vm/provision/install.ts";
 import { resolveVmDirs } from "../vm/session.ts";
 import type { BannerStream } from "./banner.ts";
 import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
-import { type DashboardActions, DashboardRoot } from "./dashboard/root.ts";
+import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
-import type { SerialSource } from "./dashboard/view.ts";
+import { hasPublicChannel, type SerialSource, vmSettingsEqual } from "./dashboard/view.ts";
 import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
-import { setSection } from "./wizards/section.ts";
+import { type SetSectionResult, setSection } from "./wizards/section.ts";
 
 export { DASHBOARD_MONITOR_LIMIT } from "./dashboard/store.ts";
 export type { IssuedClient };
@@ -113,12 +133,15 @@ export interface DashboardDeps {
 	onQuit?: () => void | Promise<void>;
 	/**
 	 * Restart the server child so a fresh boot picks up a config change the running
-	 * child resolved once at boot — chiefly a new `defaultChannel` set from the
-	 * dashboard (so adding a channel launches it live, no manual relaunch). The CLI
-	 * layer wires this to {@link ServerControl.restart}; the dashboard calls it only
-	 * when a mutation changes `defaultChannel` (a non-default add does not drop the
-	 * active tunnel). Omit for a hermetic dashboard with no server (tests) — the
-	 * actions then persist the change but skip the restart.
+	 * child resolved once at boot — a new `defaultChannel` set from the dashboard
+	 * (so adding a channel launches it live, no manual relaunch), and since box 28c
+	 * any vm settings write (spec 28, matrix row 3: the child's fresh boot re-runs
+	 * preflight + the eager VM boot, which IS the vm apply path). The CLI layer
+	 * wires this to {@link ServerControl.restart}; when it errs (an attached server
+	 * the dashboard did not start) the refusal surfaces and the change is marked
+	 * pending instead. Omit for a hermetic dashboard with no server (tests) — vm
+	 * writes then persist the change and set the apply-on-restart pending flag
+	 * (the "restart openhammer to apply" hint), never silently dropping it.
 	 */
 	restartServer?: () => Promise<Result<void, Error>>;
 	/**
@@ -186,7 +209,7 @@ export async function runDashboard(deps: DashboardDeps): Promise<void> {
 	// holder). Captured in a local so `start`/`stop` see a defined `DashboardRenderer`
 	// (the holder stays `| undefined` for the actions, which `?.` it).
 	const ctx: { renderer: DashboardRenderer | undefined } = { renderer: undefined };
-	const actions = buildActions(ctx, store, deps, credPath, persist, io);
+	const actions = buildActions(ctx, store, deps, credPath, persist, io, terminal);
 	const root = new DashboardRoot({ store, style, actions, getRows: () => terminal.rows });
 	const renderer = createDashboardRenderer({
 		root,
@@ -284,6 +307,20 @@ export const VM_IN_FLIGHT_HINT = "a sandbox action is already in flight — wait
 export const SANDBOX_STOP_CONFIRM_MESSAGE =
 	"Stop the sandbox now? The boot-scoped mode re-boots it on the next server start — the lasting stop is mode off + restart.";
 
+/**
+ * The row-1 mode-select confirm's modal message (spec 28, matrix row 1 — the
+ * headline interplay): switching `vm`/`agent` → `off` while a public channel is
+ * configured must warn, verbatim, that "on restart your HOST filesystem becomes
+ * the publicly exposed surface". The predicate deciding WHEN this fires is
+ * `hasPublicChannel` (view.ts — documented there); `off → vm` needs NO warning
+ * (containment only increases). Declining keeps the mode: nothing is persisted.
+ * Lives in the dashboard wiring (not `vmSection.write`) because a confirm needs
+ * io — a sync write cannot ask; see the sections.ts header for the placement
+ * rationale + the bare-CLI gap.
+ */
+export const VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE =
+	"Boot mode off while a public channel is configured — on restart your HOST filesystem becomes the publicly exposed surface. Save anyway?";
+
 /** The session dir's serial-log file name — service.ts's SESSION_SERIAL_NAME, restated (not exported there). */
 const SERIAL_LOG_FILE = "serial.log";
 
@@ -314,26 +351,37 @@ export interface SandboxActionDeps {
 	readonly readSerial?: (sessionId: string) => Promise<Result<SerialSource, Error>>;
 	/** The live store — the serial read's sessionId comes from the latest vm-state line. */
 	readonly store: Pick<DashboardStore, "latestVmState">;
+	/**
+	 * The golden-build seam (spec 28, box 28c): launches 26c's {@link runInstall} —
+	 * the session-kept, evidence-throwing install runner. `log` receives the run's
+	 * progress lines (the dashboard passes a discard sink: the spinner is the live
+	 * surface and the session's `install.log` holds the lines). Default: the real
+	 * `runInstall` with default options (the 45-minute budget etc.).
+	 */
+	readonly install?: (log: (line: string) => void) => Promise<InstallOutcome>;
 }
 
 /**
- * The Sandbox actions' core (spec 28, box 28b): the owned-server gate, the UI
- * single-flight guard, and the service calls. Exported so the hermetic trio can
- * drive them on a scripted gate (the buildActions wiring wraps Stop's `io.confirm`
- * modal around this and honors the per-action overrides).
+ * The Sandbox actions' core (spec 28, box 28b; install added in 28c): the
+ * owned-server gate, the UI single-flight guard, and the service calls. Exported
+ * so the hermetic trio can drive them on a scripted gate (the buildActions wiring
+ * wraps Stop's `io.confirm` modal around this and honors the per-action overrides).
  *
  * Semantics: `stopSandbox` = `service.stop()` — the clean ACPI powerdown + stop
  * ladder + persist teardown (27e). `restartSandbox` = `await service.stop()` then
  * `void service.start()` — a fresh boot per the persist rules (retain reuses the
- * overlay, discard is fresh; the service owns those semantics). Surfaced results
- * flow through the vm-state line (service transitions → status socket → socket
- * client → store, 27h), so no direct render poke exists or is needed. The
+ * overlay, discard is fresh; the service owns those semantics). `installSandbox`
+ * runs the install seam to completion and reports the session dir. Surfaced
+ * results flow through the vm-state line (service transitions → status socket →
+ * socket client → store, 27h), so no direct render poke exists or is needed. The
  * in-flight guard covers only the action's awaited window; the service is the
- * authority beyond it (`start()` is idempotent while booting).
+ * authority beyond it (`start()` is idempotent while booting), and for install
+ * `runInstall`'s own single-flight scan (26c: refuses while a session is live —
+ * matrix row 5) is the authority.
  */
 export function createSandboxActions(
 	deps: SandboxActionDeps,
-): Pick<DashboardActions, "stopSandbox" | "restartSandbox" | "readSerial"> {
+): Pick<DashboardActions, "stopSandbox" | "restartSandbox" | "readSerial" | "installSandbox"> {
 	const owned = (): Result<VmBootGate, Error> => {
 		const gate = deps.vmService?.() ?? null;
 		return gate === null ? err(new Error(VM_UNOWNED_HINT)) : ok(gate);
@@ -371,6 +419,29 @@ export function createSandboxActions(
 		}
 	};
 
+	const installSandbox: DashboardActions["installSandbox"] = async () => {
+		// The owned/unowned gate, mirrored from Stop/Restart (box 28b): install needs
+		// no service handle for its WORK — it writes the LOCAL vm tree — but an
+		// unowned dashboard is a view over another process's server, whose vm tree is
+		// not necessarily this one; one ownership model, one hint (the module header
+		// records that v1 production is always unowned here). A live session makes a
+		// concurrent install a fight over KVM/RAM — runInstall's own single-flight
+		// scan refuses that with its actionable evidence (matrix row 5).
+		const gate = owned();
+		if (!gate.ok) return gate;
+		if (inFlight) return err(new Error(VM_IN_FLIGHT_HINT));
+		inFlight = true;
+		try {
+			const install = deps.install ?? ((log: (line: string) => void) => runInstall({ log }, {}));
+			const result = await install(() => {}); // progress: the spinner (wiring) is the live surface
+			return ok({ sessionDir: result.sessionDir });
+		} catch (e) {
+			return err(e instanceof Error ? e : new Error(String(e)));
+		} finally {
+			inFlight = false;
+		}
+	};
+
 	const readSerial: DashboardActions["readSerial"] = async () => {
 		const gate = owned();
 		if (!gate.ok) return err(gate.error); // same hint — a remote server's serial file isn't here
@@ -380,7 +451,105 @@ export function createSandboxActions(
 		return read(sessionId);
 	};
 
-	return { stopSandbox, restartSandbox, readSerial };
+	return { stopSandbox, restartSandbox, readSerial, installSandbox };
+}
+
+// ---- the settings actions + the mode-select guards (spec 28, box 28c) ------------
+
+/**
+ * Deps for {@link createSettingsActions} — the exported, unit-testable core the
+ * buildActions wiring wraps (the {@link createSandboxActions} precedent). The
+ * io-bearing pieces (the wizard, the confirm modal, the restart spinner) arrive
+ * as seams so the guards are hermetic-testable; the wiring keeps the terminals.
+ */
+export interface SettingsActionsDeps {
+	/** Persist the doc (the runDashboard `persist` seam — saveSettings in production). */
+	readonly persist: (s: Settings) => void;
+	/** The live store: reads `settings`, applies the next doc, holds the row-3 pending flag. */
+	readonly store: Pick<DashboardStore, "settings" | "setSettings" | "setVmApplyPending">;
+	/** The row-1 confirm modal (the wiring wraps `io.confirm` + the suspend/resume pair). */
+	readonly confirm: (message: string) => Promise<boolean | null>;
+	/**
+	 * The section wizard runner. `sections` is `undefined` for Edit settings (the
+	 * picker offers every registered section) or exactly `[vmSection]` for the
+	 * Sandbox Configure jump (the `vm` section preselected — same engine, no drift).
+	 */
+	readonly runSectionWizard: (before: Settings, sections: ConfigSection[] | undefined) => Promise<SetSectionResult>;
+	/** The channel live-apply (the existing defaultChannel-changed restart; behavior unchanged). */
+	readonly restartIfDefaultChanged: (before: Settings, after: Settings) => Promise<void>;
+	/**
+	 * The row-3 restart seam ({@link DashboardDeps.restartServer} — the wiring wraps
+	 * it in the spinner). Absent → unowned: the write persists and the pending flag
+	 * is set (the apply-on-restart hint), never a dead button.
+	 */
+	readonly restartServer?: () => Promise<Result<void, Error>>;
+}
+
+/** The settings-mutating actions the root calls ({@link DashboardActions}' shape). */
+export interface SettingsActions {
+	/** The Settings screen's wizard: the section picker, then the guards below. */
+	editSettings(): Promise<Result<Settings, Error> | null>;
+	/** The Sandbox Configure jump: the `vm` section preselected, then the guards below. */
+	configureVm(): Promise<Result<Settings, Error> | null>;
+}
+
+/**
+ * The settings actions' core (spec 28, box 28c) — the guard + apply pipeline both
+ * dashboard mode-select surfaces share:
+ *
+ * 1. Run the section wizard. A cancel/`null` or an `err` passes through untouched;
+ *    the no-golden guard (matrix row 2) needs NO code here — it lives in
+ *    `vmSection.write` (config/sections.ts), whose throw propagates to the root's
+ *    activation catch and flashes the actionable message. One guard, every path.
+ * 2. Row 1 (the headline warning): `vm`/`agent` → `off` with a public channel
+ *    configured (`hasPublicChannel`, view.ts) asks ONE confirm with
+ *    {@link VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE}; anything but an explicit
+ *    `true` (No, Esc, abort) cancels the whole apply — nothing is persisted, the
+ *    mode is kept. `off` → `vm`/`agent` never asks (containment only increases).
+ * 3. Persist + adopt the new doc.
+ * 4. The channel live-apply (`restartIfDefaultChanged` — unchanged behavior).
+ * 5. Row 3 (restart-to-apply): a write that touched the vm section restarts the
+ *    server through `restartServer` when wired; the pending flag records the
+ *    honest outcome (set when unwired or the restart failed, cleared on success)
+ *    so the flash + the Sandbox header note surface the apply-on-restart affordance.
+ */
+export function createSettingsActions(deps: SettingsActionsDeps): SettingsActions {
+	const apply = async (
+		run: (before: Settings) => Promise<SetSectionResult>,
+	): Promise<Result<Settings, Error> | null> => {
+		const before = deps.store.settings;
+		const result = await run(before);
+		if (result === null || !result.ok) {
+			return result; // cancelled (silent) / the guard threw or write errored (surfaced by the caller)
+		}
+		const after = result.value;
+		// Row 1: the dangerous REVERSE transition only — vm/agent → off exposes the
+		// HOST filesystem publicly on restart when a channel forwards to this server.
+		const droppedToOff = before.vm.mode !== "off" && after.vm.mode === "off";
+		if (droppedToOff && hasPublicChannel(after)) {
+			const confirmed = await deps.confirm(VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE);
+			if (confirmed !== true) {
+				return null; // declined — the mode is kept, nothing persisted (the modal idiom)
+			}
+		}
+		deps.persist(after);
+		deps.store.setSettings(after);
+		await deps.restartIfDefaultChanged(before, after);
+		if (!vmSettingsEqual(before.vm, after.vm)) {
+			const restart = deps.restartServer;
+			if (restart === undefined) {
+				deps.store.setVmApplyPending(true); // unowned — saved; applies at the next `openhammer` restart
+			} else {
+				const r = await restart();
+				deps.store.setVmApplyPending(!r.ok); // a failed restart leaves the change pending (honest)
+			}
+		}
+		return ok(after);
+	};
+	return {
+		editSettings: () => apply((before) => deps.runSectionWizard(before, undefined)),
+		configureVm: () => apply((before) => deps.runSectionWizard(before, [vmSection])),
+	};
 }
 
 /**
@@ -399,6 +568,7 @@ function buildActions(
 	credPath: string,
 	persist: (s: Settings) => void,
 	io: PromptIo,
+	terminal: Terminal,
 ): DashboardActions {
 	const overrides = deps.actions ?? {};
 
@@ -450,18 +620,35 @@ function buildActions(
 			return result;
 		});
 
-	const editSettingsAction: DashboardActions["editSettings"] =
-		overrides.editSettings ??
-		(async () => {
-			const before = store.settings;
-			const result = await withModal(() => setSection(before, { io, stream: silentStream }));
-			if (result?.ok) {
-				persist(result.value);
-				store.setSettings(result.value);
-				await restartIfDefaultChanged(before, result.value);
-			}
-			return result;
-		});
+	// The settings actions' guard/apply core (spec 28, box 28c): the row-1 confirm,
+	// the row-3 restart/pending bookkeeping, and the Configure jump's vm-section
+	// preselection — BOTH dashboard mode-select surfaces (Settings → Edit settings,
+	// Sandbox → Configure) ride the same guarded pipeline; only the wizard's section
+	// selection differs (the picker vs the `vm` section preselected). The io-bearing
+	// seams keep their modals/spinners on the shared terminal (which is why the core
+	// stays bare and the wiring dresses it).
+	const restartServerSeam = deps.restartServer;
+	const settingsCore = createSettingsActions({
+		persist,
+		store,
+		confirm: (message) => withModal(() => io.confirm({ message })),
+		runSectionWizard: (before, sections) =>
+			withModal(() => setSection(before, { io, stream: silentStream, sections })),
+		restartIfDefaultChanged,
+		restartServer: restartServerSeam
+			? (): Promise<Result<void, Error>> =>
+					withModal(() =>
+						runSpinner(
+							"Restarting server to apply the sandbox settings…",
+							() => restartServerSeam(),
+							(r) => (r.ok ? "server restarted" : `restart failed: ${r.error.message}`),
+							{ terminal },
+						),
+					)
+			: undefined,
+	});
+	const editSettingsAction: DashboardActions["editSettings"] = overrides.editSettings ?? settingsCore.editSettings;
+	const configureVmAction: DashboardActions["configureVm"] = overrides.configureVm ?? settingsCore.configureVm;
 
 	const issueClientAction: DashboardActions["issueClient"] =
 		overrides.issueClient ??
@@ -550,11 +737,12 @@ function buildActions(
 			return ok(undefined);
 		});
 
-	// The Sandbox actions (spec 28, box 28b): the exported core carries the
-	// owned-gate + single-flight + service calls; the wiring adds Stop's one
+	// The Sandbox actions (spec 28, box 28b + 28c): the exported core carries the
+	// owned-gate + single-flight + service/install calls; the wiring adds Stop's one
 	// confirmation step — the dashboard's confirm idiom (the `io.confirm` primitive
 	// run as a modal on the shared terminal, the setLogin prompts' flow). Declined
-	// or aborted → `null` (the cancelled-modal idiom: silent).
+	// or aborted → `null` (the cancelled-modal idiom: silent). A successful restart
+	// clears the row-3 pending flag (a fresh boot applied every saved vm change).
 	const sandbox = createSandboxActions({ vmService: deps.vmService, readSerial: deps.readSerial, store });
 	const stopSandboxAction: DashboardActions["stopSandbox"] =
 		overrides.stopSandbox ??
@@ -563,8 +751,25 @@ function buildActions(
 			if (confirmed !== true) return null;
 			return sandbox.stopSandbox();
 		});
-	const restartSandboxAction: DashboardActions["restartSandbox"] = overrides.restartSandbox ?? sandbox.restartSandbox;
+	const restartSandboxAction: DashboardActions["restartSandbox"] =
+		overrides.restartSandbox ??
+		(async () => {
+			const result = await sandbox.restartSandbox();
+			if (result?.ok) store.setVmApplyPending(false); // a fresh boot applies every saved vm change
+			return result;
+		});
 	const readSerialAction: DashboardActions["readSerial"] = overrides.readSerial ?? sandbox.readSerial;
+	const installSandboxAction: DashboardActions["installSandbox"] =
+		overrides.installSandbox ??
+		(async () =>
+			await withModal(() =>
+				runSpinner(
+					"Installing the sandbox image — this takes minutes; the run log lands in the session dir…",
+					() => sandbox.installSandbox(),
+					(r) => (r?.ok ? "install complete" : "install failed"),
+					{ terminal },
+				),
+			));
 
 	// `quit` is assigned by runDashboard (it owns the lifecycle/`onQuit`); a placeholder
 	// here satisfies the interface so the root can be constructed before that wiring.
@@ -580,6 +785,8 @@ function buildActions(
 		stopSandbox: stopSandboxAction,
 		restartSandbox: restartSandboxAction,
 		readSerial: readSerialAction,
+		configureVm: configureVmAction,
+		installSandbox: installSandboxAction,
 		quit: () => {},
 	};
 	return actions;

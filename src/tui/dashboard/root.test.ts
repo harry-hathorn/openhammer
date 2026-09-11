@@ -5,9 +5,9 @@ import { defaultVmSettings } from "../../config/settings.ts";
 import { err, ok, type Result } from "../../tools/result.ts";
 import { createSandboxActions, VM_UNOWNED_HINT } from "../dashboard.ts";
 import { createStyle } from "../style.ts";
-import { type DashboardActions, DashboardRoot } from "./root.ts";
+import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./root.ts";
 import { DashboardStore } from "./store.ts";
-import type { SerialSource } from "./view.ts";
+import { type SerialSource, VM_APPLY_HINT } from "./view.ts";
 
 // Raw pi-tui key sequences (see packages/tui/src/keys.ts).
 const DOWN = "\x1b[B";
@@ -69,6 +69,14 @@ function fakeActions(log: string[]): DashboardActions {
 		readSerial: async () => {
 			log.push("readSerial");
 			return ok({ content: "boot line one\nboot line two\n", totalBytes: 28 }) as Result<SerialSource, Error>;
+		},
+		configureVm: async () => {
+			log.push("configureVm");
+			return ok(seed()) as Result<Settings, Error>;
+		},
+		installSandbox: async () => {
+			log.push("installSandbox");
+			return ok({ sessionDir: "/h/.openhammer/vm/sessions/build-1" }) as Result<InstallOutcome, Error>;
 		},
 		quit: () => log.push("quit"),
 	};
@@ -303,9 +311,10 @@ function vmRooted(
 	log: string[],
 	mode: "off" | "vm",
 	actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+	opts: { hasGolden?: boolean } = {},
 ): DashboardRoot {
 	const store = new DashboardStore(
-		{ env: { MCP_ROOT_DIR: "/srv/guest-work" } },
+		{ env: { MCP_ROOT_DIR: "/srv/guest-work" }, goldenExists: () => opts.hasGolden ?? true },
 		{
 			version: 1,
 			channels: [],
@@ -359,25 +368,31 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 	async function sandboxed(
 		log: string[],
 		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+		opts: { hasGolden?: boolean } = {},
 	): Promise<DashboardRoot> {
-		const root = vmRooted(log, "vm", actionsOver);
+		const root = vmRooted(log, "vm", actionsOver, opts);
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
 		return root;
 	}
 
-	it("the screen lists Stop / Restart / Serial tail / Back, the stop subtitle carrying the re-boot semantics", async () => {
+	it("the screen lists Stop / Restart / Configure / Serial tail / Back — Install only with no golden", async () => {
 		// Rendered wide (200): renderList truncates each row to the width, and the stop
 		// subtitle only fits its full semantics text on a wide terminal — at 80 the
 		// first clause ("power down now — the boot-scoped mode re-boots…") is what shows.
 		const lines = (await sandboxed([])).render(200);
 		expect(lines.some((l) => l.includes("Stop sandbox…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Restart sandbox…"))).toBe(true);
+		expect(lines.some((l) => l.includes("Configure…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Serial tail"))).toBe(true);
 		expect(lines.some((l) => l.includes("Back"))).toBe(true);
 		expect(lines.some((l) => l.includes("re-boots the sandbox on the next server start"))).toBe(true);
 		expect(lines.some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
+		expect(lines.some((l) => l.includes("Install sandbox…"))).toBe(false); // a golden exists — HIDDEN, not disabled
+
+		const goldenless = (await sandboxed([], undefined, { hasGolden: false })).render(200);
+		expect(goldenless.some((l) => l.includes("Install sandbox…"))).toBe(true);
 	});
 
 	it("enter on Stop runs stopSandbox once and flashes the lasting-stop semantics (matrix row 4)", async () => {
@@ -404,7 +419,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		const root = await sandboxed(log);
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER); // focus 2 = Serial tail
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 3 = Serial tail (Configure joined at focus 2, box 28c)
 		await flushActions();
 		expect(log).toEqual(["readSerial"]);
 		expect(root.screen).toEqual({ kind: "serial" });
@@ -425,7 +441,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		}));
 		root.handleInput(DOWN);
 		root.handleInput(DOWN);
-		root.handleInput(ENTER);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 3 = Serial tail
 		await flushActions();
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
 		expect(root.render(80).some((l) => l.includes("no serial yet"))).toBe(true);
@@ -438,5 +455,114 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		await flushActions();
 		expect(log).toEqual([]); // the fake never ran — the wired default gated first
 		expect(root.render(80).some((l) => l.includes(VM_UNOWNED_HINT))).toBe(true);
+	});
+});
+
+describe("DashboardRoot — Configure, Install, and the apply-on-restart affordance (spec 28, box 28c)", () => {
+	/** Drill into the vm-mode Sandbox screen (menu → 6 downs → enter) — the box-28b helper, golden-aware. */
+	async function sandboxed(
+		log: string[],
+		actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
+		opts: { hasGolden?: boolean } = {},
+	): Promise<DashboardRoot> {
+		const root = vmRooted(log, "vm", actionsOver, opts);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		return root;
+	}
+
+	it("enter on Configure runs configureVm and flashes the settings success", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log);
+		root.handleInput(DOWN);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // focus 2 = Configure
+		await flushActions();
+		expect(log).toEqual(["configureVm"]);
+		expect(root.render(80).some((l) => l.includes("Settings updated."))).toBe(true);
+	});
+
+	it("enter on Install (no golden) runs installSandbox and flashes the completion + the onboarding next step", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(
+			log,
+			() => ({
+				installSandbox: async () =>
+					ok({ sessionDir: "/h/.openhammer/vm/sessions/build-9" }) as Result<InstallOutcome, Error>,
+			}),
+			{ hasGolden: false },
+		);
+		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install (no golden — the row exists)
+		root.handleInput(ENTER);
+		await flushActions();
+		const lines = root.render(80);
+		expect(lines.some((l) => l.includes("Install complete — session /h/.openhammer/vm/sessions/build-9"))).toBe(true);
+		expect(lines.some((l) => l.includes("Next: Configure → set the boot mode, then restart"))).toBe(true);
+	});
+
+	it("a failed install flashes the runner's actionable error inline", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(
+			log,
+			() => ({
+				installSandbox: async () => err(new Error("vm install: gate failed")) as Result<InstallOutcome, Error>,
+			}),
+			{ hasGolden: false },
+		);
+		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // focus 4 = Install
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(root.render(80).some((l) => l.includes("vm install: gate failed"))).toBe(true);
+	});
+
+	it("a vm write left unapplied flashes the apply-on-restart hint instead of the generic success (row 3)", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm", (store) => ({
+			editSettings: async () => {
+				// The write must DIFFER from the store's vm section (memory 4096 → 8192) —
+				// runAction scopes the hint to writes that actually touched vm fields.
+				const next: Settings = { ...seed(), vm: { ...defaultVmSettings(), mode: "vm", memoryMb: 8192 } };
+				store.setSettings(next);
+				store.setVmApplyPending(true);
+				return ok(next) as Result<Settings, Error>;
+			},
+		}));
+		for (let i = 0; i < 4; i++) root.handleInput(DOWN); // -> Settings
+		root.handleInput(ENTER);
+		root.handleInput(ENTER); // Edit settings…
+		await flushActions();
+		expect(root.render(80).some((l) => l.includes(VM_APPLY_HINT))).toBe(true);
+	});
+
+	it("a vm write applied live flashes the generic success (no stale hint)", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm", (store) => ({
+			editSettings: async () => {
+				const next: Settings = { ...seed(), vm: { ...defaultVmSettings(), mode: "vm", memoryMb: 8192 } };
+				store.setSettings(next);
+				store.setVmApplyPending(false);
+				return ok(next) as Result<Settings, Error>;
+			},
+		}));
+		for (let i = 0; i < 4; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER);
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(root.render(80).some((l) => l.includes("Settings updated."))).toBe(true);
+	});
+
+	it("a pending vm change renders the apply-on-restart note on the Sandbox header (the row-3 affordance)", async () => {
+		const log: string[] = [];
+		let storeRef: DashboardStore | undefined;
+		const root = vmRooted(log, "vm", (store) => {
+			storeRef = store;
+			return {};
+		});
+		storeRef?.setVmApplyPending(true);
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER); // -> Sandbox
+		await flushActions();
+		expect(root.render(80).some((l) => l.includes(`note: ${VM_APPLY_HINT}`))).toBe(true);
 	});
 });

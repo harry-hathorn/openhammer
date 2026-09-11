@@ -8,6 +8,7 @@ import {
 	channelDetailRows,
 	channelRows,
 	clientRows,
+	hasPublicChannel,
 	monitorRows,
 	SERIAL_TAIL_LINES,
 	sandboxEntryVisible,
@@ -18,6 +19,8 @@ import {
 	serialTailOf,
 	settingsRows,
 	statusRows,
+	VM_APPLY_HINT,
+	vmSettingsEqual,
 } from "./view.ts";
 
 const ch = (over: Partial<ChannelEntry> = {}): ChannelEntry => ({
@@ -266,5 +269,69 @@ describe("view — serial tail (spec 28, box 28b)", () => {
 		expect(serialTailNote(serialTailOf("one\n", 4))).toBe(
 			"serial.log — 1 line · 4B total · read-only snapshot (not live)",
 		);
+	});
+});
+
+/** Settings with just the channel list varied (the guard predicates' subject). */
+function settingsWithChannels(channels: ChannelEntry[]): Settings {
+	return { version: 1, channels, defaultChannel: null, mcp: { allowedClients: [] }, vm: defaultVmSettings() };
+}
+
+describe("view — hasPublicChannel (the row-1 predicate, spec 28 box 28c)", () => {
+	it("a live channel is ALWAYS public (a spawned tunnel is never loopback by design)", () => {
+		expect(hasPublicChannel(settingsWithChannels([ch({ id: "a", kind: "ngrok", mode: "live" })]))).toBe(true);
+		expect(hasPublicChannel(settingsWithChannels([ch({ id: "a", kind: "cloudflare", mode: "live" })]))).toBe(true);
+	});
+
+	it("a static channel is public iff its declared publicUrl is NOT loopback", () => {
+		const staticUrl = (publicUrl: string): ChannelEntry =>
+			ch({ id: "s", kind: "static-url", mode: "static", options: { publicUrl } });
+		expect(hasPublicChannel(settingsWithChannels([staticUrl("https://tunnel.example.com")]))).toBe(true);
+		expect(hasPublicChannel(settingsWithChannels([staticUrl("http://127.0.0.1:3000")]))).toBe(false);
+		expect(hasPublicChannel(settingsWithChannels([staticUrl("http://localhost:3000/mcp")]))).toBe(false);
+		expect(hasPublicChannel(settingsWithChannels([staticUrl("http://[::1]:3000")]))).toBe(false);
+	});
+
+	it("a static channel with NO publicUrl resolves to no handle at boot — not public", () => {
+		expect(hasPublicChannel(settingsWithChannels([ch({ id: "s", mode: "static", options: {} })]))).toBe(false);
+	});
+
+	it("an unparseable declared URL warns (fail-safe toward the warning when loopback cannot be ruled out)", () => {
+		const unparseable = ch({ id: "s", mode: "static", options: { publicUrl: "not a url" } });
+		expect(hasPublicChannel(settingsWithChannels([unparseable]))).toBe(true);
+	});
+
+	it("no channels at all → false", () => {
+		expect(hasPublicChannel(settingsWithChannels([]))).toBe(false);
+	});
+});
+
+describe("view — vmSettingsEqual + the apply-on-restart affordance (row 3, box 28c)", () => {
+	it("vmSettingsEqual is field-wise — equal docs match, each field's change alone breaks the match", () => {
+		const a = defaultVmSettings();
+		expect(vmSettingsEqual(a, { ...a })).toBe(true);
+		expect(vmSettingsEqual(a, { ...a, mode: "vm" })).toBe(false);
+		expect(vmSettingsEqual(a, { ...a, memoryMb: 2048 })).toBe(false);
+		expect(vmSettingsEqual(a, { ...a, cpus: 2 })).toBe(false);
+		expect(vmSettingsEqual(a, { ...a, persist: "retain" })).toBe(false);
+		expect(vmSettingsEqual(a, { ...a, idleTimeoutMs: 5 })).toBe(false);
+		expect(vmSettingsEqual(a, { ...a, agentCmd: "codex" })).toBe(false);
+		expect(vmSettingsEqual(a, { ...a, secretsDir: "/s" })).toBe(false);
+	});
+
+	it("VM_APPLY_HINT carries the matrix-row-3 phrasing", () => {
+		expect(VM_APPLY_HINT).toBe("vm settings saved — restart openhammer to apply them");
+	});
+
+	it("sandboxHeaderRows appends the apply-on-restart note only while a change is pending", () => {
+		const row = sandboxStateRow(vmState());
+		expect(sandboxHeaderRows(vmState(), null)).toEqual([row]); // default: not pending
+		expect(sandboxHeaderRows(vmState(), null, false)).toEqual([row]);
+		expect(sandboxHeaderRows(vmState(), null, true)).toEqual([row, `note: ${VM_APPLY_HINT}`]);
+		expect(sandboxHeaderRows(vmState(), "/home/sandbox", true)).toEqual([
+			row,
+			"guest root: /home/sandbox",
+			`note: ${VM_APPLY_HINT}`,
+		]);
 	});
 });

@@ -238,12 +238,84 @@ export function sandboxStateRow(line: VmStateLine | null): string {
  * env) — the `guest root: <rootDir>` row surfacing `MCP_ROOT_DIR`'s guest
  * reinterpretation (the same value a boot resolves; the store computes it via
  * `resolveConfig`). `null` root (off mode / unresolvable) renders no root row.
+ * While a vm settings write is saved but not yet applied by a running server
+ * (matrix row 3), a `note:` row carries {@link VM_APPLY_HINT} — the
+ * apply-on-restart affordance, rendered for as long as the change is pending.
  * Pure.
  */
-export function sandboxHeaderRows(line: VmStateLine | null, guestRoot: string | null): string[] {
+export function sandboxHeaderRows(
+	line: VmStateLine | null,
+	guestRoot: string | null,
+	vmApplyPending = false,
+): string[] {
 	const rows = [sandboxStateRow(line)];
 	if (guestRoot !== null) rows.push(`guest root: ${guestRoot}`);
+	if (vmApplyPending) rows.push(`note: ${VM_APPLY_HINT}`);
 	return rows;
+}
+
+// ---- the vm mode-select guards + the apply-on-restart affordance (spec 28, box 28c) ----
+
+/**
+ * The row-3 hint (matrix row 3, restart-to-apply symmetry): a vm settings write
+ * that the running server has NOT picked up yet (the dashboard restarted nothing,
+ * or its restart attempt failed). Flashed once at write time and rendered as the
+ * Sandbox header's `note:` row for as long as the store's `vmApplyPending` holds.
+ */
+export const VM_APPLY_HINT = "vm settings saved — restart openhammer to apply them";
+
+/**
+ * Is ANY configured channel a PUBLIC exposure? The matrix-row-1 predicate behind
+ * the vm/agent → `off` warning. Exact predicate, over the settings doc only (the
+ * warning's premise is "on restart" — the NEXT boot could resolve any configured
+ * channel, so the operator's current default does not narrow it):
+ *
+ * - a `live` channel is ALWAYS public — ngrok/cloudflare/nginx spawn a tunnel
+ *   whose URL is discovered from the provider (never loopback by design);
+ * - a `static` channel is public iff it DECLARES a `publicUrl` that is not
+ *   loopback — the localhost-only static channel the spec excludes is one whose
+ *   publicUrl host is `localhost`, `127.0.0.1`, or `::1`;
+ * - a static channel with no declared `publicUrl` resolves to no handle at boot
+ *   (the graceful-absent path) — not public;
+ * - a declared URL that does not PARSE is treated as public — fail-safe toward
+ *   warning when exposure cannot be ruled out.
+ *
+ * Pure — a configured-channel fact, independent of live up/down state.
+ */
+export function hasPublicChannel(settings: Settings): boolean {
+	return settings.channels.some((channel) => {
+		if (channel.mode === "live") {
+			return true;
+		}
+		const declared = channel.options.publicUrl;
+		if (declared === undefined || declared.trim() === "") {
+			return false;
+		}
+		try {
+			const host = new URL(declared).hostname.toLowerCase();
+			return !(host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]");
+		} catch {
+			return true; // unparseable declared URL — cannot prove loopback, so warn
+		}
+	});
+}
+
+/**
+ * Field-wise equality of two {@link VmSettings} — did THIS write touch the vm
+ * section? Pure; used to scope the restart-to-apply affordance (row 3) to vm
+ * writes so an unrelated section edit never restarts the server or flashes the
+ * pending hint.
+ */
+export function vmSettingsEqual(a: VmSettings, b: VmSettings): boolean {
+	return (
+		a.mode === b.mode &&
+		a.memoryMb === b.memoryMb &&
+		a.cpus === b.cpus &&
+		a.persist === b.persist &&
+		a.idleTimeoutMs === b.idleTimeoutMs &&
+		a.agentCmd === b.agentCmd &&
+		a.secretsDir === b.secretsDir
+	);
 }
 
 // ---- the serial tail (spec 28, box 28b) -----------------------------------------

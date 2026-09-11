@@ -211,3 +211,32 @@ describe("DashboardStore — vm-state (spec 28)", () => {
 		expect(guestUser).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("DashboardStore — hasGolden + vmApplyPending (spec 28, box 28c)", () => {
+	it("hasGolden consults the injected probe once and memoizes (vmRoot's lazy-cache idiom)", () => {
+		let calls = 0;
+		const s = new DashboardStore({
+			goldenExists: () => {
+				calls += 1;
+				return true;
+			},
+		});
+		expect(s.hasGolden).toBe(true);
+		expect(s.hasGolden).toBe(true); // second read — cached
+		expect(calls).toBe(1);
+	});
+
+	it("hasGolden false is the Install row's precondition (no bootable golden)", () => {
+		const s = new DashboardStore({ goldenExists: () => false });
+		expect(s.hasGolden).toBe(false);
+	});
+
+	it("setVmApplyPending flips the saved-but-not-applied flag (the row-3 hint's source)", () => {
+		const s = new DashboardStore();
+		expect(s.vmApplyPending).toBe(false);
+		s.setVmApplyPending(true);
+		expect(s.vmApplyPending).toBe(true);
+		s.setVmApplyPending(false);
+		expect(s.vmApplyPending).toBe(false);
+	});
+});
