@@ -1,5 +1,6 @@
 /**
- * The Guest setup wizard (spec 28, tier (a)) — the `guest.json` build-config flow.
+ * The Guest setup wizards (spec 28) — tier (a), the `guest.json` build-config flow,
+ * and tier (b), the sandbox-secrets editor over the 0700 store.
  *
  * **Composition — not a `ConfigSection`.** The guest doc is a DIFFERENT STORE with a
  * different posture than the settings doc (26a: whole-doc granularity, an atomic 0600
@@ -9,6 +10,18 @@
  * The section-wizard shape — seed from the store → run → write through the store's
  * normalizer — is mirrored exactly, with `loadGuestConfig`/`saveGuestConfig` in the
  * places `section.read`/`section.write` + the CLI's `saveSettings` occupy there.
+ *
+ * **Tier (b) — the secrets editor ({@link runSecretsSetup})** keeps the same
+ * composition posture against a third store: 26a's `secrets.ts` (0700 dir, 0600
+ * files — the ONLY home credential material may live in). It is a looped
+ * menu editor beside the flat tier-(a) field walk (add/remove rows is not a fixed
+ * field list), driven by the same `io` primitives; the masking discipline is
+ * structural — the rendered model ({@link secretsModelLines}, the menu
+ * descriptions, the removal labels) carries KEYS and "set" states, never a stored
+ * VALUE, and a stored value only ever flows into `saveSecrets`. Matrix row 6
+ * (apply semantics) lives inside the flow: with a live session the editor
+ * PRECEDES with the applies-at-next-boot hint + a *Restart sandbox* shortcut that
+ * reuses the wired 28b action — never a silent no-op.
  *
  * **The save path funnels through the REAL normalize (the 27b vm-section precedent).**
  * Answers are first LOCALIZED against `normalizeGuestConfig` — each edited field is
@@ -38,6 +51,7 @@
  * injection (the `11a`/`13`/`17b`–`17k` precedent): io/stream/dirs/probe all default
  * to production and are overridden by the tests.
  */
+import { existsSync } from "node:fs";
 import { err, ok, type Result } from "../../tools/result.ts";
 import {
 	GUEST_AGENTS,
@@ -48,9 +62,16 @@ import {
 	saveGuestConfig,
 } from "../../vm/provision/guest-config.ts";
 import { newestGoldenId } from "../../vm/provision/install.ts";
+import {
+	loadSecrets,
+	normalizeSecrets,
+	type SecretFileMapping,
+	type SecretsStore,
+	saveSecrets,
+} from "../../vm/provision/secrets.ts";
 import { resolveVmDirs, type VmDirs } from "../../vm/session.ts";
 import type { BannerStream } from "../banner.ts";
-import { defaultIo } from "../prompts.ts";
+import { defaultIo, type SelectOption, withSession } from "../prompts.ts";
 import type { ConfigField } from "../schema.ts";
 import { runWizard, type WizardIo } from "../wizard.ts";
 
@@ -322,4 +343,349 @@ export async function runGuestSetup(deps: GuestSetupDeps = {}): Promise<GuestSet
 		return err(new Error(`cannot save the guest config: ${e instanceof Error ? e.message : String(e)}`));
 	}
 	return ok(parsed.value);
+}
+
+// ---- tier (b): the sandbox-secrets editor (spec 28, box 28f) ---------------------
+
+/** The secrets editor's title — the banner `withSession` frames the loop with. */
+export const SECRETS_SETUP_TITLE = "Sandbox secrets";
+
+/**
+ * The row-6 hint (spec 28's interaction matrix, row 6), verbatim semantics: edits
+ * land in the 0700 store and injection happens at session START, so while a
+ * session is live the flow PRECEDES the editor with this hint + a *Restart
+ * sandbox* shortcut — never a silent no-op. Exported so tests pin the surface.
+ */
+export const SECRETS_LIVE_HINT = "a sandbox session is live — these secrets apply at the next sandbox boot";
+
+/**
+ * The row-6 interstitial's two choices. The restart label deliberately mirrors
+ * `SANDBOX_RESTART_LABEL`'s wording (tui/dashboard/screens.ts): the shortcut IS
+ * that action — {@link SecretsSetupDeps.restartSandbox} carries the wired 28b
+ * action itself, so only the wording is restated (the wizards layer must not
+ * import the dashboard layer).
+ */
+export const SECRETS_EDIT_CHOICE = "Edit secrets";
+export const SECRETS_RESTART_CHOICE = "Restart sandbox…";
+
+// The 26a grammar, restated as the TUI's contract. src/vm/provision/secrets.ts is
+// UNTOUCHED — its rules are THE single validity source; these constants exist only
+// so the editor's errors can NAME the rule the operator broke, and every candidate
+// is re-gated through the REAL `normalizeSecrets` before any save, so a drift here
+// can never persist a shape the store rejects.
+
+/** 26a's env-key grammar (secrets.ts's ENV_KEY_PATTERN). */
+const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+
+/**
+ * 26a's forbidden characters in values and paths: newlines would corrupt the
+ * line-based env file, NUL would truncate C-string consumers.
+ */
+const FORBIDDEN_CHARS = /[\r\n\0]/;
+
+/**
+ * The 26a rejection for one env pair, localized for the editor: `null` when the
+ * pair is valid, else the message naming the exact rule it breaks (the key
+ * grammar / the line-based value rule). Pure — the flow surfaces it as the
+ * wizard's err and writes nothing (the tier-(a) invalid-answer posture).
+ */
+export function envPairError(key: string, value: string): string | null {
+	if (!ENV_KEY_PATTERN.test(key)) {
+		return `"${key}" is not a valid env key — use uppercase letters, digits, and underscores, starting with a letter or underscore`;
+	}
+	if (FORBIDDEN_CHARS.test(value)) {
+		return `the value for ${key} contains a newline or NUL — env values are single lines`;
+	}
+	return null;
+}
+
+/**
+ * The 26a rejection for one host→guest mapping against the current set: both
+ * paths absolute (leading `/`) with no newline/NUL (secrets.ts's
+ * `isAbsolutePath`), and the duplicate-guestPath rule — 26a's normalizeSecrets
+ * rejects the whole store because two mappings to one guest path would silently
+ * clobber at consumption (spec 29). `null` when the mapping is addable.
+ */
+export function fileMappingError(
+	hostPath: string,
+	guestPath: string,
+	existing: readonly SecretFileMapping[],
+): string | null {
+	for (const p of [hostPath, guestPath]) {
+		if (!p.startsWith("/") || FORBIDDEN_CHARS.test(p)) {
+			return `"${p}" is not an absolute path — it must start with "/" and hold no newline or NUL`;
+		}
+	}
+	if (existing.some((f) => f.guestPath === guestPath)) {
+		return `"${guestPath}" is already mapped — each guest path may be used once`;
+	}
+	return null;
+}
+
+/** One env key's masked row — the "set" state; the stored VALUE never renders. */
+export function envKeyLine(key: string): string {
+	return `${key} — set`;
+}
+
+/**
+ * One host→guest mapping's row. Existence on the host is checked SOFTLY via the
+ * `hostFileExists` probe (spec 26: a credential may be mapped before it exists;
+ * consumption checks at session start) — the note renders, nothing blocks.
+ */
+export function fileMapLine(mapping: SecretFileMapping, hostFileExists: (path: string) => boolean): string {
+	return `${mapping.hostPath} → ${mapping.guestPath}${hostFileExists(mapping.hostPath) ? "" : " (file missing on host)"}`;
+}
+
+/** The env half's one-line masked state ("none set" / "2 set (values hidden)") — the menu's descriptions. */
+export function envSummary(env: Record<string, string>): string {
+	const n = Object.keys(env).length;
+	if (n === 0) return "none set";
+	return n === 1 ? "1 set (value hidden)" : `${n} set (values hidden)`;
+}
+
+/** The files half's one-line masked state, with any missing-host-file count folded in. */
+export function fileSummary(files: readonly SecretFileMapping[], hostFileExists: (path: string) => boolean): string {
+	const n = files.length;
+	if (n === 0) return "none mapped";
+	const missing = files.filter((f) => !hostFileExists(f.hostPath)).length;
+	const base = n === 1 ? "1 mapped" : `${n} mapped`;
+	return missing > 0 ? `${base} — ${missing} missing on host` : base;
+}
+
+/**
+ * The editor's rendered model — the canonical masked render (the menu's row
+ * descriptions and removal labels are built from the same pieces). Keys,
+ * "set" states, path mappings, and the soft missing-file notes; a stored VALUE
+ * never appears (the secrecy test greps every line for seeded values). Pure.
+ */
+export function secretsModelLines(store: SecretsStore, hostFileExists: (path: string) => boolean): string[] {
+	return [
+		`env: ${envSummary(store.env)}`,
+		...Object.keys(store.env).map(envKeyLine),
+		`files: ${fileSummary(store.files, hostFileExists)}`,
+		...store.files.map((f) => fileMapLine(f, hostFileExists)),
+	];
+}
+
+/** The editor menu's rows — the remove rows only when there is something to remove; the descriptions carry the MASKED state. */
+function menuOptions(
+	env: Record<string, string>,
+	files: readonly SecretFileMapping[],
+	hostFileExists: (path: string) => boolean,
+): SelectOption[] {
+	return [
+		{ value: "add-env", label: "Add an env pair…", hint: envSummary(env) },
+		...(Object.keys(env).length > 0
+			? [{ value: "remove-env", label: "Remove an env pair…", hint: envSummary(env) }]
+			: []),
+		{ value: "add-file", label: "Add a credential file…", hint: fileSummary(files, hostFileExists) },
+		...(files.length > 0
+			? [{ value: "remove-file", label: "Remove a credential file…", hint: fileSummary(files, hostFileExists) }]
+			: []),
+		{ value: "save", label: "Save and exit", hint: "write the 0700 store (env + file map, both 0600)" },
+		{ value: "cancel", label: "Cancel", hint: "leave without writing" },
+	];
+}
+
+/** Injectable seams so {@link runSecretsSetup} is hermetic (the tier-(a) precedent). */
+export interface SecretsSetupDeps {
+	/** The io driving the interstitial + the editor's prompts (defaults to {@link defaultIo}). */
+	io?: WizardIo;
+	/** Banner destination for `withSession` (defaults to `process.stdout`). */
+	stream?: BannerStream;
+	/**
+	 * The vm tree the store reads/writes (default: `resolveVmDirs({ homeDir })`).
+	 * Pass `homeDir` instead to move the store to one tree — the single-tree
+	 * guarantee.
+	 */
+	dirs?: VmDirs;
+	/** The HOME the default dirs resolve against (tests: temp dir). */
+	homeDir?: string;
+	/**
+	 * The row-6 liveness probe (spec 28's matrix row 6) — the wiring passes 28d's
+	 * `() => vmSessionActive(store.latestVmState)` over the vm-state line. Default:
+	 * no live session (no interstitial).
+	 */
+	sessionActive?: () => boolean;
+	/**
+	 * The 28b *Restart sandbox* action the live-session shortcut invokes — the
+	 * wiring passes the WIRED action (`actions.restartSandbox`), so the shortcut
+	 * inherits the owned-server gate, the single-flight guard, and the
+	 * pending-flag clearing instead of duplicating any of it. Absent → the picked
+	 * shortcut errs (never a silent no-op).
+	 */
+	restartSandbox?: () => Promise<Result<void, Error> | null>;
+	/** The host-existence probe behind the soft note (default `existsSync` — never throws). */
+	hostFileExists?: (path: string) => boolean;
+}
+
+/** The {@link runSecretsSetup} outcome: `ok(saved store)`, `err(reason)`, or `null` (cancelled — no write). */
+export type SecretsSetupResult = Result<SecretsStore, Error> | null;
+
+// The editor's prompt messages (module-private; the tests match on them verbatim).
+const SECRETS_MENU_MESSAGE = "Secrets editor — stored values stay hidden";
+const ENV_KEY_PROMPT = "Env key (uppercase letters, digits, underscores — an existing key re-enters its value)";
+const HOST_PATH_PROMPT = "Credential file — host path (absolute, leading /)";
+const GUEST_PATH_PROMPT = "Credential file — guest target path (absolute, leading /)";
+const REMOVE_ENV_PROMPT = "Remove which env pair?";
+const REMOVE_FILE_PROMPT = "Remove which credential file?";
+
+/**
+ * Run the secrets editor (spec 28, tier (b), box 28f): the row-6 interstitial
+ * when a session is live, then a looped masked menu (add/remove env pairs on the
+ * 26a grammar; add/remove host→guest file mappings on the absolute-path +
+ * duplicate-guestPath rules) over a WORKING COPY seeded from the store, then —
+ * only on Save — the whole candidate through the REAL `normalizeSecrets` gate and
+ * 26a's `saveSecrets` (0700 dir / 0600 files, the only writer). Host files are
+ * NEVER read or copied here (consumption is session-start, spec 29); existence
+ * renders only as the soft "(file missing on host)" note. Masking is structural:
+ * prompts, labels, and the model carry keys/paths/"set" states — a stored VALUE
+ * is never re-rendered, and "changing a key" is re-entering its full value.
+ *
+ * Result spine (the tier-(a) shape): `ok(saved store)` — the store on disk IS the
+ * return; `err(Error)` — an answer no valid store can carry, an unwired restart
+ * shortcut, or a write failure (surfaced inline by the dashboard's flash); `null`
+ * — cancelled at any prompt, the interstitial, or a declined removal-adjacent
+ * cancel. Hermetic by injection: io/stream/dirs/probes/action all default to
+ * production and are overridden by the tests.
+ */
+export async function runSecretsSetup(deps: SecretsSetupDeps = {}): Promise<SecretsSetupResult> {
+	const io = deps.io ?? defaultIo;
+	const dirs = deps.dirs ?? resolveVmDirs({ homeDir: deps.homeDir });
+	const hostFileExists = deps.hostFileExists ?? existsSync;
+
+	// 1. Seed from the 0700 store (26a: loadSecrets NEVER throws — absent/corrupt
+	//    halves read empty) and take edits on a working copy: nothing is written
+	//    until the save step's normalize gate + saveSecrets.
+	const seed = loadSecrets(dirs);
+	const env: Record<string, string> = { ...seed.env };
+	const files: SecretFileMapping[] = [...seed.files];
+
+	// 2. The row-6 interstitial (spec 28's matrix row 6): with a LIVE session the
+	//    flow PRECEDES the editor with the apply hint + the *Restart sandbox*
+	//    shortcut (the wired 28b action — reused, not duplicated). Never a silent
+	//    no-op: the hint is unconditional when a session is live, and a picked-but-
+	//    unwired shortcut errs. No live session → no interstitial (the tier-(a)
+	//    warning's precedes-the-fields shape: a bare select before the banner).
+	if ((deps.sessionActive ?? (() => false))()) {
+		const choice = await io.select({
+			message: SECRETS_LIVE_HINT,
+			options: [
+				{ value: "edit", label: SECRETS_EDIT_CHOICE, hint: "saved secrets load at the next boot" },
+				{ value: "restart", label: SECRETS_RESTART_CHOICE, hint: "stop, then a fresh boot — then edit" },
+			],
+			initialValue: "edit",
+		});
+		if (choice === null) return null; // cancelled — silent
+		if (choice === "restart") {
+			if (deps.restartSandbox === undefined) {
+				return err(new Error("no sandbox restart action is wired here"));
+			}
+			const restarted = await deps.restartSandbox();
+			if (restarted === null) return null; // the action declined — silent (the modal idiom)
+			if (!restarted.ok) return restarted; // the unowned/in-flight hint, surfaced inline
+			// Accepted — teardown + a fresh boot are in flight; THESE edits still load
+			// at the NEXT boot after it (the flash restates the honesty).
+		}
+	}
+
+	// 3. The editor loop, framed by withSession (one banner — the tier-(a) shape).
+	return withSession(
+		SECRETS_SETUP_TITLE,
+		async () => {
+			for (;;) {
+				const action = await io.select({
+					message: SECRETS_MENU_MESSAGE,
+					options: menuOptions(env, files, hostFileExists),
+					initialValue: "add-env",
+				});
+				if (action === null || action === "cancel") return null; // nothing written
+				if (action === "save") {
+					// The whole-store gate through the REAL normalize (27b's contract:
+					// never persist a shape the loader rejects). Defensive — every
+					// reachable rejection is localized at entry (envPairError /
+					// fileMappingError).
+					const gate = normalizeSecrets({ env, files });
+					if (gate === null) {
+						return err(new Error("the edited secrets do not form a valid store — nothing was written"));
+					}
+					try {
+						saveSecrets(dirs, gate);
+					} catch (e) {
+						// 26a's throwing persistence boundary, converted so the dashboard's
+						// flash renders it inline (the tier-(a) save posture).
+						return err(new Error(`cannot save the secrets: ${e instanceof Error ? e.message : String(e)}`));
+					}
+					return ok(gate);
+				}
+				if (action === "add-env") {
+					const rawKey = await io.text({ message: ENV_KEY_PROMPT });
+					if (rawKey === null) return null; // cancelled — nothing written
+					const key = rawKey.trim();
+					if (key === "") return null; // required-empty — the cancelled idiom
+					const value = await io.password({ message: `Value for ${key} (masked — stored verbatim, never shown)` });
+					if (value === null) return null;
+					const problem = envPairError(key, value);
+					if (problem !== null) return err(new Error(problem));
+					// An existing key overwrites: the stored value is never re-rendered,
+					// so changing a key IS re-entering the full value. Values are stored
+					// verbatim (no trim — a secret may legitimately carry whitespace).
+					env[key] = value;
+					continue;
+				}
+				if (action === "remove-env") {
+					const key = await io.select({
+						message: REMOVE_ENV_PROMPT,
+						options: Object.keys(env).map((k) => ({
+							value: k,
+							label: envKeyLine(k), // keys only — the stored value stays hidden
+							hint: "the stored value stays hidden",
+						})),
+					});
+					if (key === null) return null;
+					const sure = await io.confirm({ message: `Remove env pair ${key}?`, initialValue: false });
+					if (sure === null) return null;
+					if (sure) delete env[key];
+					continue;
+				}
+				if (action === "add-file") {
+					const rawHost = await io.text({ message: HOST_PATH_PROMPT });
+					if (rawHost === null) return null;
+					const hostPath = rawHost.trim();
+					if (hostPath === "") return null;
+					const rawGuest = await io.text({ message: GUEST_PATH_PROMPT });
+					if (rawGuest === null) return null;
+					const guestPath = rawGuest.trim();
+					if (guestPath === "") return null;
+					const problem = fileMappingError(hostPath, guestPath, files);
+					if (problem !== null) return err(new Error(problem));
+					// NOT read or copied here — consumption is session-start (spec 29);
+					// existence renders only as the soft note (fileMapLine).
+					files.push({ hostPath, guestPath });
+					continue;
+				}
+				if (action === "remove-file") {
+					const picked = await io.select({
+						message: REMOVE_FILE_PROMPT,
+						options: files.map((f, i) => ({
+							value: String(i),
+							label: fileMapLine(f, hostFileExists),
+							hint: f.guestPath,
+						})),
+					});
+					if (picked === null) return null;
+					const index = Number(picked); // our own option values — NaN routes to the guard below
+					const victim: SecretFileMapping | undefined = files[index];
+					if (victim === undefined) continue; // a foreign answer never routes into a deletion
+					const sure = await io.confirm({
+						message: `Remove credential file ${victim.hostPath} → ${victim.guestPath}?`,
+						initialValue: false,
+					});
+					if (sure === null) return null;
+					if (sure) files.splice(index, 1);
+				}
+			}
+		},
+		{ io, stream: deps.stream },
+	);
 }

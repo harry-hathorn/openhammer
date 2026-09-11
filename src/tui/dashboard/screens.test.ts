@@ -19,6 +19,7 @@ import {
 	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
 	SANDBOX_RESTART_LABEL,
+	SANDBOX_SECRETS_LABEL,
 	SANDBOX_SERIAL_LABEL,
 	SANDBOX_STOP_LABEL,
 	SET_LOGIN_LABEL,
@@ -140,14 +141,15 @@ describe("screens — settings/doctor items", () => {
 	});
 });
 
-describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e)", () => {
-	it("with a golden: Stop, Restart, Configure, Guest setup, Serial tail, Back — no Install row", () => {
+describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f)", () => {
+	it("with a golden: Stop, Restart, Configure, Guest setup, Secrets, Serial tail, Back — no Install row", () => {
 		const labels = sandboxItems(true).map((i) => i.label);
 		expect(labels).toEqual([
 			SANDBOX_STOP_LABEL,
 			SANDBOX_RESTART_LABEL,
 			SANDBOX_CONFIGURE_LABEL,
 			SANDBOX_GUEST_SETUP_LABEL,
+			SANDBOX_SECRETS_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);
@@ -161,6 +163,15 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e)", () => {
 		expect(guest).toBe(configure + 1); // beside Configure, before Serial tail
 		expect(items[guest]?.description).toContain("guest.json");
 		expect(items[guest]?.description).toContain("`vm install`");
+	});
+
+	it("the Secrets row sits beside Guest setup and frames the 0700 store (box 28f)", () => {
+		const items = sandboxItems(true);
+		const guest = items.findIndex((i) => i.label === SANDBOX_GUEST_SETUP_LABEL);
+		const secrets = items.findIndex((i) => i.label === SANDBOX_SECRETS_LABEL);
+		expect(secrets).toBe(guest + 1); // beside Guest setup, before Serial tail
+		expect(items[secrets]?.description).toContain("0700");
+		expect(items[secrets]?.description).toContain("sandbox boot");
 	});
 
 	it("without a golden the Install row APPEARS (hidden when one exists — never a disabled row)", () => {
@@ -183,6 +194,7 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e)", () => {
 			SANDBOX_RESTART_LABEL,
 			SANDBOX_CONFIGURE_LABEL,
 			SANDBOX_GUEST_SETUP_LABEL,
+			SANDBOX_SECRETS_LABEL,
 			SANDBOX_SERIAL_LABEL,
 			"Back",
 		]);
