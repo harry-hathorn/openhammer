@@ -193,6 +193,13 @@ openhammer doctor                Run health checks (config, channels, credential
 openhammer monitor               Stream live client + tool-call activity (Ctrl-C to stop)
 openhammer vm install            Build the sandbox's golden Omarchy VM unattended (qemu + KVM,
                                  pinned-ISO download on first run)
+openhammer vm provision          Run the idempotent setup pass over the latest install session
+                                 (first-boot checks + agent prewarm)
+openhammer vm snapshot           Promote the provisioned build into the reusable golden image
+openhammer vm list               List golden images (newest first, manifest/drift notes)
+openhammer vm reset [--yes]      Reset VM session state (dry run by default)
+openhammer vm gc [--yes]         Reclaim VM-tree disk (dry run by default; newest golden kept)
+openhammer vm status             One-shot live VM state from the running server (mode, ssh port)
 ```
 
 Interactive commands print the OpenHammer banner first.
@@ -273,6 +280,13 @@ password to your machine:
   stored `0600`; OAuth client secrets are kept only as a SHA-256 hash.
 - **Run it in a container for isolation.** The container *is* the sandbox — mount only the target
   directory, set `MCP_ROOT_DIR`, and the blast radius is the container, not your host.
+- **Or boot the VM sandbox (opt-in, operator-set only).** `MCP_VM_MODE=off|vm|agent` (env, flag, or
+  settings — never the connected client). In a VM mode every tool executes inside an Omarchy
+  QEMU guest: a VM-mode session **never exposes the host filesystem** — `MCP_ROOT_DIR` becomes a
+  guest path and **the guest is the boundary**, not a mount or a container. KVM is required
+  (Linux-only; no emulation fallback — a missing KVM is a boot-time error, not a degradation).
+  Mode `off` (the default) is the plain local path. Build the image once with
+  `openhammer vm install`.
 - **Don't tunnel without auth.** A public `ngrok`/`cloudflare` URL without a strong token gives the
   internet shell access to your machine.
 
@@ -294,6 +308,12 @@ password to your machine:
   one file + one registry line.
 - **Live monitoring.** A non-blocking recorder streams client + tool-call activity over a local-only
   Unix socket (`~/.openhammer/openhammer.sock`, `0600`); `openhammer monitor` tails it.
+- **VM sandbox modes (opt-in).** With `MCP_VM_MODE=vm|agent` the boot runs a synchronous fail-fatal
+  preflight (qemu/OVMF, `/dev/kvm`, golden manifest, disk space), spawns QEMU **eager-async** after
+  `listen()` so `/health` stays instant (server health ≠ VM health), and drives the guest through a
+  readiness state machine (serial-prompt unlock → sshd poll); the boot-scoped `ToolBackend` swaps
+  the local execution target for the guest with zero tool-body changes. Mode `off` is byte-identical
+  to the local path, and there is no client-driven VM lifecycle — the operator sets the mode.
 - **Result error model.** Tool `execute → Promise<Result<ToolOk, Error>>`; expected failures return
   `err(new Error(msg))`, never throw. The MCP `CallTool` handler is the single narrowing point, with a
   universal size backstop.
