@@ -13,7 +13,9 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ResolvedVmConfig } from "../config.ts";
+import type { ToolBackend } from "../tools/backend.ts";
 import { createVmBackendFromQmp } from "./backend.ts";
+import type { SecretsStore } from "./provision/secrets.ts";
 import type { Manifest } from "./provision/snapshot.ts";
 import { type QemuExit, type QemuHandle, stopQemu } from "./qemu/process.ts";
 import type { QmpClient } from "./qmp/client.ts";
@@ -223,6 +225,16 @@ interface HarnessOptions {
 	holdSecondExec?: Promise<void>;
 	startQemuFailure?: Error;
 	afterReady?: AfterReadyHook;
+	/**
+	 * The agent-mode secrets push: "real" runs the production pushSecrets against the
+	 * scripted backend (hermetic — the transport fake answers rc 0); anything else
+	 * overrides it. Default: a recording fake returning the store's own counts.
+	 */
+	pushSecrets?: "real" | VmServiceDeps["pushSecrets"];
+	/** The agent-mode store load: "real" = production loadSecrets; default: a recording fake returning `store`. */
+	loadSecrets?: "real" | VmServiceDeps["loadSecrets"];
+	/** The store the default loadSecrets fake returns (default: empty). */
+	store?: SecretsStore;
 	/** Side effect when QMP sees system_powerdown (default: none — a wedged guest). */
 	onPowerdown?: (handle: FakeVmHandle) => void;
 	/** qemu-img actual-size for the disk-cap hook; null = qemu-img fails. */
@@ -254,6 +266,10 @@ interface Harness {
 		closeMux: number;
 		/** One entry per boot sweep: the homeDir it was pointed at + the preserve set. */
 		sweep: Array<{ homeDir: string | undefined; preserve: ReadonlySet<string> }>;
+		/** The agent-mode push calls: the backend handed over + the store loaded for it. */
+		pushSecrets: Array<{ backend: ToolBackend; store: SecretsStore }>;
+		/** The secrets dir each loadSecrets call was pointed at. */
+		loadSecretsDirs: string[];
 		/** Cross-seam call order (the boot sweep's "before locateGolden" pin). */
 		order: string[];
 	};
@@ -286,6 +302,8 @@ function harness(options: HarnessOptions = {}): Harness {
 		createBackend: 0,
 		closeMux: 0,
 		sweep: [],
+		pushSecrets: [],
+		loadSecretsDirs: [],
 		order: [],
 	};
 	const handles: FakeVmHandle[] = [];
@@ -421,6 +439,24 @@ function harness(options: HarnessOptions = {}): Harness {
 			};
 		},
 		afterReady: options.afterReady,
+		// The agent-mode secrets push (spec 29): recorded by default; "real" lets the
+		// production pushSecrets run against the scripted backend's rc-0 transport fake.
+		pushSecrets:
+			options.pushSecrets === "real"
+				? undefined
+				: (options.pushSecrets ??
+					(async (backend, store) => {
+						calls.pushSecrets.push({ backend, store });
+						return { envPairs: Object.keys(store.env).length, filesPushed: store.files.length, filesSkipped: [] };
+					})),
+		loadSecrets:
+			options.loadSecrets === "real"
+				? undefined
+				: (options.loadSecrets ??
+					((dirs) => {
+						calls.loadSecretsDirs.push(dirs.secrets);
+						return options.store ?? { env: {}, files: [] };
+					})),
 	};
 
 	const service = createVmService(vmConfig(options.config ?? {}), deps, tuning);
@@ -934,6 +970,71 @@ describe("VmService — the mode-A extras hook (a no-op parameter here)", () => 
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.message).toContain("mode-A extras exploded");
 		expect(h.calls.capture.length).toBe(1);
+	});
+});
+
+describe("VmService — agent-mode session-start secrets push (spec 29)", () => {
+	const store: SecretsStore = {
+		env: { ANTHROPIC_API_KEY: "sk-ant-agent-test" },
+		files: [{ hostPath: "/home/me/.claude/.credentials.json", guestPath: "/home/sandbox/.claude/.credentials.json" }],
+	};
+
+	it("agent mode: the push runs in the extras phase with the loaded store, before ready", async () => {
+		const phasesDuringCallerHook: string[] = [];
+		const h = harness({
+			config: { mode: "agent", persist: "auto" },
+			store,
+			afterReady: async () => {
+				phasesDuringCallerHook.push(h.service.state); // the caller's hook still runs, still pre-ready
+			},
+		});
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(phasesDuringCallerHook).toEqual(["booting"]);
+		expect(h.calls.pushSecrets.length).toBe(1);
+		expect(h.calls.pushSecrets[0]?.store).toEqual(store);
+		// The store was loaded from the vm tree's secrets dir (resolveVmDirs over the deps' HOME).
+		expect(h.calls.loadSecretsDirs).toEqual([join(HOME, ".openhammer", "vm", "secrets")]);
+		// The push got the SAME backend the boot gate hands out.
+		const r = await h.service.ensureReady();
+		expect(r.ok && h.calls.pushSecrets[0]?.backend === r.backend).toBe(true);
+	});
+
+	it("vm mode: no push, no store load — the wiring is agent-only", async () => {
+		const h = harness({ store });
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(h.calls.pushSecrets).toEqual([]);
+		expect(h.calls.loadSecretsDirs).toEqual([]);
+	});
+
+	it("a push failure is logged NON-FATAL: the session still reaches ready and serves tools", async () => {
+		const h = harness({
+			config: { mode: "agent", persist: "auto" },
+			store,
+			pushSecrets: async () => {
+				throw new Error("guest fs unwritable");
+			},
+		});
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		const r = await h.service.ensureReady();
+		expect(r.ok).toBe(true);
+		expect(
+			h.logs.some(
+				(line) =>
+					line.includes("WARNING: secrets push failed") &&
+					line.includes("non-fatal") &&
+					line.includes("guest fs unwritable"),
+			),
+		).toBe(true);
+	});
+
+	it("empty store: the real push + real load run (fake HOME holds no store) — the zero-effect report is logged", async () => {
+		const h = harness({ config: { mode: "agent", persist: "auto" }, pushSecrets: "real", loadSecrets: "real" });
+		await h.service.start();
+		expect(h.service.state).toBe("ready");
+		expect(h.logs.some((line) => line.includes("vm: secrets pushed: 0 env pair(s), 0 file(s)"))).toBe(true);
 	});
 });
 

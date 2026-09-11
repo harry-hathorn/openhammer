@@ -69,6 +69,7 @@ import { createVmBackendFromQmp, type VmBackend, type VmBackendPendingSpec } fro
 import { type CaptureResult, captureOnTeardown } from "./capture.ts";
 import type { ReadManifest } from "./preflight.ts";
 import { runBinDefault } from "./provision/iso.ts";
+import { loadSecrets } from "./provision/secrets.ts";
 import { GOLDEN_DISK_FILE, type Manifest, readManifest } from "./provision/snapshot.ts";
 import { qemuBootArgs } from "./qemu/args.ts";
 import { sendText } from "./qemu/keys.ts";
@@ -84,6 +85,7 @@ import {
 	stopQemu,
 	tailText,
 } from "./qemu/process.ts";
+import { pushSecrets } from "./secrets-push.ts";
 import { prepareSession, type RunQemuImg, resolveVmDirs, type SessionPaths, sweepStaleSessions } from "./session.ts";
 import { type SshTarget, sshExec } from "./ssh.ts";
 import { discoverSshPort } from "./usernet.ts";
@@ -204,10 +206,12 @@ export interface VmServiceTuning {
 }
 
 /**
- * Spec 29's mode-A extras hook — a NO-OP PARAMETER here by design (this box ships mode B
- * only): between phase 2 and `ready`, the service awaits it with the session context;
- * undefined (the default) skips the phase entirely. A throw follows the normal boot
- * failure path (capture + ladder + failed) — in agent mode the extras ARE the point.
+ * Spec 29's mode-A extras hook: between phase 2 and `ready`, the service awaits it with
+ * the session context; undefined (the default) skips the caller-supplied phase entirely.
+ * A throw follows the normal boot failure path (capture + ladder + failed) — in agent
+ * mode the extras ARE the point. In agent mode the service additionally composes the
+ * BUILT-IN secrets push (see {@link VmServiceDeps.pushSecrets}) after this hook — that
+ * one is non-fatal (logged, never fails the boot), while a caller-hook throw stays fatal.
  */
 export type AfterReadyHook = (context: VmSessionContext) => Promise<void>;
 
@@ -267,8 +271,16 @@ export interface VmServiceDeps {
 	readonly removeDir?: (path: string) => Promise<void>;
 	/** Override the qemu-img runner (default: session.ts's real spawn; the disk-cap hook). */
 	readonly runQemuImg?: RunQemuImg;
-	/** Spec 29's mode-A extras hook — not implemented here (see {@link AfterReadyHook}). */
+	/** Spec 29's mode-A extras hook — the caller-supplied half (see {@link AfterReadyHook}). */
 	readonly afterReady?: AfterReadyHook;
+	/**
+	 * Override the agent-mode session-start secrets push (default: secrets-push.ts's
+	 * pushSecrets). Runs after {@link afterReady}, agent mode only, NON-FATAL: a throw is
+	 * logged and the boot still reaches ready (see {@link VmService.pushAgentSecrets}).
+	 */
+	readonly pushSecrets?: typeof pushSecrets;
+	/** Override the secrets-store read (default: provision/secrets.ts's loadSecrets — never throws). */
+	readonly loadSecrets?: typeof loadSecrets;
 }
 
 // ---- the pure derivations (each a contract later boxes or tests parse) ----
@@ -611,15 +623,19 @@ export class VmService {
 				this.backendSpecFor(paths, golden.manifest),
 				handle.qmp,
 			);
+			const context: VmSessionContext = {
+				sessionId,
+				backend,
+				manifest: golden.manifest,
+				serialLogPath: paths.serialPath,
+			};
 			const afterReady = this.deps.afterReady;
 			if (afterReady !== undefined) {
-				await afterReady({
-					sessionId,
-					backend,
-					manifest: golden.manifest,
-					serialLogPath: paths.serialPath,
-				});
+				await afterReady(context);
 			}
+			// Spec 29's session-start extras: the agent-mode secrets push — after the
+			// caller's hook, before the boot reports ready (non-fatal, agent mode only).
+			await this.pushAgentSecrets(context);
 			// The last stop() race window: an operator stop that landed while the final
 			// awaits were in flight must not resurrect a torn-down session as ready.
 			this.throwIfAbandoned(epoch);
@@ -854,6 +870,37 @@ export class VmService {
 	/** The phase-2 probe target (same pinned facts as the backend's, port completed here). */
 	private sshTargetFor(paths: SessionPaths, manifest: Manifest, port: number): SshTarget {
 		return { ...this.backendSpecFor(paths, manifest).target, port };
+	}
+
+	/**
+	 * Spec 29's session-start extras — AGENT MODE ONLY: push the secrets store into the
+	 * fresh guest (dual env files + the credential map, secrets-push.ts) before the boot
+	 * reports ready, so the agent's first command already has its credentials.
+	 *
+	 * NON-FATAL BY DESIGN: a failed push is logged and the boot still reaches ready. The
+	 * session is up either way — the agent simply lacks credentials and the operator sees
+	 * the WARNING — where failing the boot would trade a working sandbox for a bookkeeping
+	 * error (and agent mode discards its overlay on death, so the next boot re-pushes).
+	 * This matches the store's own posture (26a: loadSecrets never throws) and spec 29's
+	 * acceptance — the push HAPPENS on every agent boot. A vm-mode boot never loads or
+	 * pushes: no credentials ride the operator-facing workspace flavor.
+	 */
+	private async pushAgentSecrets(context: VmSessionContext): Promise<void> {
+		if (this.mode() !== "agent") return;
+		const push = this.deps.pushSecrets ?? pushSecrets;
+		const load = this.deps.loadSecrets ?? loadSecrets;
+		try {
+			const report = await push(context.backend, load(this.dirs));
+			const skipped =
+				report.filesSkipped.length === 0
+					? ""
+					: ` — skipped: ${report.filesSkipped.map((skip) => `${skip.hostPath} (${skip.reason})`).join("; ")}`;
+			this.log(`vm: secrets pushed: ${report.envPairs} env pair(s), ${report.filesPushed} file(s)${skipped}`);
+		} catch (error) {
+			this.log(
+				`vm: WARNING: secrets push failed (non-fatal — the session is up, but the agent lacks credentials): ${messageOf(error)}`,
+			);
+		}
 	}
 
 	// ---- death mid-session ----
