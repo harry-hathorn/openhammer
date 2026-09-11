@@ -35,8 +35,9 @@ import {
 	clientItems,
 	doctorItems,
 	footerLine,
-	MENU_SECTIONS,
+	type MENU_SECTIONS,
 	menuItems,
+	menuSectionAt,
 	renderFieldRows,
 	renderList,
 	type ScreenSpec,
@@ -45,7 +46,15 @@ import {
 	titleLine,
 } from "./screens.ts";
 import type { DashboardStore } from "./store.ts";
-import { channelRows, clientRows, monitorRows, secretRevealRows, settingsRows, statusRows } from "./view.ts";
+import {
+	channelRows,
+	clientRows,
+	monitorRows,
+	sandboxHeaderRows,
+	secretRevealRows,
+	settingsRows,
+	statusRows,
+} from "./view.ts";
 
 /** A section the menu drills into (the non-Quit menu rows, in order). */
 export type Section = (typeof MENU_SECTIONS)[number];
@@ -146,7 +155,9 @@ export class DashboardRoot implements Component {
 			case "menu":
 				return "↑↓/jk move · enter/l open · esc/h back · q quit";
 			case "section":
-				return this.screen.section === "monitor" || this.screen.section === "status"
+				return this.screen.section === "monitor" ||
+					this.screen.section === "status" ||
+					this.screen.section === "sandbox"
 					? "esc/h back to return"
 					: "↑↓/jk move · enter/l select · esc/h back";
 			case "channel-detail":
@@ -187,6 +198,16 @@ export class DashboardRoot implements Component {
 					return {
 						header: renderFieldRows(settingsRows(this.store.settings), this.style),
 						items: settingsItems(),
+						hint: this.hint(),
+					};
+				}
+				// Sandbox (spec 28): a read-only state screen — the verbatim state row,
+				// then the effective guest root when known (matrix row 9). Actions are
+				// 28b/28c; until then the screen is Back-only.
+				if (section === "sandbox") {
+					return {
+						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot),
+						items: BACK_ONLY,
 						hint: this.hint(),
 					};
 				}
@@ -328,11 +349,15 @@ export class DashboardRoot implements Component {
 		if (item === undefined) return;
 		switch (this.screen.kind) {
 			case "menu": {
-				if (this.focus >= MENU_SECTIONS.length) {
-					this.actions.quit(); // the Quit row
+				// Dispatch through `menuSectionAt` (the same visibility filter
+				// `menuItems` renders from), so a hidden Sandbox row shifts the Quit
+				// row's position without misrouting — never a raw MENU_SECTIONS index.
+				const target = menuSectionAt(this.store, this.focus);
+				if (target === "quit") {
+					this.actions.quit(); // the Quit row (and any focus past it)
 					return;
 				}
-				this.enterSection(MENU_SECTIONS[this.focus] as Section);
+				this.enterSection(target);
 				return;
 			}
 			case "section": {

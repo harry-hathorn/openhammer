@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RequestEvent, RequestRecorder } from "../../mcp/telemetry.ts";
-import { type ChannelStateLine, formatChannelStateLine, startStatusSocket } from "../../observability/status-socket.ts";
+import {
+	type ChannelStateLine,
+	formatChannelStateLine,
+	formatVmStateLine,
+	startStatusSocket,
+	type VmStateLine,
+} from "../../observability/status-socket.ts";
 import { createSocketSubscriber, type SocketConnection } from "./socket-client.ts";
 
 /** A baseline event (the recorder's always-present 8 fields). */
@@ -436,5 +442,66 @@ describe("createSocketSubscriber (real status socket)", () => {
 
 		unsub();
 		await handle.close();
+	});
+});
+
+describe("createSocketSubscriber — vm-state (spec 28)", () => {
+	/** A vm-state line fixture (mirrors monitor-view.test.ts's — the spec 27h wire shape). */
+	function vmLine(over: Partial<VmStateLine> = {}): VmStateLine {
+		return {
+			type: "vm-state",
+			state: "ready",
+			sessionId: "vm-20260911T101112Z-ab",
+			phase: null,
+			sshPort: 42255,
+			error: null,
+			...over,
+		};
+	}
+
+	it("delivers a vm-state line's RAW text to onVmState; events still flow", () => {
+		const fake = fakeConnection();
+		const subscribe = subscriberOver(fake.conn);
+		const events: RequestEvent[] = [];
+		const vmLines: string[] = [];
+		const raw = JSON.stringify(vmLine()); // the line's wire text (formatVmStateLine appends the \n)
+		const unsub = subscribe(
+			(e) => events.push(e),
+			undefined,
+			(received) => vmLines.push(received),
+		);
+
+		fake.push(formatVmStateLine(vmLine()), ndjson(event({ tool: "bash" })));
+		expect(vmLines).toEqual([raw]); // raw, exactly as it arrived (the store re-parses)
+		expect(events.map((e) => e.tool)).toEqual(["bash"]);
+		unsub();
+	});
+
+	it("omitted onVmState: vm-state lines are skipped, nothing crashes (backward compat)", () => {
+		const fake = fakeConnection();
+		const subscribe = subscriberOver(fake.conn);
+		const events: RequestEvent[] = [];
+		const unsub = subscribe((e) => events.push(e));
+
+		fake.push(formatVmStateLine(vmLine()), ndjson(event({ tool: "ls" })));
+		expect(events.map((e) => e.tool)).toEqual(["ls"]);
+		unsub();
+	});
+
+	it("an unknown future line kind reaches neither callback (skipped)", () => {
+		const fake = fakeConnection();
+		const subscribe = subscriberOver(fake.conn);
+		const events: RequestEvent[] = [];
+		const vmLines: string[] = [];
+		const unsub = subscribe(
+			(e) => events.push(e),
+			undefined,
+			(raw) => vmLines.push(raw),
+		);
+
+		fake.push('{"type":"hyperdrive","x":1}');
+		expect(events).toHaveLength(0);
+		expect(vmLines).toHaveLength(0);
+		unsub();
 	});
 });

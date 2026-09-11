@@ -37,10 +37,22 @@
  * channel-state lines go to an optional `onChannelState` callback (the 2nd arg).
  * The 2nd arg is optional, so every existing `subscribe((e) => …)` call site is
  * unchanged; `openhammer monitor` (which ignores channel-state) is unaffected too.
+ *
+ * **VM state (spec 28).** The server's `{ type: "vm-state", … }` lines (spec 27h)
+ * ride the same stream. This client only CLASSIFIES them (via `parseVmStateLine`)
+ * and forwards the raw line to an optional third `onVmState` callback — parsing
+ * and holding live in the store (`DashboardStore.applyVmStateLine`), the
+ * additive-parse rule's holder, so a future/unknown kind no-ops at the state
+ * layer and here. The 3rd arg is optional: existing call sites are unchanged.
  */
 import { createConnection } from "node:net";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
-import { type ChannelStateLine, parseChannelStateLine, statusSocketPath } from "../../observability/status-socket.ts";
+import {
+	type ChannelStateLine,
+	parseChannelStateLine,
+	parseVmStateLine,
+	statusSocketPath,
+} from "../../observability/status-socket.ts";
 import { parseEventLine } from "../monitor-view.ts";
 
 /**
@@ -105,7 +117,11 @@ function messageOf(e: unknown): string {
  */
 export function createSocketSubscriber(
 	deps: DashboardSocketDeps = {},
-): (onEvent: (event: RequestEvent) => void, onChannelState?: (state: ChannelStateLine) => void) => () => void {
+): (
+	onEvent: (event: RequestEvent) => void,
+	onChannelState?: (state: ChannelStateLine) => void,
+	onVmState?: (line: string) => void,
+) => () => void {
 	const path = deps.path ?? statusSocketPath();
 	const connect = deps.connect ?? connectStatusSocket;
 	const warn = deps.warn ?? ((message: string) => console.warn(message));
@@ -118,6 +134,7 @@ export function createSocketSubscriber(
 	return (
 		onEvent: (event: RequestEvent) => void,
 		onChannelState?: (state: ChannelStateLine) => void,
+		onVmState?: (line: string) => void,
 	): (() => void) => {
 		let destroyed = false;
 		let buf = "";
@@ -154,7 +171,11 @@ export function createSocketSubscriber(
 				}
 				const state = parseChannelStateLine(line);
 				if (state !== null && onChannelState !== undefined) onChannelState(state);
-				// blank/malformed lines are skipped — the feed never aborts
+				// A vm-state line (spec 27h; dashboard 28): forward the RAW line — the
+				// store re-parses it as the single hold/parse point. Unknown future
+				// kinds parse to null here and are skipped — the feed never aborts.
+				const vmLine = parseVmStateLine(line);
+				if (vmLine !== null && onVmState !== undefined) onVmState(line);
 			}
 		};
 

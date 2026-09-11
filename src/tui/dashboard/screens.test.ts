@@ -1,7 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { ChannelEntry } from "../../config/settings.ts";
-import { defaultVmSettings } from "../../config/settings.ts";
+import { defaultVmSettings, type VmSettings } from "../../config/settings.ts";
+import type { VmStateLine } from "../../observability/status-socket.ts";
 import { createStyle } from "../style.ts";
 import {
 	channelDetailSpec,
@@ -11,10 +12,12 @@ import {
 	doctorItems,
 	MENU_SECTIONS,
 	menuItems,
+	menuSectionAt,
 	renderFieldRows,
 	renderList,
 	SET_LOGIN_LABEL,
 	settingsItems,
+	visibleMenuSections,
 } from "./screens.ts";
 import { DashboardStore } from "./store.ts";
 
@@ -38,8 +41,14 @@ function storeWith(channels: ChannelEntry[] = [], defaults: Record<string, unkno
 describe("screens — menuItems", () => {
 	it("yields one row per section (in MENU_SECTIONS order) then Quit", () => {
 		const items = menuItems(new DashboardStore());
-		expect(items.map((i) => i.label)).toEqual([...MENU_SECTIONS.map(() => expect.any(String)), "Quit"]);
-		expect(items.length).toBe(MENU_SECTIONS.length + 1);
+		// The default store's vm mode is `off` with no vm-state line — the Sandbox
+		// row is hidden (spec 28 off-mode invisibility), so a fresh menu is the six
+		// base sections + Quit.
+		expect(items.map((i) => i.label)).toEqual([
+			...MENU_SECTIONS.filter((section) => section !== "sandbox").map(() => expect.any(String)),
+			"Quit",
+		]);
+		expect(items.length).toBe(MENU_SECTIONS.length);
 	});
 
 	it("summaries reflect live store state", () => {
@@ -159,5 +168,78 @@ describe("screens — renderList + renderFieldRows", () => {
 		const lines = renderFieldRows([{ label: "server", value: "up" }], style);
 		expect(lines[0]).toContain("server");
 		expect(lines[0]).toContain("up");
+	});
+});
+
+/** A vm-state line fixture (mirrors monitor-view.test.ts's — the spec 27h wire shape). */
+function vmLine(over: Partial<VmStateLine> = {}): VmStateLine {
+	return {
+		type: "vm-state",
+		state: "ready",
+		sessionId: "vm-20260911T101112Z-ab",
+		phase: null,
+		sshPort: 42255,
+		error: null,
+		...over,
+	};
+}
+
+/** A store whose settings doc has only the vm mode overridden. */
+function storeInMode(mode: VmSettings["mode"]): DashboardStore {
+	return new DashboardStore(
+		{},
+		{
+			version: 1,
+			channels: [],
+			defaultChannel: null,
+			mcp: { allowedClients: [] },
+			vm: { ...defaultVmSettings(), mode },
+		},
+	);
+}
+
+describe("screens — Sandbox entry visibility (spec 28)", () => {
+	it("off mode + no vm-state line: the Sandbox row is absent entirely", () => {
+		const items = menuItems(new DashboardStore());
+		expect(items.some((i) => i.label === "Sandbox")).toBe(false);
+	});
+
+	it("off mode + a vm-state line arrives (mode flipped at boot): the row appears", () => {
+		const s = new DashboardStore();
+		s.applyVmStateLine(
+			JSON.stringify(vmLine({ state: "booting", phase: "prepare", sessionId: null, sshPort: null })),
+		);
+		const labels = menuItems(s).map((i) => i.label);
+		expect(labels).toContain("Sandbox");
+		expect(labels.at(-2)).toBe("Sandbox"); // just before Quit
+	});
+
+	it("vm mode from the settings (no line yet): present with a stopped summary", () => {
+		const sandbox = menuItems(storeInMode("vm")).find((i) => i.label === "Sandbox");
+		expect(sandbox?.description).toBe("stopped");
+	});
+
+	it("the summary is the live state tail (the monitor-view voice minus the head)", () => {
+		const s = storeInMode("vm");
+		s.applyVmStateLine(JSON.stringify(vmLine()));
+		const sandbox = menuItems(s).find((i) => i.label === "Sandbox");
+		expect(sandbox?.description).toBe("ready · session vm-20260911T101112Z-ab · ssh :42255");
+	});
+});
+
+describe("screens — menuSectionAt (the visibility-aware dispatch)", () => {
+	it("hidden Sandbox: focus past Doctor is the Quit row (nothing misroutes)", () => {
+		const s = new DashboardStore();
+		expect(menuSectionAt(s, 4)).toBe("settings");
+		expect(menuSectionAt(s, 5)).toBe("doctor");
+		expect(menuSectionAt(s, 6)).toBe("quit");
+	});
+
+	it("visible Sandbox: the row sits after Doctor; Quit shifts to 7", () => {
+		const s = storeInMode("vm");
+		expect(menuSectionAt(s, 5)).toBe("doctor");
+		expect(menuSectionAt(s, 6)).toBe("sandbox");
+		expect(menuSectionAt(s, 7)).toBe("quit");
+		expect(visibleMenuSections(s).length).toBe(MENU_SECTIONS.length);
 	});
 });

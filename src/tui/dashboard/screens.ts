@@ -23,7 +23,16 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Style } from "../style.ts";
 import type { DashboardStore } from "./store.ts";
-import { type ClientRow, channelDetailRows, channelRows, clientRows, type FieldRow, grantTypeLabel } from "./view.ts";
+import {
+	type ClientRow,
+	channelDetailRows,
+	channelRows,
+	clientRows,
+	type FieldRow,
+	grantTypeLabel,
+	sandboxEntryVisible,
+	sandboxStateText,
+} from "./view.ts";
 
 /** One selectable list row: a `label` plus an optional right-column `description`. */
 export interface ListItem {
@@ -47,12 +56,15 @@ export interface ScreenSpec {
 }
 
 /**
- * The menu's section rows, in display/dispatch order. The root indexes this
- * (`MENU_SECTIONS[focus]`) to map a menu row to its section, and `menuItems`
- * derives its rows from the same order, so a row's position and its section can
- * never drift — the single source the dispatch keys on.
+ * The menu's section rows, in display/dispatch order (Sandbox last — appended so
+ * the long-standing row positions — Settings at 4, Doctor at 5 — never shift for
+ * an off-mode user). `menuItems` derives its rows — and `menuSectionAt` the
+ * focus→section dispatch — from {@link visibleMenuSections}, the one visibility
+ * filter over this order, so a row's position and its section can never drift:
+ * the single source the dispatch keys on. The Sandbox row is the one conditional
+ * member (off-mode invisibility, spec 28); every other section is always shown.
  */
-export const MENU_SECTIONS = ["status", "channels", "clients", "monitor", "settings", "doctor"] as const;
+export const MENU_SECTIONS = ["status", "channels", "clients", "monitor", "settings", "doctor", "sandbox"] as const;
 
 /** The menu label for each section (kept beside {@link MENU_SECTIONS} so they agree). */
 const SECTION_LABELS: Record<(typeof MENU_SECTIONS)[number], string> = {
@@ -62,6 +74,7 @@ const SECTION_LABELS: Record<(typeof MENU_SECTIONS)[number], string> = {
 	monitor: "Monitor",
 	settings: "Settings",
 	doctor: "Doctor",
+	sandbox: "Sandbox",
 };
 
 /**
@@ -93,17 +106,45 @@ function summarizeSection(section: (typeof MENU_SECTIONS)[number], store: Dashbo
 			return store.defaultChannelId ?? "no default";
 		case "doctor":
 			return "run diagnostics";
+		case "sandbox":
+			// The live state tail ("ready · session … · ssh :42255") — the same text
+			// the Sandbox screen's header row shows, minus its `Sandbox  ` head.
+			return sandboxStateText(store.latestVmState);
 	}
 }
 
 /**
- * The main-menu rows: one per {@link MENU_SECTIONS} (label + live summary) then a
- * trailing `Quit` row. Summaries read the store fresh, so returning to the menu
- * always shows current data. The root's dispatch keys on the row index matching
- * {@link MENU_SECTIONS} (Quit is the last row, beyond the sections). Pure.
+ * The menu sections visible for `store` — every {@link MENU_SECTIONS} member
+ * except a hidden Sandbox (spec 28 off-mode invisibility: `sandboxEntryVisible`
+ * is false while the loaded settings' vm mode is `off` AND no vm-state line has
+ * ever reported a live lifecycle). The one filter both the rendering
+ * ({@link menuItems}) and the dispatch ({@link menuSectionAt}) derive from.
+ */
+export function visibleMenuSections(store: DashboardStore): Array<(typeof MENU_SECTIONS)[number]> {
+	return MENU_SECTIONS.filter(
+		(section) => section !== "sandbox" || sandboxEntryVisible(store.settings.vm.mode, store.vmObserved),
+	);
+}
+
+/**
+ * The menu row at `focus` — the section it drills into, or `"quit"` for the
+ * trailing Quit row (and any focus past it). The root's dispatch keys on THIS
+ * (not on a raw `MENU_SECTIONS[focus]` index) so a hidden Sandbox row shifts the
+ * Quit row's position without misrouting: rendering and dispatch walk the same
+ * {@link visibleMenuSections} order. Pure.
+ */
+export function menuSectionAt(store: DashboardStore, focus: number): (typeof MENU_SECTIONS)[number] | "quit" {
+	const sections = visibleMenuSections(store);
+	return focus >= sections.length ? "quit" : sections[focus];
+}
+
+/**
+ * The main-menu rows: one per visible section ({@link visibleMenuSections} —
+ * label + live summary) then a trailing `Quit` row. Summaries read the store
+ * fresh, so returning to the menu always shows current data. Pure.
  */
 export function menuItems(store: DashboardStore): ListItem[] {
-	const rows: ListItem[] = MENU_SECTIONS.map((section) => ({
+	const rows: ListItem[] = visibleMenuSections(store).map((section) => ({
 		label: SECTION_LABELS[section],
 		description: summarizeSection(section, store),
 	}));
