@@ -30,7 +30,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 - **Node ≥20, ESM** (`"type":"module"`), TypeScript `strict`. Do not relax `tsconfig`. Node 22 LTS is the dev/CI runtime.
 - **No dependency without a clear need; prefer the `node:` standard library.** No `jose`/`sharp`/`dotenv`/`diff`/`zod`.
 - **Stateless MCP**: per-request `Server` + `Transport`, no `sessionIdGenerator` (Streamable HTTP, `enableJsonResponse:true`).
-- **Isolation = containerize** (mount the target dir, set `MCP_ROOT_DIR`); not hard-jailed — `bash` reaches anything the OS user can, gated by the bearer token.
+- **Isolation = containerize** (mount the target dir, set `MCP_ROOT_DIR`) **or boot the VM sandbox** (`openhammer vm install`, then `MCP_VM_MODE=vm|agent` — the guest is the boundary); not hard-jailed — `bash` reaches anything the OS user can, gated by the bearer token.
 - Do not hand-edit `dist/`, the lockfile, or generated files.
 
 ## TypeScript rules
