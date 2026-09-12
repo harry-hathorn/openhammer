@@ -273,7 +273,7 @@ export async function runDashboard(deps: DashboardDeps): Promise<void> {
 			(event) => store.applyEvent(event),
 			(state) => {
 				serverReported.add(state.id);
-				store.applyChannelState(state.id, state.up, state.url);
+				store.applyChannelState(state.id, state.up, state.url, state.error);
 				// An up channel with a URL is the active tunnel (e.g. ngrok) — surface it on
 				// the Status screen too, so the operator sees the live URL without drilling in.
 				if (state.up && state.url !== null) {

@@ -66,11 +66,13 @@ export function emptyStatus(): ServerStatusState {
 /**
  * Live reachability of one configured channel (from the status-socket feed or the
  * static-channel probe). Absent from {@link DashboardStore.channelState} means
- * "unknown" — distinct from `up:false` (reported down).
+ * "unknown" — distinct from `up:false` (reported down). `error` (28j, additive)
+ * carries the server's actionable down-reason when it reported one.
  */
 export interface ChannelLiveState {
 	up: boolean;
 	url: string | null;
+	error?: string | null;
 }
 
 /** Injection seam for {@link DashboardStore} (the `11a`/`13`/`17b`–`19d` precedent). */
@@ -250,10 +252,12 @@ export class DashboardStore {
 	/**
 	 * Set one channel's live reachability. Both the status-socket feed (server-reported)
 	 * and the static-channel probe funnel through here — the "server stays authoritative"
-	 * gating is wiring policy in `runDashboard`, not store state.
+	 * gating is wiring policy in `runDashboard`, not store state. The row REPLACES
+	 * wholesale, so an up report (or a probe report, which carries no error) clears a
+	 * stale down-reason.
 	 */
-	setChannelState(id: string, up: boolean, url: string | null): void {
-		this.channelState[id] = { up, url };
+	setChannelState(id: string, up: boolean, url: string | null, error?: string | null): void {
+		this.channelState[id] = error !== undefined ? { up, url, error } : { up, url };
 	}
 
 	/** Fold a status-socket {@link RequestEvent} into the monitor + clients reducer. */
@@ -266,8 +270,8 @@ export class DashboardStore {
 	}
 
 	/** Fold a channel live-state report (server feed or probe) into the snapshot. */
-	applyChannelState(id: string, up: boolean, url: string | null): void {
-		this.setChannelState(id, up, url);
+	applyChannelState(id: string, up: boolean, url: string | null, error?: string | null): void {
+		this.setChannelState(id, up, url, error);
 	}
 
 	/**

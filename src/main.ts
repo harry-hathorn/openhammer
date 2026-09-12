@@ -179,10 +179,21 @@ export async function main(deps: MainDeps = {}): Promise<void> {
 	// (19c-channel): only the persisted channel (`config.channelId`) maps to a
 	// dashboard row, so it is the only id emitted — a provider / `--tunnel`
 	// channel has no persisted id (its URL reaches the dashboard via the status
-	// panel instead). `up` is whether the boot resolved a handle for it.
+	// panel instead). `up` is whether the boot resolved a handle for it — and
+	// since 28j the boot notice rides the line's ADDITIVE `error` field, so a
+	// configured-but-failed channel renders `down — <reason>` in the dashboard
+	// instead of a silent `down` (the notice was boot-log-only before).
 	const channelState: ChannelStateLine[] =
 		config.channelId !== null
-			? [{ type: "channel-state", id: config.channelId, up: handle !== null, url: handle?.url ?? null }]
+			? [
+					{
+						type: "channel-state",
+						id: config.channelId,
+						up: handle !== null,
+						url: handle?.url ?? null,
+						error: notice,
+					},
+				]
 			: [];
 
 	// The local inspector channel (17s): `~/.openhammer/openhammer.sock` (0600).

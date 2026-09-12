@@ -8,6 +8,7 @@ import {
 	channelDetailRows,
 	channelRows,
 	clientRows,
+	connectRows,
 	hasPublicChannel,
 	monitorRows,
 	SERIAL_TAIL_LINES,
@@ -33,6 +34,17 @@ const ch = (over: Partial<ChannelEntry> = {}): ChannelEntry => ({
 });
 
 describe("view — channelRows", () => {
+	it("carries the server-reported down-reason; the detail folds it into the status row (28j)", () => {
+		const live = { up: false, url: null, error: "ngrok authentication failed" } as const;
+		const rows = channelRows([ch({ id: "a" })], null, { a: live });
+		expect(rows[0]?.live).toBe("down");
+		expect(rows[0]?.error).toBe("ngrok authentication failed");
+		const detail = channelDetailRows(ch({ id: "a" }), null, live);
+		expect(detail.find((r) => r.label === "status")?.value).toBe("down — ngrok authentication failed");
+		// An up report (or a probe row) carries no error key.
+		expect(channelRows([ch({ id: "a" })], null, { a: { up: true, url: "https://x" } })[0]?.error).toBeUndefined();
+	});
+
 	it("maps channels to rows, preferring live url then declared publicUrl", () => {
 		const channels = [
 			ch({ id: "a", kind: "ngrok", label: "tunnel" }),
@@ -237,6 +249,36 @@ describe("view — sandbox rows (spec 28)", () => {
 		expect(sandboxStartOffered(vmState({ state: "stopped" }))).toBe(true);
 		expect(sandboxStartOffered(vmState({ state: "failed" }))).toBe(true);
 		expect(sandboxStartOffered(null)).toBe(true); // nothing ever reported
+	});
+});
+
+describe("view — connectRows (28j: the TUI finally prints what the boot banner always did)", () => {
+	const status = { up: true, localUrl: "http://127.0.0.1:3000", publicUrl: null, token: "tok" };
+
+	it("empty until the endpoint AND token are known (nothing to connect to yet)", () => {
+		expect(connectRows({ ...status, token: null }, { loginConfigured: true, channelCount: 1 })).toEqual([]);
+		expect(connectRows({ ...status, localUrl: null }, { loginConfigured: true, channelCount: 1 })).toEqual([]);
+	});
+
+	it("carries the mcpServers snippet (the exact boot-banner block), a curl smoke test, and the credential file", () => {
+		const text = connectRows(status, { loginConfigured: true, channelCount: 1 }).join("\n");
+		expect(text).toContain('"mcpServers"');
+		expect(text).toContain("http://127.0.0.1:3000/mcp");
+		expect(text).toContain("Bearer tok");
+		expect(text).toContain("curl -s -X POST http://127.0.0.1:3000/mcp");
+		expect(text).toContain('"method":"tools/list"');
+		expect(text).toContain("credential.json");
+	});
+
+	it("the ONE next step: an unset login wins; else no channel suggests one; else nothing", () => {
+		const loginFirst = connectRows(status, { loginConfigured: false, channelCount: 1 }).join("\n");
+		expect(loginFirst).toContain("Set operator login");
+		expect(loginFirst).not.toContain("Add a channel");
+		const channelNext = connectRows(status, { loginConfigured: true, channelCount: 0 }).join("\n");
+		expect(channelNext).toContain("Add a channel");
+		expect(channelNext).not.toContain("Set operator login");
+		const settled = connectRows(status, { loginConfigured: true, channelCount: 2 }).join("\n");
+		expect(settled).not.toContain("next:");
 	});
 });
 
