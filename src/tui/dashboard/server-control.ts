@@ -49,14 +49,20 @@ export function defaultMainPath(): string {
 
 /**
  * Build the argv to forward to the spawned server from the launch flags. Only
- * `--tunnel`/`--channel` are server-meaningful (port/host come from the shared env);
- * `start`-time channel selection is the server's job, so the dashboard forwards
- * these verbatim. Pure — unit-tested without a server.
+ * `--tunnel`/`--channel`/`--vm`/`--vm-agent` are server-meaningful (port/host
+ * come from the shared env); `start`-time channel selection is the server's
+ * job, so the dashboard forwards these verbatim. `vmMode` (28i) threads the
+ * launch flag so a dashboard-launched sandbox genuinely boots in the mode (the
+ * tool backend is boot-scoped — off → vm/agent has no in-process switch), and
+ * `restart()` re-spawns with the SAME args closure, so the mode survives
+ * restart-to-apply. Pure — unit-tested without a server.
  */
-export function serverArgs(tunnel: boolean, channel: string | undefined): string[] {
+export function serverArgs(tunnel: boolean, channel: string | undefined, vmMode?: "vm" | "agent"): string[] {
 	const args: string[] = [];
 	if (tunnel) args.push("--tunnel");
 	if (channel !== undefined) args.push("--channel", channel);
+	if (vmMode === "vm") args.push("--vm");
+	if (vmMode === "agent") args.push("--vm-agent");
 	return args;
 }
 

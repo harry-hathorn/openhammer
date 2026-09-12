@@ -79,6 +79,18 @@ describe("serverArgs", () => {
 	it("is empty when neither flag is set", () => {
 		expect(serverArgs(false, undefined)).toEqual([]);
 	});
+
+	it("forwards --vm for the vm mode", () => {
+		expect(serverArgs(false, undefined, "vm")).toEqual(["--vm"]);
+	});
+
+	it("forwards --vm-agent for the agent mode (after tunnel/channel)", () => {
+		expect(serverArgs(true, "abc", "agent")).toEqual(["--tunnel", "--channel", "abc", "--vm-agent"]);
+	});
+
+	it("forwards nothing extra when no mode is given (off / default)", () => {
+		expect(serverArgs(false, undefined, undefined)).toEqual([]);
+	});
 });
 
 describe("ensureServer", () => {
@@ -303,6 +315,27 @@ describe("ensureServer — restart", () => {
 			["--channel", "abc"],
 			["--channel", "abc"],
 		]);
+	});
+
+	it("re-forwards the launch vm-mode flag across a restart (restart-to-apply keeps the mode)", async () => {
+		const first = new FakeChild();
+		const second = new FakeChild();
+		const spawn = spawnSeq(first, second);
+		let probeCalls = 0;
+		const result = await ensureServer(config(), {
+			probeHealth: async () => {
+				probeCalls += 1;
+				return probeCalls > 1;
+			},
+			spawn,
+			exists: () => true,
+			args: ["--vm-agent"],
+			readyIntervalMs: 1,
+		});
+		if (!result.ok) return;
+		const restartResult = await result.value.restart();
+		expect(restartResult.ok).toBe(true);
+		expect(spawn.seen.map((s) => s.args)).toEqual([["--vm-agent"], ["--vm-agent"]]);
 	});
 
 	it("refuses to restart a server it attached to (does not own)", async () => {
