@@ -68,7 +68,8 @@ import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { VmBootGate } from "../vm/boot-backend.ts";
 import { runInstall } from "../vm/provision/install.ts";
-import type { ManifestFlavor } from "../vm/provision/snapshot.ts";
+import { runProvision } from "../vm/provision/provision.ts";
+import { type ManifestFlavor, runSnapshot } from "../vm/provision/snapshot.ts";
 import { resolveVmDirs } from "../vm/session.ts";
 import type { BannerStream } from "./banner.ts";
 import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
@@ -365,14 +366,42 @@ export async function readSerialLog(sessionId: string, homeDir?: string): Promis
 	}
 }
 
+/** The post-build chaining confirm (28j — the automated first run's last step). */
+export const SANDBOX_START_AFTER_BUILD_CONFIRM = "Golden built — start the sandbox now?";
+
+/**
+ * The golden build chain (28j): the CLI's three library-grade runners composed
+ * in onboarding order — {@link runInstall} (fetch + assemble the base disk, the
+ * long step) → {@link runProvision} (boot the installed image; apply guest.json
+ * + the prewarm) → {@link runSnapshot} (seal the golden + write the manifest).
+ * One `{log}` sink feeds all three (the store's build ring in the dashboard;
+ * the session's install.log already holds them regardless). The result carries
+ * the install session dir AND the minted golden id (the completion flash's
+ * subject). The runners own their single-flight/refusal semantics (runInstall's
+ * active-session scan, snapshot's refuse-to-overwrite) — this only sequences.
+ */
+export async function buildGolden(sinks: { log: (line: string) => void }): Promise<InstallOutcome> {
+	const { log } = sinks;
+	log("golden build 1/3 — install: fetching the ISO and assembling the base disk (the long step)");
+	const installed = await runInstall({ log }, {});
+	log(
+		`golden build 2/3 — provision: booting the installed image to apply guest.json (session ${installed.sessionDir})`,
+	);
+	const provisioned = await runProvision({ log });
+	log(`golden build 3/3 — snapshot: sealing the golden image (${provisioned.flavor} flavor)`);
+	const snap = await runSnapshot({ log });
+	log(`golden build done — ${snap.goldenId}`);
+	return { sessionDir: installed.sessionDir, goldenId: snap.goldenId };
+}
+
 /** Deps for {@link createSandboxActions} (the exported, unit-testable core the buildActions wiring wraps). */
 export interface SandboxActionDeps {
 	/** Tier 1 — the direct service handle ({@link DashboardDeps.vmService}); null → the socket tier. */
 	readonly vmService?: () => VmBootGate | null;
 	/** The serial-log reader. Default: {@link readSerialLog} over the real HOME. */
 	readonly readSerial?: (sessionId: string) => Promise<Result<SerialSource, Error>>;
-	/** The live store — the serial read's sessionId comes from the latest vm-state line. */
-	readonly store: Pick<DashboardStore, "latestVmState">;
+	/** The live store — the serial read's sessionId (vm-state line) + the build ring's sink. */
+	readonly store: Pick<DashboardStore, "latestVmState" | "appendBuildLog">;
 	/**
 	 * The socket-command sender (28i) — the MIDDLE tier of the gate: used when
 	 * `vmService` holds no handle but the server's status-socket command intake
@@ -465,18 +494,17 @@ export function createSandboxActions(
 	};
 
 	const installSandbox: DashboardActions["installSandbox"] = () => {
-		// The ownership gate KEPT here (28i): the socket commands carry only the
-		// lifecycle verbs, and install writes the LOCAL vm tree — the build-chain
-		// box lifts this gate when install becomes a first-class ungated chain.
-		// A live session makes a concurrent install a fight over KVM/RAM —
-		// runInstall's own single-flight scan refuses that with its actionable
-		// evidence (matrix row 5).
-		const gate = directGate();
-		if (gate === null) return Promise.resolve(err(new Error(VM_UNOWNED_HINT)));
+		// UNGATED since 28j (the build chain): install/provision/snapshot write the
+		// LOCAL vm tree — the same owned-agnostic model as Guest setup/Secrets/
+		// provision.sh (build inputs of this machine's tree), and the golden it
+		// mints is exactly what THIS dashboard's Start boots. The live-session
+		// exclusion stays: runInstall's own single-flight scan refuses a concurrent
+		// build with its actionable evidence (matrix row 5), surfaced inline.
+		// Progress rides the store's build ring (the drill-in renders it live).
 		return guarded(async () => {
-			const install = deps.install ?? ((log: (line: string) => void) => runInstall({ log }, {}));
-			const result = await install(() => {}); // progress: the spinner (wiring) is the live surface
-			return ok({ sessionDir: result.sessionDir });
+			const sink = (line: string): void => deps.store.appendBuildLog(line);
+			const install = deps.install ?? ((log: (line: string) => void) => buildGolden({ log }));
+			return ok(await install(sink));
 		});
 	};
 
@@ -955,15 +983,27 @@ function buildActions(
 	const readSerialAction: DashboardActions["readSerial"] = overrides.readSerial ?? sandbox.readSerial;
 	const installSandboxAction: DashboardActions["installSandbox"] =
 		overrides.installSandbox ??
-		(async () =>
-			await withModal(() =>
-				runSpinner(
-					"Installing the sandbox image — this takes minutes; the run log lands in the session dir…",
-					() => sandbox.installSandbox(),
-					(r) => (r?.ok ? "install complete" : "install failed"),
-					{ terminal },
-				),
-			));
+		(async () => {
+			// The build chain (28j): the core runs the chain (progress → the store's
+			// build ring, rendered live by the root's build drill-in). On success the
+			// hasGolden memo MUST be invalidated (it never invalidated before 28j —
+			// a fresh golden left the Install row and Start's guard stale), and the
+			// automated first run completes itself: one confirm chains straight into
+			// the Start action (the mode pick / flavor gate inside it still apply).
+			const result = await sandbox.installSandbox();
+			if (result === null || !result.ok) return result;
+			store.refreshGolden();
+			const go = await withModal(() => io.confirm({ message: SANDBOX_START_AFTER_BUILD_CONFIRM }));
+			if (go !== true) return result; // declined — the build flash stands
+			// Accepted: run the Start action (its guards — the mode pick, the flavor
+			// gate — still apply), and report the CHAIN through the build outcome so
+			// the root's one flash tells the whole story.
+			const start = await startSandboxAction();
+			if (start === null) return result; // the start cancelled (a declined pick) — the build flash stands
+			return start.ok
+				? { ...result, chainedStart: true }
+				: { ...result, chainedStart: true, chainedError: start.error.message };
+		});
 
 	// Sandbox secrets (spec 28, box 28f): the tier-(b) editor over the 0700 store —
 	// masked, values write-only. Matrix row 6 lives inside the flow: the liveness

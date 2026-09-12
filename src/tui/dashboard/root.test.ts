@@ -559,25 +559,71 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 		expect(root.render(80).some((l) => l.includes("Settings updated."))).toBe(true);
 	});
 
-	it("enter on Install (no golden) runs installSandbox and flashes the completion + the onboarding next step", async () => {
+	it("enter on Install navigates to the live build drill-in, flashes the golden id, and returns to the Sandbox (28j)", async () => {
 		const log: string[] = [];
+		let storeRef: DashboardStore | undefined;
 		const root = await sandboxed(
 			log,
-			() => ({
-				installSandbox: async () =>
-					ok({ sessionDir: "/h/.openhammer/vm/sessions/build-9" }) as Result<InstallOutcome, Error>,
-			}),
+			(store) => {
+				storeRef = store;
+				return {
+					installSandbox: async () => {
+						log.push("installSandbox");
+						store.appendBuildLog("golden build 1/3 — install: …");
+						store.appendBuildLog("golden build done — golden-4.0.3-20260912-101112");
+						return ok({
+							sessionDir: "/h/.openhammer/vm/sessions/build-9",
+							goldenId: "golden-4.0.3-20260912-101112",
+						}) as Result<InstallOutcome, Error>;
+					},
+				};
+			},
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
 		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (no golden + stopped → the Start row leads the list, 28j; the apply rows hide without a ready line, box 28g)
 		root.handleInput(ENTER);
 		await flushActions();
-		const lines = root.render(80);
-		expect(lines.some((l) => l.includes("Install complete — session /h/.openhammer/vm/sessions/build-9"))).toBe(true);
-		expect(lines.some((l) => l.includes("Next: Configure → set the boot mode, then restart"))).toBe(true);
+		// Completion returns to the Sandbox screen with the golden-id flash — Start is right there.
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		const lines = root.render(200);
+		expect(lines.some((l) => l.includes("Golden built: golden-4.0.3-20260912-101112"))).toBe(true);
+		expect(storeRef?.buildLog).toContain("golden build done — golden-4.0.3-20260912-101112");
 	});
 
-	it("a failed install flashes the runner's actionable error inline", async () => {
+	it("the build drill-in renders the LIVE ring; Esc backs out mid-build and the chain keeps running (28j)", async () => {
+		const log: string[] = [];
+		let storeRef: DashboardStore | undefined;
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const root = await sandboxed(
+			log,
+			(store) => {
+				storeRef = store;
+				return {
+					installSandbox: async () => {
+						log.push("installSandbox");
+						await blocked;
+						return ok({ sessionDir: "s" }) as Result<InstallOutcome, Error>;
+					},
+				};
+			},
+			{ hasGolden: false, vmState: "stopped" },
+		);
+		for (let i = 0; i < 8; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER); // → the build screen while the chain runs
+		expect(root.screen).toEqual({ kind: "build" });
+		storeRef?.appendBuildLog("golden build 2/3 — provision: 8/8 checks ok");
+		expect(root.render(200).some((l) => l.includes("8/8 checks ok"))).toBe(true); // LIVE — no flush needed
+		root.handleInput(ESC); // back out mid-build
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		release();
+		await flushActions();
+		expect(log).toEqual(["installSandbox"]); // the chain completed out of sight
+	});
+
+	it("a failed install flashes the runner's actionable error and STAYS on the build screen (the tail is the evidence)", async () => {
 		const log: string[] = [];
 		const root = await sandboxed(
 			log,
@@ -589,6 +635,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (no golden + stopped → the Start row leads, 28j; the apply rows hide — box 28g)
 		root.handleInput(ENTER);
 		await flushActions();
+		expect(root.screen).toEqual({ kind: "build" });
 		expect(root.render(80).some((l) => l.includes("vm install: gate failed"))).toBe(true);
 	});
 

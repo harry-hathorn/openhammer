@@ -65,6 +65,7 @@ import {
 	channelRows,
 	clientRows,
 	monitorRows,
+	SERIAL_TAIL_LINES,
 	type SerialSource,
 	type SerialTail,
 	sandboxHeaderRows,
@@ -87,6 +88,7 @@ export type ScreenState =
 	| { kind: "section"; section: Section }
 	| { kind: "channel-detail"; id: string }
 	| { kind: "client-detail"; id: string }
+	| { kind: "build" }
 	| { kind: "serial" };
 
 /** The add/issue row markers (matched by prefix so a conditional offset can't misroute). */
@@ -236,9 +238,15 @@ export interface DashboardActions {
 	quit(): void;
 }
 
-/** What an install run reports — `runInstall`'s result narrowed to what the completion flash names. */
+/** What a build run reports — the chain's outcome narrowed to what the completion flash names. */
 export interface InstallOutcome {
 	readonly sessionDir: string;
+	/** The minted golden id, when the chain reached the snapshot step (28j's build chain). */
+	readonly goldenId?: string;
+	/** The wiring chained the confirm into the Start action (28j's automated first run). */
+	readonly chainedStart?: boolean;
+	/** The chained Start's error message, when it was accepted but failed. */
+	readonly chainedError?: string;
 }
 
 /** Injection seam for {@link DashboardRoot}. */
@@ -307,6 +315,8 @@ export class DashboardRoot implements Component {
 			case "channel-detail":
 			case "client-detail":
 				return "↑↓/jk move · enter/l action · esc/h back";
+			case "build":
+				return "esc/h back — the build keeps running";
 			case "serial":
 				return "esc/h back to return";
 		}
@@ -383,6 +393,26 @@ export class DashboardRoot implements Component {
 			case "client-detail": {
 				const spec = clientDetailSpec(this.store, this.screen.id, this.style);
 				return { header: spec.header, items: spec.items, hint: this.hint() };
+			}
+			case "build": {
+				// The build drill-in (28j): the LIVE golden-build progress ring — the
+				// chained install → provision → snapshot appends to the store, and this
+				// re-reads it every tick (unlike the serial snapshot below). Esc backs
+				// out mid-build; the chain keeps running (the single-flight guard makes
+				// an early re-entry harmless until it settles).
+				const log = this.store.buildLog;
+				return {
+					header:
+						log.length > 0
+							? [
+									"golden build — install → provision → snapshot (live; esc backs out, the build keeps running)",
+									"",
+									...log.slice(-BUILD_TAIL_LINES),
+								]
+							: ["golden build — starting (install → provision → snapshot)…"],
+					items: BACK_ONLY,
+					hint: this.hint(),
+				};
 			}
 			case "serial": {
 				// The serial drill-in (spec 28, box 28b): the one-line window/bytes note,
@@ -499,6 +529,7 @@ export class DashboardRoot implements Component {
 				this.screen = { kind: "section", section: "clients" };
 				this.focus = 0;
 				return;
+			case "build":
 			case "serial":
 				this.screen = { kind: "section", section: "sandbox" };
 				this.focus = 0;
@@ -708,14 +739,29 @@ export class DashboardRoot implements Component {
 				return;
 			}
 			if (label === SANDBOX_INSTALL_LABEL) {
-				// The no-golden jump target (spec 28, box 28c, matrix row 2). Progress is
-				// the spinner (the wiring's runModal); this flash carries the outcome + the
-				// onboarding next step (Install → set mode → restart).
+				// The build chain (28j): navigate to the LIVE build drill-in (the store's
+				// buildLog ring renders fresh each tick), run the chained install →
+				// provision → snapshot, then return to the Sandbox screen with the
+				// outcome flashed — the golden id (or, when the wiring's confirm chained
+				// the Start action, the chain's whole story). A failure STAYS on the
+				// build screen: the tail is the evidence.
+				this.screen = { kind: "build" };
+				this.focus = 0;
 				const result = await this.actions.installSandbox();
 				if (result === null) return;
-				this.flashMessage = result.ok
-					? `Install complete — session ${result.value.sessionDir}. Next: Configure → set the boot mode, then restart.`
-					: result.error.message;
+				if (!result.ok) {
+					this.flashMessage = result.error.message;
+					return;
+				}
+				this.back();
+				this.flashMessage =
+					result.value.chainedStart === true
+						? result.value.chainedError !== undefined
+							? `Golden built — but the start failed: ${result.value.chainedError}`
+							: "Golden built — the sandbox is starting (the state row flips to booting)."
+						: result.value.goldenId !== undefined
+							? `Golden built: ${result.value.goldenId} — ready to start.`
+							: `Install complete — session ${result.value.sessionDir}.`;
 				return;
 			}
 		}
@@ -794,3 +840,6 @@ export class DashboardRoot implements Component {
 
 /** A single "Back" row for view-only screens (status, monitor). */
 const BACK_ONLY = [{ label: "Back", description: "to menu" }];
+
+/** The build drill-in's tail window (the serial tail's size — the verdict sits at the END). */
+const BUILD_TAIL_LINES = SERIAL_TAIL_LINES;
