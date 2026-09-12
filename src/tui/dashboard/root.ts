@@ -131,14 +131,17 @@ export interface DashboardActions {
 	 * vm-state line: main.ts wires service transitions → status socket (27h), and the
 	 * dashboard's socket-client feed lands them in the store — owned and attached
 	 * dashboards take the SAME loopback path, so no direct render poke exists or is
-	 * needed. Owned-server only; unowned activations err with the unowned hint.
+	 * needed. Since 28i the production path is a `vm-restart` command over the
+	 * status socket (accepted, not completed); with neither tier wired, activations
+	 * err with the unowned hint.
 	 */
 	restartSandbox(): Promise<Result<void, Error> | null>;
 	/**
 	 * Read the session's serial log (the vm-state line's sessionId) as
 	 * `{ content, totalBytes }` (spec 28, box 28b). The default reader is
 	 * `<HOME>/.openhammer/vm/sessions/<sessionId>/serial.log`; a missing file errs
-	 * "no serial yet". Owned-server only — a remote server's serial file isn't here.
+	 * "no serial yet". Gate-free since 28i — a same-host file, so it works owned
+	 * and attached alike.
 	 */
 	readSerial(): Promise<Result<SerialSource, Error>>;
 	/**

@@ -5,6 +5,7 @@ import type { Terminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { NO_GOLDEN_GUARD_MESSAGE } from "../config/sections.ts";
 import { type ChannelEntry, defaultVmSettings, type Settings, type VmSettings } from "../config/settings.ts";
+import type { VmCommandName } from "../observability/status-socket.ts";
 import { err, ok, type Result } from "../tools/result.ts";
 import type { VmBootGate } from "../vm/boot-backend.ts";
 import type { VmStatus } from "../vm/service.ts";
@@ -297,31 +298,123 @@ describe("createSandboxActions — owned server", () => {
 });
 
 describe("createSandboxActions — unowned server (the hint, exact)", () => {
-	it("every Sandbox action errs with the unowned hint; no service is ever touched", async () => {
+	it("with NO sender wired, stop/restart/install still err with the unowned hint; no service is touched", async () => {
 		let consulted = 0;
-		let read = false;
 		const actions = createSandboxActions({
 			vmService: () => {
 				consulted += 1;
 				return null;
 			},
+			store: new DashboardStore(),
+		});
+		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(await actions.restartSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(await actions.installSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+		expect(consulted).toBe(3); // the gate was consulted per action; nothing behind it existed to touch
+	});
+
+	it("readSerial is gate-free: no vm-state line errs no-serial-yet (the reader never called)", async () => {
+		let read = false;
+		const actions = createSandboxActions({
+			vmService: () => null,
 			readSerial: async () => {
 				read = true;
 				return ok({ content: "", totalBytes: 0 });
 			},
 			store: new DashboardStore(),
 		});
-		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(await actions.restartSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(await actions.readSerial()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(await actions.installSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(consulted).toBe(4); // the gate was consulted; nothing behind it existed to touch
-		expect(read).toBe(false); // the unowned gate precedes the serial read
+		expect(await actions.readSerial()).toEqual({ ok: false, error: new Error("no serial yet") });
+		expect(read).toBe(false); // the no-session check precedes the read
 	});
 
 	it("an absent vmService dep is unowned too (today's child-process wiring)", async () => {
 		const actions = createSandboxActions({ store: new DashboardStore() });
 		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+	});
+});
+
+describe("createSandboxActions — the socket-command tier (28i)", () => {
+	it("stop/restart ride sendCommand with the exact verbs when no handle exists", async () => {
+		const sent: VmCommandName[] = [];
+		const actions = createSandboxActions({
+			vmService: () => null,
+			sendCommand: async (cmd) => {
+				sent.push(cmd);
+				return ok(undefined);
+			},
+			store: new DashboardStore(),
+		});
+		expect(await actions.stopSandbox()).toEqual({ ok: true, value: undefined });
+		expect(await actions.restartSandbox()).toEqual({ ok: true, value: undefined });
+		expect(sent).toEqual(["vm-stop", "vm-restart"]);
+	});
+
+	it("the owned direct path wins when a handle exists — the sender is never consulted", async () => {
+		const calls: string[] = [];
+		let sent = 0;
+		const actions = createSandboxActions({
+			vmService: () =>
+				scriptedGate({
+					stop: async () => {
+						calls.push("stop");
+						return {};
+					},
+				}),
+			sendCommand: async () => {
+				sent += 1;
+				return ok(undefined);
+			},
+			store: new DashboardStore(),
+		});
+		expect(await actions.stopSandbox()).toEqual({ ok: true, value: undefined });
+		expect(sent).toBe(0);
+		expect(calls).toEqual(["stop"]);
+	});
+
+	it("a command refusal passes through verbatim (the flash's actionable line)", async () => {
+		const refusal = "cannot start — the boot mode is off; relaunch openhammer with --vm or --vm-agent";
+		const actions = createSandboxActions({
+			sendCommand: async () => err(new Error(refusal)),
+			store: new DashboardStore(),
+		});
+		expect(await actions.restartSandbox()).toEqual({ ok: false, error: new Error(refusal) });
+	});
+
+	it("the single-flight guard covers the socket tier too", async () => {
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let sends = 0;
+		const actions = createSandboxActions({
+			sendCommand: async () => {
+				sends += 1;
+				await blocked;
+				return ok(undefined);
+			},
+			store: new DashboardStore(),
+		});
+		const first = actions.stopSandbox();
+		const second = await actions.stopSandbox();
+		expect(second).toEqual({ ok: false, error: new Error(VM_IN_FLIGHT_HINT) });
+		expect(sends).toBe(1);
+		release();
+		expect(await first).toEqual({ ok: true, value: undefined });
+	});
+
+	it("readSerial works unowned with a live session (the attached-dashboard case)", async () => {
+		const store = new DashboardStore();
+		store.applyVmStateLine(vmLine("vm-attached"));
+		const reads: string[] = [];
+		const actions = createSandboxActions({
+			readSerial: async (id) => {
+				reads.push(id);
+				return ok({ content: "line\n", totalBytes: 5 });
+			},
+			store,
+		});
+		expect(await actions.readSerial()).toEqual({ ok: true, value: { content: "line\n", totalBytes: 5 } });
+		expect(reads).toEqual(["vm-attached"]);
 	});
 });
 
