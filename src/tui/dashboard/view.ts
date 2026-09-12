@@ -16,12 +16,16 @@
  *
  * **"unknown" vs "down":** a channel absent from `channelState` is `unknown`
  * (not yet reported); `up:false` is reported down — distinct states the channels
- * screen renders differently.
+ * screen renders differently. Since 28j a server-reported down-reason rides the
+ * row and the detail (`down — <reason>`) instead of a silent `down`.
  */
+
 import type { ClientInfo } from "../../auth/oauth/clients.ts";
+import { credentialPath } from "../../auth/token.ts";
 import type { ChannelEntry, Settings, VmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
 import type { VmStateLine } from "../../observability/status-socket.ts";
+import { mcpServersConfig } from "../../startup-print.ts";
 import { formatBytes, formatEvent, formatVmState } from "../monitor-view.ts";
 import type { ChannelLiveState, ServerStatusState } from "./store.ts";
 
@@ -45,6 +49,8 @@ export interface ChannelRow {
 	url: string;
 	/** Is this the default channel? */
 	isDefault: boolean;
+	/** The server's actionable down-reason, when it reported one (28j — never a silent down). */
+	error?: string;
 }
 
 /** One selectable OAuth-client row (the Clients screen's list). */
@@ -86,6 +92,7 @@ export function channelRows(
 			live: live === undefined ? "unknown" : live.up ? "up" : "down",
 			url: live?.url ?? ch.options.publicUrl ?? "",
 			isDefault: ch.id === defaultChannelId,
+			...(live?.error ? { error: live.error } : {}),
 		};
 	});
 }
@@ -106,7 +113,10 @@ export function channelDetailRows(
 		{ label: "kind", value: channel.kind },
 		{ label: "mode", value: channel.mode },
 		{ label: "default", value: channel.id === defaultChannelId ? "yes" : "no" },
-		{ label: "status", value: live === undefined ? "unknown" : live.up ? "up" : "down" },
+		{
+			label: "status",
+			value: live === undefined ? "unknown" : live.up ? "up" : live.error ? `down — ${live.error}` : "down",
+		},
 		{ label: "url", value: live?.url ?? channel.options.publicUrl ?? "(none)" },
 	];
 	for (const [key, value] of Object.entries(channel.options)) {
@@ -126,6 +136,46 @@ export function statusRows(status: ServerStatusState): FieldRow[] {
 	if (status.publicUrl !== null) rows.push({ label: "tunnel", value: status.publicUrl });
 	if (status.token !== null) rows.push({ label: "token", value: status.token });
 	return rows;
+}
+
+/**
+ * The Status screen's CONNECT block (28j): everything an operator needs to hand
+ * the running server to a client, derived from the live status — the
+ * ready-to-paste `mcpServers` JSON (the EXACT block the boot banner prints,
+ * {@link mcpServersConfig} — one source, so the TUI user finally sees what the
+ * headless boot always printed), a curl smoke test for the bearer, the
+ * credential-file path, and the ONE next step for the operator's state (an unset
+ * login blocks login clients; no channel means no remote access yet). Empty
+ * until the endpoint AND token are known — nothing to connect to before that.
+ * The credential path is env-derived (`credentialPath()`) exactly like the boot
+ * banner's — the one deliberate impurity, kept beside the pure builders for the
+ * single-source reason above. Pure otherwise.
+ */
+export function connectRows(
+	status: ServerStatusState,
+	opts: { loginConfigured: boolean; channelCount: number },
+): string[] {
+	if (status.localUrl === null || status.token === null) return [];
+	const endpoint = `${status.localUrl}/mcp`;
+	const lines: string[] = [
+		"",
+		"connect — hand this to your MCP client:",
+		JSON.stringify(mcpServersConfig(endpoint, status.token), null, 2)
+			.split("\n")
+			.map((line) => `  ${line}`)
+			.join("\n"),
+		"",
+		`  smoke test:  curl -s -X POST ${endpoint} -H "Authorization: Bearer ${status.token}" \\`,
+		`               -H "Content-Type: application/json" \\`,
+		`               -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'`,
+		`  credential:  ${credentialPath()} (the token is reused on restart)`,
+	];
+	if (!opts.loginConfigured) {
+		lines.push("", "next: Clients & login → Set operator login — login clients cannot connect without it");
+	} else if (opts.channelCount === 0) {
+		lines.push("", "next: Channels → Add a channel — remote access needs a public URL");
+	}
+	return lines;
 }
 
 /**

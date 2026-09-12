@@ -161,7 +161,9 @@ export function menuItems(store: DashboardStore): ListItem[] {
 export function channelItems(store: DashboardStore): ListItem[] {
 	const rows: ListItem[] = channelRows(store.channels, store.defaultChannelId, store.channelState).map((r) => ({
 		label: r.label,
-		description: `${r.kind} · ${r.live}${r.isDefault ? " · default" : ""}`,
+		// A server-reported down-reason rides the list row (28j) — never a silent
+		// `down` the operator has to drill into (or open a boot log) to explain.
+		description: `${r.kind} · ${r.live}${r.error ? ` — ${r.error}` : ""}${r.isDefault ? " · default" : ""}`,
 	}));
 	rows.push({ label: "＋  Add a channel…", description: "run the wizard" });
 	return rows;

@@ -64,6 +64,7 @@ import type { DashboardStore } from "./store.ts";
 import {
 	channelRows,
 	clientRows,
+	connectRows,
 	monitorRows,
 	SERIAL_TAIL_LINES,
 	type SerialSource,
@@ -331,7 +332,18 @@ export class DashboardRoot implements Component {
 				const section = this.screen.section;
 				if (section === "status") {
 					return {
-						header: renderFieldRows(statusRows(this.store.status), this.style),
+						// The status field rows, then the connect block (28j): the
+						// ready-to-paste client config the dashboard used to swallow (the
+						// server child's stdout was piped away — now the TUI prints the
+						// exact same block the headless boot does), a curl smoke test, the
+						// credential path, and the one next step for this operator's state.
+						header: [
+							...renderFieldRows(statusRows(this.store.status), this.style),
+							...connectRows(this.store.status, {
+								loginConfigured: this.store.loginConfigured,
+								channelCount: this.store.channels.length,
+							}),
+						],
 						items: BACK_ONLY,
 						hint: this.hint(),
 					};

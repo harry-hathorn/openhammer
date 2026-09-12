@@ -63,6 +63,13 @@ export interface ChannelStateLine {
 	up: boolean;
 	/** The channel's public URL, or `null` when it is down/has no URL. */
 	url: string | null;
+	/**
+	 * The boot's actionable reason the channel is down (28j's tunnel-error
+	 * visibility — the boot notice folded into the line), or absent/`null` when
+	 * it is up. ADDITIVE: an older server never sends it and every existing
+	 * consumer ignores it.
+	 */
+	error?: string | null;
 }
 
 /** Serialize a channel-state line as one NDJSON line (compact JSON + `\n`). */
@@ -82,7 +89,8 @@ function isChannelStateLine(v: unknown): v is ChannelStateLine {
 		v.type === "channel-state" &&
 		typeof v.id === "string" &&
 		typeof v.up === "boolean" &&
-		(v.url === null || typeof v.url === "string")
+		(v.url === null || typeof v.url === "string") &&
+		(v.error === undefined || v.error === null || typeof v.error === "string")
 	);
 }
 

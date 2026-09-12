@@ -81,6 +81,13 @@ describe("screens — menuItems", () => {
 });
 
 describe("screens — channelItems / channelDetailSpec", () => {
+	it("a down channel's list row carries the server-reported reason (28j — never a silent down)", () => {
+		const store = storeWith([ch({ id: "a", kind: "ngrok", label: "tun" })]);
+		store.setChannelState("a", false, null, "ngrok authentication failed");
+		const row = channelItems(store).find((i) => i.label === "tun");
+		expect(row?.description).toContain("down — ngrok authentication failed");
+	});
+
 	it("channelItems lists channels then the add row", () => {
 		const s = storeWith([ch({ id: "a", kind: "ngrok", label: "tun" })], { status: undefined });
 		s.setChannelState("a", true, "https://up");

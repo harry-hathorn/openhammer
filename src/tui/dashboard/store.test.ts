@@ -72,6 +72,14 @@ describe("DashboardStore — mutators", () => {
 		expect(s.defaultChannelId).toBe("c1");
 	});
 
+	it("setChannelState carries the server-reported down-reason; an up report clears it (28j, additive)", () => {
+		const s = new DashboardStore();
+		s.setChannelState("c1", false, null, "ngrok authentication failed");
+		expect(s.channelState.c1).toEqual({ up: false, url: null, error: "ngrok authentication failed" });
+		s.applyChannelState("c1", true, "https://x");
+		expect(s.channelState.c1).toEqual({ up: true, url: "https://x" }); // the row replaced — no stale error
+	});
+
 	it("setChannelState / applyChannelState record up+url per id (absent = unknown)", () => {
 		const s = new DashboardStore();
 		const id = "c1";

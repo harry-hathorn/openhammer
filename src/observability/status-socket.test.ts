@@ -203,6 +203,33 @@ describe("channel-state wire format", () => {
 		).toBeNull();
 		expect(parseChannelStateLine(JSON.stringify({ type: "event", id: "a", up: true, url: null }))).toBeNull();
 	});
+
+	it("tolerates the ADDITIVE error field (28j tunnel-error visibility) and rejects a non-string one", () => {
+		const withError = JSON.stringify({
+			type: "channel-state",
+			id: "a",
+			up: false,
+			url: null,
+			error: "ngrok authentication failed — continuing localhost-only.",
+		});
+		expect(parseChannelStateLine(withError)).toEqual({
+			type: "channel-state",
+			id: "a",
+			up: false,
+			url: null,
+			error: "ngrok authentication failed — continuing localhost-only.",
+		});
+		// Absent (an older writer) parses exactly as before — the additive rule.
+		expect(parseChannelStateLine(formatChannelStateLine(channelState("a", true, "https://x")))).toEqual(
+			channelState("a", true, "https://x"),
+		);
+		expect(
+			parseChannelStateLine(JSON.stringify({ type: "channel-state", id: "a", up: true, url: null, error: 7 })),
+		).toBeNull();
+		// The other consumers' parsers are unharmed by the new field (additive both ways).
+		expect(parseVmStateLine(withError)).toBeNull();
+		expect(parseEventLine(withError)).toBeNull();
+	});
 });
 
 describe("vm-state wire format (spec 27h)", () => {
