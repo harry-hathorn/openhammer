@@ -52,6 +52,7 @@ import {
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SECRETS_LABEL,
 	SANDBOX_SERIAL_LABEL,
+	SANDBOX_START_LABEL,
 	SANDBOX_STOP_LABEL,
 	type ScreenSpec,
 	SET_LOGIN_LABEL,
@@ -115,6 +116,17 @@ export interface DashboardActions {
 	setLogin(): Promise<Result<void, Error> | null>;
 	/** `doctor`. Returns the report text ("" if it could not run). */
 	runDoctor(): Promise<string>;
+	/**
+	 * Start the sandbox (28j) — the one-action launch. The exported core
+	 * (dashboard.ts's {@link createStartSandboxAction}) owns the guards (no golden
+	 * → the guard line; mode off → the vm/agent pick, persisted before dispatch;
+	 * agent over a base-flavor golden → the degradation confirm) and the dispatch
+	 * (off → the child re-spawn so a fresh boot raises the sandbox; vm/agent → a
+	 * server-side `vm-restart`, owned and attached alike). `null` = a cancelled
+	 * pick/declined confirm (silent). The Sandbox screen offers the top row
+	 * exactly when no session is live (`sandboxStartOffered`).
+	 */
+	startSandbox(): Promise<Result<void, Error> | null>;
 	/**
 	 * Stop the VM sandbox (spec 28, matrix row 4): the `VmService` teardown — clean
 	 * ACPI powerdown + stop ladder + persist policy (spec 27e). The wired action asks
@@ -594,6 +606,18 @@ export class DashboardRoot implements Component {
 			// owned-server gate: an unowned activation errs with the unowned hint, which
 			// flashes here — the same inline surfacing any other failure gets. The
 			// no-golden guard (a thrown write) surfaces through the activation catch.
+			if (label === SANDBOX_START_LABEL) {
+				// The headline one-action launch (28j): the exported core owns the guards
+				// (no golden, the mode pick, the base-flavor confirm) and the dispatch
+				// (off → child re-spawn; vm/agent → a server-side vm-restart). A cancelled
+				// pick/declined confirm is `null` — silent (the modal idiom).
+				const result = await this.actions.startSandbox();
+				if (result === null) return;
+				this.flashMessage = result.ok
+					? "Start accepted — the sandbox is booting (the state row flips to booting)."
+					: result.error.message;
+				return;
+			}
 			if (label === SANDBOX_STOP_LABEL) {
 				const result = await this.actions.stopSandbox();
 				if (result === null) return; // confirmation declined — silent (the modal idiom)

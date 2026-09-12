@@ -189,16 +189,14 @@ export function settingsRows(settings: Settings): FieldRow[] {
 // ---- the Sandbox entry (spec 28) ----------------------------------------------
 
 /**
- * The Sandbox entry's visibility — the off-mode invisibility rule (spec 28):
- * the entry is ABSENT exactly when the **loaded settings'** vm mode is `off` AND
- * no vm-state line with state ≠ `off` has ever arrived. The mode is read from
- * the settings doc (not from the line): that is what the default npm user has,
- * so they see nothing new. A vm-state line is the escape hatch for a boot-time
- * override (`MCP_VM_MODE=vm` in the env while the doc still says `off`) — once
- * the server reports a live VM lifecycle, the entry appears. Pure.
+ * Is Start sandbox OFFERED as the Sandbox screen's top row (28j)? Exactly when
+ * NO session is live: `stopped`/`failed` (a start re-arms the boot), a
+ * configured-but-never-booted mode, and no line at all. While a session is
+ * `booting`/`ready` the sandbox is already up — Start hides (the row-5
+ * hide-don't-disable precedent; Stop/Restart are the live levers then). Pure.
  */
-export function sandboxEntryVisible(mode: VmSettings["mode"], vmObserved: boolean): boolean {
-	return mode !== "off" || vmObserved;
+export function sandboxStartOffered(line: VmStateLine | null): boolean {
+	return !vmSessionActive(line);
 }
 
 /**

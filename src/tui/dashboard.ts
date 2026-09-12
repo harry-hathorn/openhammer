@@ -60,7 +60,7 @@ import {
 	setOperatorLogin,
 } from "../auth/oauth/clients.ts";
 import { credentialsPath } from "../config/credentials.ts";
-import { type ConfigSection, vmSection } from "../config/sections.ts";
+import { type ConfigSection, NO_GOLDEN_GUARD_MESSAGE, vmSection } from "../config/sections.ts";
 import { type Settings, saveSettings, settingsPath } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
 import type { ChannelStateLine, VmCommandName } from "../observability/status-socket.ts";
@@ -68,6 +68,7 @@ import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { VmBootGate } from "../vm/boot-backend.ts";
 import { runInstall } from "../vm/provision/install.ts";
+import type { ManifestFlavor } from "../vm/provision/snapshot.ts";
 import { resolveVmDirs } from "../vm/session.ts";
 import type { BannerStream } from "./banner.ts";
 import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
@@ -81,6 +82,7 @@ import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
 import { addChannel } from "./wizards/channel.ts";
 import {
+	newestGoldenFlavor,
 	newestGoldenGuestUser,
 	runApplyAgent,
 	runApplyTheme,
@@ -492,6 +494,102 @@ export function createSandboxActions(
 	return { stopSandbox, restartSandbox, readSerial, installSandbox };
 }
 
+// ---- the Start action (28j): the one-action sandbox launch -----------------------
+
+/** The base-flavor confirm's modal message (the Start-time flavor gate, 28j). */
+export const SANDBOX_AGENT_BASE_FLAVOR_CONFIRM =
+	"The golden image is base flavor — the agent CLI is not pre-installed, so in agent mode the agent session dies at launch (the sandbox itself boots fine). Rebuild first: Guest setup, then Install sandbox. Start in agent mode anyway?";
+
+/** The attached off-mode Start's honest err — the mode is saved; only a relaunch can raise the sandbox. */
+export const SANDBOX_START_ATTACHED_OFF_HINT =
+	"boot mode saved — restart openhammer to boot the sandbox (the dashboard did not start this server, so it cannot re-spawn it)";
+
+/**
+ * Deps for {@link createStartSandboxAction} — the exported, unit-testable Start
+ * core the buildActions wiring wraps (the createSandboxActions precedent). The
+ * io-bearing pieces (the mode pick, the confirm modal) arrive as seams.
+ */
+export interface StartSandboxDeps {
+	/** The live store: the configured mode, the golden probe, the doc adoption + pending flag. */
+	readonly store: Pick<DashboardStore, "settings" | "setSettings" | "setVmApplyPending" | "hasGolden">;
+	/** The mode picker for an off-mode start (the wiring's io.select). `null` = cancelled. */
+	readonly pickMode: () => Promise<"vm" | "agent" | null>;
+	/** The confirm modal (the wiring wraps `io.confirm` + the suspend/resume pair). */
+	readonly confirm: (message: string) => Promise<boolean | null>;
+	/** Persist the settings doc when Start flips the mode (the runDashboard `persist` seam). */
+	readonly persist: (s: Settings) => void;
+	/**
+	 * The child re-spawn seam ({@link DashboardDeps.restartServer}) — the off-mode
+	 * dispatch: the tool backend is boot-scoped, so an OFF server has no sandbox
+	 * process to command; the fresh boot resolves the persisted mode and runs
+	 * preflight + the eager boot (27f). Absent → the honest attached hint err.
+	 */
+	readonly restartServer?: () => Promise<Result<void, Error>>;
+	/** The socket-command sender (the vm/agent dispatch). Absent → the unowned hint. */
+	readonly sendCommand?: (cmd: VmCommandName) => Promise<Result<void, Error>>;
+	/** The newest golden's flavor probe. Default: {@link newestGoldenFlavor} (the local tree). */
+	readonly goldenFlavor?: () => ManifestFlavor | undefined;
+}
+
+/**
+ * The Start action's core (28j) — the one-action sandbox launch, the fix for
+ * "why does this require so many steps?". Guards, in order:
+ *
+ * 1. **No golden** → the guard line ({@link NO_GOLDEN_GUARD_MESSAGE}) — the same
+ *    message the vm write guard throws; both remedies it names (the CLI, the
+ *    Sandbox → Install row) are reachable from exactly where the operator is.
+ * 2. **Mode off** → pick `vm`/`agent` (cancel → `null`, silent); the pick is
+ *    PERSISTED + adopted before dispatch — the persisted doc is the only thing
+ *    a fresh boot resolves (the dashboard's own launch flags are not consulted).
+ * 3. **The flavor gate**: starting in agent mode over a base-flavor (or
+ *    unreadable — fail-safe) golden asks ONE confirm naming the silent
+ *    degradation (the tmux agent dies at launch; the boot itself succeeds) and
+ *    the remedy (rebuild via Guest setup + Install). Declining → `null`; a pick
+ *    that was persisted leaves the row-3 pending note (saved, not booted).
+ * 4. **Dispatch**: mode was off → the child re-spawn via `restartServer`
+ *    (absent seam → the honest attached hint err — nothing dishonestly silent).
+ *    Mode was already `vm`/`agent` → `sendCommand("vm-restart")` — the
+ *    server-side stop-then-re-arming-start covers start-from-stopped AND a live
+ *    restart, owned and attached alike.
+ */
+export async function createStartSandboxAction(deps: StartSandboxDeps): Promise<Result<void, Error> | null> {
+	if (!deps.store.hasGolden) {
+		return err(new Error(NO_GOLDEN_GUARD_MESSAGE));
+	}
+	const mode = deps.store.settings.vm.mode;
+	let effective: "vm" | "agent";
+	if (mode === "off") {
+		const picked = await deps.pickMode();
+		if (picked === null) return null; // cancelled — silent (the modal idiom)
+		effective = picked;
+		const next: Settings = { ...deps.store.settings, vm: { ...deps.store.settings.vm, mode: picked } };
+		deps.persist(next);
+		deps.store.setSettings(next);
+	} else {
+		effective = mode;
+	}
+	if (effective === "agent") {
+		const flavor = (deps.goldenFlavor ?? newestGoldenFlavor)();
+		if (flavor !== "agent") {
+			const go = await deps.confirm(SANDBOX_AGENT_BASE_FLAVOR_CONFIRM);
+			if (go !== true) {
+				// A persisted pick an (still off-mode) server has not applied — the
+				// row-3 pending note carries the honesty (mode saved, not booted).
+				if (mode === "off") deps.store.setVmApplyPending(true);
+				return null;
+			}
+		}
+	}
+	if (mode === "off") {
+		const restart = deps.restartServer;
+		if (restart === undefined) return err(new Error(SANDBOX_START_ATTACHED_OFF_HINT));
+		return restart();
+	}
+	const send = deps.sendCommand;
+	if (send === undefined) return err(new Error(VM_UNOWNED_HINT));
+	return send("vm-restart");
+}
+
 // ---- the settings actions + the mode-select guards (spec 28, box 28c) ------------
 
 /**
@@ -800,6 +898,46 @@ function buildActions(
 		sendCommand: deps.sendVmCommand ?? ((cmd) => sendVmCommand(cmd)),
 		store,
 	});
+	// The Start action (28j): the exported core owns the guards + dispatch; the
+	// wiring dresses the two io seams (the mode pick, the base-flavor confirm) as
+	// modals and the off-mode re-spawn in the restart spinner (the apply path's
+	// exact pattern — a re-spawn is a server restart the operator should SEE).
+	const startSandboxAction: DashboardActions["startSandbox"] =
+		overrides.startSandbox ??
+		(async () =>
+			withModal(() =>
+				createStartSandboxAction({
+					store,
+					pickMode: async () => {
+						const picked = await io.select({
+							message: "Boot mode for the sandbox",
+							options: [
+								{ value: "vm", label: "vm — tools run inside the sandboxed guest" },
+								{ value: "agent", label: "agent — the guest plus a preinstalled agent CLI" },
+							],
+							initialValue: "vm",
+						});
+						return picked === "vm" || picked === "agent" ? picked : null;
+					},
+					confirm: (message) => io.confirm({ message }),
+					persist,
+					restartServer: restartServerSeam
+						? (): Promise<Result<void, Error>> =>
+								withModal(() =>
+									runSpinner(
+										"Starting the sandbox — restarting the server so the fresh boot raises it…",
+										() => restartServerSeam(),
+										(r) =>
+											r.ok
+												? "server restarted — the sandbox is booting"
+												: `restart failed: ${r.error.message}`,
+										{ terminal },
+									),
+								)
+						: undefined,
+					sendCommand: deps.sendVmCommand ?? ((cmd) => sendVmCommand(cmd)),
+				}),
+			));
 	const stopSandboxAction: DashboardActions["stopSandbox"] =
 		overrides.stopSandbox ??
 		(async () => {
@@ -903,6 +1041,7 @@ function buildActions(
 		removeClient: removeClientAction,
 		setLogin: setLoginAction,
 		runDoctor: runDoctorAction,
+		startSandbox: startSandboxAction,
 		stopSandbox: stopSandboxAction,
 		restartSandbox: restartSandboxAction,
 		readSerial: readSerialAction,

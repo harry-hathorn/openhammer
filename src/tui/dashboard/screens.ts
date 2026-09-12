@@ -30,7 +30,6 @@ import {
 	clientRows,
 	type FieldRow,
 	grantTypeLabel,
-	sandboxEntryVisible,
 	sandboxStateText,
 } from "./view.ts";
 
@@ -57,12 +56,14 @@ export interface ScreenSpec {
 
 /**
  * The menu's section rows, in display/dispatch order (Sandbox last — appended so
- * the long-standing row positions — Settings at 4, Doctor at 5 — never shift for
- * an off-mode user). `menuItems` derives its rows — and `menuSectionAt` the
- * focus→section dispatch — from {@link visibleMenuSections}, the one visibility
- * filter over this order, so a row's position and its section can never drift:
- * the single source the dispatch keys on. The Sandbox row is the one conditional
- * member (off-mode invisibility, spec 28); every other section is always shown.
+ * the long-standing row positions — Settings at 4, Doctor at 5 — stay put).
+ * `menuItems` derives its rows — and `menuSectionAt` the focus→section dispatch —
+ * from {@link visibleMenuSections}, the one visibility filter over this order, so
+ * a row's position and its section can never drift: the single source the
+ * dispatch keys on. Every member is always shown (28j: the Sandbox row lost its
+ * off-mode invisibility — with Start sandbox + Install reachable from inside it,
+ * hiding it made the product's headline feature undiscoverable exactly for the
+ * user who hadn't started one yet; the row's SUMMARY carries the honest state).
  */
 export const MENU_SECTIONS = ["status", "channels", "clients", "monitor", "settings", "doctor", "sandbox"] as const;
 
@@ -107,31 +108,31 @@ function summarizeSection(section: (typeof MENU_SECTIONS)[number], store: Dashbo
 		case "doctor":
 			return "run diagnostics";
 		case "sandbox":
-			// The live state tail ("ready · session … · ssh :42255") — the same text
-			// the Sandbox screen's header row shows, minus its `Sandbox  ` head.
+			// Off-and-never-booted reads as the configured posture — "stopped" before
+			// any sandbox ever existed would be strange; once a vm mode is set (or any
+			// line reported), the live state tail ("ready · session … · ssh :42255") —
+			// the same text the Sandbox screen's header row shows, minus its head.
+			if (store.settings.vm.mode === "off" && !store.vmObserved) return "off";
 			return sandboxStateText(store.latestVmState);
 	}
 }
 
 /**
- * The menu sections visible for `store` — every {@link MENU_SECTIONS} member
- * except a hidden Sandbox (spec 28 off-mode invisibility: `sandboxEntryVisible`
- * is false while the loaded settings' vm mode is `off` AND no vm-state line has
- * ever reported a live lifecycle). The one filter both the rendering
- * ({@link menuItems}) and the dispatch ({@link menuSectionAt}) derive from.
+ * The menu sections visible for `store` — ALL of them, always (28j): the
+ * Sandbox row lost its off-mode invisibility, because hiding it hid Start and
+ * Install from exactly the operator who needed them. The one filter both the
+ * rendering ({@link menuItems}) and the dispatch ({@link menuSectionAt}) derive
+ * from; the parameter stays so the seam survives a future conditional member.
  */
-export function visibleMenuSections(store: DashboardStore): Array<(typeof MENU_SECTIONS)[number]> {
-	return MENU_SECTIONS.filter(
-		(section) => section !== "sandbox" || sandboxEntryVisible(store.settings.vm.mode, store.vmObserved),
-	);
+export function visibleMenuSections(_store: DashboardStore): Array<(typeof MENU_SECTIONS)[number]> {
+	return [...MENU_SECTIONS];
 }
 
 /**
  * The menu row at `focus` — the section it drills into, or `"quit"` for the
  * trailing Quit row (and any focus past it). The root's dispatch keys on THIS
- * (not on a raw `MENU_SECTIONS[focus]` index) so a hidden Sandbox row shifts the
- * Quit row's position without misrouting: rendering and dispatch walk the same
- * {@link visibleMenuSections} order. Pure.
+ * (not on a raw `MENU_SECTIONS[focus]` index) so rendering and dispatch walk
+ * the same {@link visibleMenuSections} order and can never drift. Pure.
  */
 export function menuSectionAt(store: DashboardStore, focus: number): (typeof MENU_SECTIONS)[number] | "quit" {
 	const sections = visibleMenuSections(store);
@@ -299,6 +300,14 @@ export const SANDBOX_APPLY_AGENT_LABEL = "Set default agent…";
 export const SANDBOX_APPLY_THEME_LABEL = "Set theme…";
 export const SANDBOX_SERIAL_LABEL = "Serial tail";
 export const SANDBOX_INSTALL_LABEL = "Install sandbox…";
+/**
+ * The Start row's label (28j) — the headline one-action launch, TOP of the
+ * Sandbox screen whenever no session is live, matched by EXACT match in the
+ * root's dispatch like every other Sandbox row. Activation runs the
+ * `startSandbox` action (the no-golden guard, the mode pick, the base-flavor
+ * confirm, then the dispatch) — see dashboard.ts's `createStartSandboxAction`.
+ */
+export const SANDBOX_START_LABEL = "Start sandbox…";
 
 /**
  * The Stop row's subtitle — the matrix-row-4 semantics verbatim: a stop is a
@@ -310,31 +319,42 @@ export const SANDBOX_STOP_TEXT =
 	"power down now — the boot-scoped mode re-boots the sandbox on the next server start (lasting stop: mode off + restart)";
 
 /**
- * The Sandbox screen's action list: Stop / Restart / Configure / Guest setup /
- * Secrets / Edit provision.sh / Serial tail, then — ONLY while the vm-state line is
- * ready enough (`applyReady`: a live session with a discovered port, spec 28 box
+ * The Sandbox screen's action list: — ONLY when no session is live — the top
+ * Start sandbox row (28j: the one-action launch — the state row flips to
+ * booting), then Stop / Restart / Configure / Guest setup / Secrets / Edit
+ * provision.sh / Serial tail, then — ONLY while the vm-state line is ready
+ * enough (`applyReady`: a live session with a discovered port, spec 28 box
  * 28g) — the two apply-to-running rows (direct ssh execs at the LIVE guest; no
- * owned-server gate exists for them, so visibility is the only gate), then — ONLY
- * when no bootable golden exists AND no session is active — Install sandbox, then
- * Back. Off-mode users never see these — the actions live inside the drill-in
- * screen, which inherits 28a's off-mode invisibility (the menu row is hidden
- * entirely). Owned-vs-unowned does NOT change the list: an unowned dashboard renders
- * the same rows and surfaces the unowned hint on activation (never a dead button) —
- * EXCEPT Guest setup, Secrets, and Edit provision.sh, which take no gate at all
- * (editors over the LOCAL vm tree: guest.json is a build input, the secrets store a
- * runtime input, provision.sh an operator-authored build input — not server
- * settings). The Install row is HIDDEN, not disabled, when a golden exists — the
- * spec's "shown only when no golden manifest exists" (matrix row 2's jump target);
- * visibility rides the same probe the vm write guard uses (`goldenManifestExists`),
- * so the affordance and the guard can never disagree. It is ALSO hidden while a
- * session is active (`sessionActive` — {@link ./view.ts}'s `vmSessionActive` over
- * the store's vm-state line; matrix row 5: install vs a live session is RAM
- * contention + file races, and the operator should not see an action that can't
- * run) — runInstall's own single-flight scan stays the race authority for the
- * window a vm-state line can't see, and its refusal surfaces inline. Pure.
+ * owned-server gate exists for them, so visibility is the only gate), then —
+ * ONLY when no bootable golden exists AND no session is active — Install
+ * sandbox, then Back. Owned-vs-unowned does NOT change the list: an unowned
+ * dashboard renders the same rows and surfaces the unowned hint on activation
+ * (never a dead button) — EXCEPT Guest setup, Secrets, and Edit provision.sh,
+ * which take no gate at all (editors over the LOCAL vm tree: guest.json is a
+ * build input, the secrets store a runtime input, provision.sh an
+ * operator-authored build input — not server settings). The Install row is
+ * HIDDEN, not disabled, when a golden exists — the spec's "shown only when no
+ * golden manifest exists" (matrix row 2's jump target); visibility rides the
+ * same probe the vm write guard uses (`goldenManifestExists`), so the
+ * affordance and the guard can never disagree. Start and Install are BOTH
+ * hidden while a session is active (`sessionActive` — {@link ./view.ts}'s
+ * `vmSessionActive` over the store's vm-state line; matrix row 5: install vs a
+ * live session is RAM contention + file races, and a live sandbox needs no
+ * start) — runInstall's own single-flight scan stays the race authority for
+ * the window a vm-state line can't see, and its refusal surfaces inline. Pure.
  */
 export function sandboxItems(hasGolden: boolean, sessionActive = false, applyReady = false): ListItem[] {
-	const rows: ListItem[] = [
+	const rows: ListItem[] = [];
+	if (!sessionActive) {
+		// The top row (28j): Start is the headline action, offered exactly when no
+		// session is live (stopped/failed/off/no-line); while one boots or runs,
+		// Stop/Restart are the levers (hide-don't-disable, the row-5 precedent).
+		rows.push({
+			label: SANDBOX_START_LABEL,
+			description: "boot the sandbox now — the state row flips to booting",
+		});
+	}
+	rows.push(
 		{ label: SANDBOX_STOP_LABEL, description: SANDBOX_STOP_TEXT },
 		{
 			label: SANDBOX_RESTART_LABEL,
@@ -354,7 +374,7 @@ export function sandboxItems(hasGolden: boolean, sessionActive = false, applyRea
 			description: "the operator's provision.sh escape hatch in $EDITOR (runs at `vm provision`)",
 		},
 		{ label: SANDBOX_SERIAL_LABEL, description: "read-only tail of the session's serial.log" },
-	];
+	);
 	if (applyReady) {
 		rows.push(
 			{

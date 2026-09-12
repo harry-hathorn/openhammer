@@ -106,7 +106,7 @@ import {
 	type SecretsStore,
 	saveSecrets,
 } from "../../vm/provision/secrets.ts";
-import { readManifest } from "../../vm/provision/snapshot.ts";
+import { type ManifestFlavor, readManifest } from "../../vm/provision/snapshot.ts";
 import { resolveVmDirs, type VmDirs } from "../../vm/session.ts";
 import { type SshExecResult, type SshTarget, sshExec, sshTargetForPort } from "../../vm/ssh.ts";
 import type { BannerStream } from "../banner.ts";
@@ -1005,6 +1005,21 @@ export function newestGoldenGuestUser(homeDir?: string): string | undefined {
 	if (goldenId === null) return undefined;
 	const manifest = readManifest(join(resolveVmDirs({ homeDir }).images, goldenId, MANIFEST_FILE));
 	return manifest?.guestUser;
+}
+
+/**
+ * The newest golden manifest's `flavor` (28j's Start-time gate): "agent" = the
+ * agent CLI was pre-provisioned into this image; "base" (or `undefined` — no
+ * golden, an absent/corrupt manifest) = it was not, and agent mode would
+ * degrade silently without the confirm. `readManifest` never throws; the
+ * caller fail-safes an unreadable flavor exactly like a declared base. Reads
+ * the LOCAL vm tree only (the newest golden is what a boot boots).
+ */
+export function newestGoldenFlavor(homeDir?: string): ManifestFlavor | undefined {
+	const goldenId = newestGoldenId(homeDir);
+	if (goldenId === null) return undefined;
+	const manifest = readManifest(join(resolveVmDirs({ homeDir }).images, goldenId, MANIFEST_FILE));
+	return manifest?.flavor;
 }
 
 /** The ssh exec seam ({@link typeof sshExec}): production spawns the real pinned ssh; tests record. */

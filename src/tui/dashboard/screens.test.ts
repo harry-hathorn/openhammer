@@ -24,6 +24,7 @@ import {
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SECRETS_LABEL,
 	SANDBOX_SERIAL_LABEL,
+	SANDBOX_START_LABEL,
 	SANDBOX_STOP_LABEL,
 	SET_LOGIN_LABEL,
 	sandboxItems,
@@ -52,14 +53,10 @@ function storeWith(channels: ChannelEntry[] = [], defaults: Record<string, unkno
 describe("screens — menuItems", () => {
 	it("yields one row per section (in MENU_SECTIONS order) then Quit", () => {
 		const items = menuItems(new DashboardStore());
-		// The default store's vm mode is `off` with no vm-state line — the Sandbox
-		// row is hidden (spec 28 off-mode invisibility), so a fresh menu is the six
-		// base sections + Quit.
-		expect(items.map((i) => i.label)).toEqual([
-			...MENU_SECTIONS.filter((section) => section !== "sandbox").map(() => expect.any(String)),
-			"Quit",
-		]);
-		expect(items.length).toBe(MENU_SECTIONS.length);
+		// Every section is always visible (28j): a fresh off-mode menu is ALL the
+		// sections — the sandbox is discoverable before it exists — then Quit.
+		expect(items.map((i) => i.label)).toEqual([...MENU_SECTIONS.map(() => expect.any(String)), "Quit"]);
+		expect(items.length).toBe(MENU_SECTIONS.length + 1); // + the Quit row
 	});
 
 	it("summaries reflect live store state", () => {
@@ -145,9 +142,10 @@ describe("screens — settings/doctor items", () => {
 });
 
 describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", () => {
-	it("with a golden: Stop, Restart, Configure, Guest setup, Secrets, Edit provision.sh, Serial tail, Back — no Install row", () => {
+	it("with a golden: Start, Stop, Restart, Configure, Guest setup, Secrets, Edit provision.sh, Serial tail, Back — no Install row", () => {
 		const labels = sandboxItems(true).map((i) => i.label);
 		expect(labels).toEqual([
+			SANDBOX_START_LABEL,
 			SANDBOX_STOP_LABEL,
 			SANDBOX_RESTART_LABEL,
 			SANDBOX_CONFIGURE_LABEL,
@@ -158,6 +156,11 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", 
 			"Back",
 		]);
 		expect(labels).not.toContain(SANDBOX_INSTALL_LABEL);
+	});
+
+	it("the Start row is the TOP row when no session is live, and hides while one is (28j)", () => {
+		expect(sandboxItems(true)[0]?.label).toBe(SANDBOX_START_LABEL);
+		expect(sandboxItems(true, true).map((i) => i.label)).not.toContain(SANDBOX_START_LABEL);
 	});
 
 	it("the Guest setup row sits beside Configure and frames itself as a local build input (box 28e)", () => {
@@ -217,7 +220,7 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", 
 	});
 
 	it("the stop subtitle carries the matrix-row-4 semantics (re-boots on next start; lasting stop = off + restart)", () => {
-		const stop = sandboxItems(true)[0];
+		const stop = sandboxItems(true).find((i) => i.label === SANDBOX_STOP_LABEL);
 		expect(stop?.description).toContain("re-boots the sandbox on the next server start");
 		expect(stop?.description).toContain("lasting stop: mode off + restart");
 	});
@@ -307,13 +310,15 @@ function storeInMode(mode: VmSettings["mode"]): DashboardStore {
 	);
 }
 
-describe("screens — Sandbox entry visibility (spec 28)", () => {
-	it("off mode + no vm-state line: the Sandbox row is absent entirely", () => {
+describe("screens — Sandbox entry visibility (28j: always visible)", () => {
+	it("off mode + no vm-state line: the row is PRESENT (the sandbox is discoverable before it exists)", () => {
 		const items = menuItems(new DashboardStore());
-		expect(items.some((i) => i.label === "Sandbox")).toBe(false);
+		expect(items.some((i) => i.label === "Sandbox")).toBe(true);
+		const sandbox = items.find((i) => i.label === "Sandbox");
+		expect(sandbox?.description).toBe("off"); // the honest pre-setup posture, not a stale lifecycle word
 	});
 
-	it("off mode + a vm-state line arrives (mode flipped at boot): the row appears", () => {
+	it("off mode + a vm-state line arrives (mode flipped at boot): the row shows, just before Quit", () => {
 		const s = new DashboardStore();
 		s.applyVmStateLine(
 			JSON.stringify(vmLine({ state: "booting", phase: "prepare", sessionId: null, sshPort: null })),
@@ -337,15 +342,9 @@ describe("screens — Sandbox entry visibility (spec 28)", () => {
 });
 
 describe("screens — menuSectionAt (the visibility-aware dispatch)", () => {
-	it("hidden Sandbox: focus past Doctor is the Quit row (nothing misroutes)", () => {
+	it("every section shows: Settings at 4, Doctor at 5, Sandbox at 6, Quit at 7 — nothing misroutes", () => {
 		const s = new DashboardStore();
 		expect(menuSectionAt(s, 4)).toBe("settings");
-		expect(menuSectionAt(s, 5)).toBe("doctor");
-		expect(menuSectionAt(s, 6)).toBe("quit");
-	});
-
-	it("visible Sandbox: the row sits after Doctor; Quit shifts to 7", () => {
-		const s = storeInMode("vm");
 		expect(menuSectionAt(s, 5)).toBe("doctor");
 		expect(menuSectionAt(s, 6)).toBe("sandbox");
 		expect(menuSectionAt(s, 7)).toBe("quit");
