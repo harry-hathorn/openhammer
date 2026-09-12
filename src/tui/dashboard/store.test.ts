@@ -4,7 +4,7 @@ import type { ChannelEntry, Settings } from "../../config/settings.ts";
 import { defaultVmSettings, type VmSettings } from "../../config/settings.ts";
 import type { RequestEvent } from "../../mcp/telemetry.ts";
 import type { VmStateLine } from "../../observability/status-socket.ts";
-import { DashboardStore, emptyStatus, type ServerStatusState } from "./store.ts";
+import { BUILD_LOG_LIMIT, DashboardStore, emptyStatus, type ServerStatusState } from "./store.ts";
 
 /** A minimal valid RequestEvent for the monitor ring (the reducer reads client + ts). */
 function event(client: string): RequestEvent {
@@ -238,5 +238,31 @@ describe("DashboardStore — hasGolden + vmApplyPending (spec 28, box 28c)", () 
 		expect(s.vmApplyPending).toBe(true);
 		s.setVmApplyPending(false);
 		expect(s.vmApplyPending).toBe(false);
+	});
+
+	it("refreshGolden invalidates the memo — the next read re-probes (the build chain's completion)", () => {
+		let calls = 0;
+		let exists = false;
+		const s = new DashboardStore({
+			goldenExists: () => {
+				calls += 1;
+				return exists;
+			},
+		});
+		expect(s.hasGolden).toBe(false);
+		exists = true;
+		expect(s.hasGolden).toBe(false); // still cached — the pre-28j staleness
+		s.refreshGolden();
+		expect(s.hasGolden).toBe(true); // re-probed
+		expect(s.hasGolden).toBe(true); // re-memoized
+		expect(calls).toBe(2);
+	});
+
+	it("appendBuildLog rings the build progress at BUILD_LOG_LIMIT (newest last)", () => {
+		const s = new DashboardStore();
+		for (let i = 0; i < BUILD_LOG_LIMIT + 50; i++) s.appendBuildLog(`line ${i}`);
+		expect(s.buildLog).toHaveLength(BUILD_LOG_LIMIT);
+		expect(s.buildLog[0]).toBe(`line ${50}`); // the head was dropped
+		expect(s.buildLog.at(-1)).toBe(`line ${BUILD_LOG_LIMIT + 49}`);
 	});
 });

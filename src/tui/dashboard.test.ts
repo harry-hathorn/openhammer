@@ -299,7 +299,7 @@ describe("createSandboxActions — owned server", () => {
 });
 
 describe("createSandboxActions — unowned server (the hint, exact)", () => {
-	it("with NO sender wired, stop/restart/install still err with the unowned hint; no service is touched", async () => {
+	it("with NO sender wired, stop/restart still err with the unowned hint; no service is touched", async () => {
 		let consulted = 0;
 		const actions = createSandboxActions({
 			vmService: () => {
@@ -307,11 +307,16 @@ describe("createSandboxActions — unowned server (the hint, exact)", () => {
 				return null;
 			},
 			store: new DashboardStore(),
+			// Install is UNGATED since 28j — this tripwire proves a gate-less test can
+			// never reach the REAL build chain (a real runInstall here mints a session
+			// and boots qemu on the host).
+			install: async () => {
+				throw new Error("the real build chain must never run from a unit test");
+			},
 		});
 		expect(await actions.stopSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
 		expect(await actions.restartSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(await actions.installSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(consulted).toBe(3); // the gate was consulted per action; nothing behind it existed to touch
+		expect(consulted).toBe(2); // the gate was consulted per action; nothing behind it existed to touch
 	});
 
 	it("readSerial is gate-free: no vm-state line errs no-serial-yet (the reader never called)", async () => {
@@ -644,25 +649,27 @@ describe("createStartSandboxAction (28j) — the one-action launch", () => {
 	});
 });
 
-describe("createSandboxActions — installSandbox (spec 28, box 28c)", () => {
-	it("owned: the install seam runs to completion and reports the session dir; the log sink is a function", async () => {
+describe("createSandboxActions — installSandbox (the 28j build chain)", () => {
+	it("runs the install seam and reports the outcome; the default log sink rides the store's build ring", async () => {
 		let sinkType = "none";
+		const store = new DashboardStore();
 		const actions = createSandboxActions({
-			vmService: () => scriptedGate(),
-			store: new DashboardStore(),
+			store,
 			install: async (log) => {
 				sinkType = typeof log;
-				return { sessionDir: "/h/.openhammer/vm/sessions/build-1" };
+				log("progress line");
+				return { sessionDir: "/h/.openhammer/vm/sessions/build-1", goldenId: "golden-4.0.3-1" };
 			},
 		});
 		expect(await actions.installSandbox()).toEqual({
 			ok: true,
-			value: { sessionDir: "/h/.openhammer/vm/sessions/build-1" },
+			value: { sessionDir: "/h/.openhammer/vm/sessions/build-1", goldenId: "golden-4.0.3-1" },
 		});
 		expect(sinkType).toBe("function");
+		expect(store.buildLog).toEqual(["progress line"]);
 	});
 
-	it("unowned: the exact unowned hint — the install seam is never invoked (no local vm-tree writes)", async () => {
+	it("is UNGATED: no vmService and no sendCommand — the chain still runs (the local-tree ownership model)", async () => {
 		let ran = false;
 		const actions = createSandboxActions({
 			store: new DashboardStore(),
@@ -671,8 +678,8 @@ describe("createSandboxActions — installSandbox (spec 28, box 28c)", () => {
 				return { sessionDir: "x" };
 			},
 		});
-		expect(await actions.installSandbox()).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
-		expect(ran).toBe(false);
+		expect(await actions.installSandbox()).toEqual({ ok: true, value: { sessionDir: "x" } });
+		expect(ran).toBe(true);
 	});
 
 	it("a second install while one is in flight errs inline and never reaches the seam", async () => {
@@ -682,7 +689,6 @@ describe("createSandboxActions — installSandbox (spec 28, box 28c)", () => {
 		});
 		let runs = 0;
 		const actions = createSandboxActions({
-			vmService: () => scriptedGate(),
 			store: new DashboardStore(),
 			install: async () => {
 				runs += 1;
@@ -700,7 +706,6 @@ describe("createSandboxActions — installSandbox (spec 28, box 28c)", () => {
 
 	it("an install failure carries the runner's actionable error (evidence paths and all)", async () => {
 		const actions = createSandboxActions({
-			vmService: () => scriptedGate(),
 			store: new DashboardStore(),
 			install: async () => {
 				throw new Error("vm install: no ssh gate within the 45 min budget");

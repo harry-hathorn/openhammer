@@ -39,6 +39,9 @@ import { MonitorState } from "../monitor-view.ts";
 /** Default monitor-feed depth — the last N events shown in the monitor screen. */
 export const DASHBOARD_MONITOR_LIMIT = 8;
 
+/** Build-progress ring cap — the tail a long golden build leaves behind stays bounded. */
+export const BUILD_LOG_LIMIT = 400;
+
 /**
  * Server reachability for the status screen. `up`/URLs are populated by
  * `runDashboard` (which probes the running child's `/health` + reads its banner);
@@ -139,6 +142,13 @@ export class DashboardStore {
 	 * succeeds.
 	 */
 	vmApplyPending = false;
+	/**
+	 * The golden-build progress ring (28j's build chain): the chained
+	 * install → provision → snapshot appends its `{log}` lines here (newest last,
+	 * capped at {@link BUILD_LOG_LIMIT}), and the build drill-in renders it LIVE —
+	 * unlike the serial snapshot, this re-reads every tick while the chain runs.
+	 */
+	readonly buildLog: string[] = [];
 
 	/** The connected-client reducer (call counts + last-seen), reused from monitor. */
 	private readonly monitor: MonitorState;
@@ -217,6 +227,24 @@ export class DashboardStore {
 	/** Set the saved-but-not-applied vm settings flag (the row-3 apply affordance's source). */
 	setVmApplyPending(value: boolean): void {
 		this.vmApplyPending = value;
+	}
+
+	/** Append one build-progress line to the ring (capped — a 45-minute install must not grow unbounded). */
+	appendBuildLog(line: string): void {
+		this.buildLog.push(line);
+		while (this.buildLog.length > BUILD_LOG_LIMIT) {
+			this.buildLog.shift();
+		}
+	}
+
+	/**
+	 * Invalidate the {@link hasGolden} memo so the next read re-probes (28j): the
+	 * build chain's completion MANDATES this — the memo never invalidated before,
+	 * so a golden built mid-session left the Install row (and Start's no-golden
+	 * guard) reading a stale `no golden` until the dashboard restarted.
+	 */
+	refreshGolden(): void {
+		this.hasGoldenCache = undefined;
 	}
 
 	/**
