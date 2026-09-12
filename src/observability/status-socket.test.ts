@@ -4,18 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RequestEvent, RequestRecorder } from "../mcp/telemetry.ts";
+import { parseEventLine } from "../tui/monitor-view.ts";
 import type { VmStatus } from "../vm/service.ts";
 import {
 	type ChannelStateLine,
 	formatChannelStateLine,
 	formatEventLine,
+	formatVmCmdResultLine,
 	formatVmStateLine,
 	handleConnection,
+	MAX_VM_COMMAND_BYTES,
 	parseChannelStateLine,
+	parseVmCmdResultLine,
+	parseVmCommand,
 	parseVmStateLine,
+	runVmCommand,
 	type StatusSocket,
 	startStatusSocket,
 	statusSocketPath,
+	type VmCmdResultLine,
+	type VmCommandExecutor,
+	type VmCommandOutcome,
+	type VmCommandRequest,
 	type VmStateLine,
 	vmStateLineFromStatus,
 } from "./status-socket.ts";
@@ -24,11 +34,18 @@ import {
 function fakeSocket(): StatusSocket & {
 	emit(event: "close" | "error"): void;
 	failNext(v: boolean): void;
+	/** Deliver a chunk to the registered data listener (command intake). */
+	data(chunk: Buffer | string): void;
+	wasDestroyed(): boolean;
+	/** Was a data listener ever registered? (`commands === undefined` must never wire one.) */
+	hasDataListener(): boolean;
 	lines: string[];
 } {
 	const lines: string[] = [];
 	const handlers = new Map<string, () => void>();
 	let failNext = false;
+	let destroyCount = 0;
+	let dataHandler: ((chunk: Buffer) => void) | undefined;
 	return {
 		write(chunk) {
 			if (failNext) {
@@ -41,8 +58,26 @@ function fakeSocket(): StatusSocket & {
 		once(event, listener) {
 			handlers.set(event, listener);
 		},
+		on(event, listener) {
+			if (event === "data") dataHandler = listener;
+		},
+		off(event, listener) {
+			if (event === "data" && dataHandler === listener) dataHandler = undefined;
+		},
+		destroy() {
+			destroyCount += 1;
+		},
 		emit(event) {
 			handlers.get(event)?.();
+		},
+		data(chunk) {
+			dataHandler?.(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+		},
+		wasDestroyed() {
+			return destroyCount > 0;
+		},
+		hasDataListener() {
+			return dataHandler !== undefined;
 		},
 		failNext(v) {
 			failNext = v;
@@ -97,6 +132,18 @@ function vmStatus(over: Partial<VmStatus> = {}): VmStatus {
 		relaunchUsed: false,
 		...over,
 	};
+}
+
+/** An executor that records every request and answers with a fixed outcome. */
+function recordingExecutor(outcome: VmCommandOutcome = { ok: true, error: null }): VmCommandExecutor & {
+	requests: VmCommandRequest[];
+} {
+	const requests: VmCommandRequest[] = [];
+	const exec: VmCommandExecutor = (request) => {
+		requests.push(request);
+		return outcome;
+	};
+	return Object.assign(exec, { requests });
 }
 
 /** Clean up any temp dirs created during a test. */
@@ -201,6 +248,102 @@ describe("vm-state wire format (spec 27h)", () => {
 				error: "sandbox boot failed: no golden",
 			}),
 		);
+	});
+});
+
+describe("vm-command wire format (28i)", () => {
+	it("serializes a vm-cmd-result line as compact JSON + newline", () => {
+		const line = formatVmCmdResultLine({ type: "vm-cmd-result", cmd: "vm-stop", ok: true, error: null });
+		expect(line.endsWith("\n")).toBe(true);
+		expect(JSON.parse(line)).toMatchObject({ type: "vm-cmd-result", cmd: "vm-stop", ok: true, error: null });
+	});
+
+	it("parses a well-formed vm-cmd-result line", () => {
+		const refusal: VmCmdResultLine = {
+			type: "vm-cmd-result",
+			cmd: "vm-restart",
+			ok: false,
+			error: "nothing to stop — the sandbox boot mode is off",
+		};
+		expect(parseVmCmdResultLine(formatVmCmdResultLine(refusal))).toEqual(refusal);
+	});
+
+	it("returns null for blank / malformed / other-line-kind inputs (the additive rule)", () => {
+		expect(parseVmCmdResultLine("")).toBeNull();
+		expect(parseVmCmdResultLine("not-json")).toBeNull();
+		// A future/unknown line kind parses to null — never mis-rendered, never fatal.
+		expect(parseVmCmdResultLine(JSON.stringify({ type: "future-thing" }))).toBeNull();
+		// The other three line kinds share the socket but are not vm-cmd-result.
+		expect(parseVmCmdResultLine(formatEventLine(event("1", "bash")))).toBeNull();
+		expect(parseVmCmdResultLine(formatChannelStateLine(channelState("a", true, null)))).toBeNull();
+		expect(parseVmCmdResultLine(formatVmStateLine(vmState()))).toBeNull();
+		// Right type, wrong value shapes → rejected (never mis-parsed).
+		expect(parseVmCmdResultLine(JSON.stringify({ type: "vm-cmd-result", cmd: 7, ok: true, error: null }))).toBeNull();
+		expect(
+			parseVmCmdResultLine(JSON.stringify({ type: "vm-cmd-result", cmd: "x", ok: "yes", error: null })),
+		).toBeNull();
+	});
+
+	it("parseVmCommand accepts exactly the two verbs (extra keys tolerated)", () => {
+		expect(parseVmCommand('{"cmd":"vm-stop"}')).toEqual({ cmd: "vm-stop" });
+		expect(parseVmCommand('  {"cmd":"vm-restart"}\n')).toEqual({ cmd: "vm-restart" });
+		expect(parseVmCommand('{"cmd":"vm-stop","req":1}')).toMatchObject({ cmd: "vm-stop" });
+	});
+
+	it("parseVmCommand refuses blank / malformed / wrong-verb payloads", () => {
+		expect(parseVmCommand("")).toBeNull();
+		expect(parseVmCommand("{")).toBeNull();
+		expect(parseVmCommand("42")).toBeNull();
+		expect(parseVmCommand('"vm-stop"')).toBeNull();
+		expect(parseVmCommand('{"cmd":"vm-open"}')).toBeNull();
+		expect(parseVmCommand('{"cmd":7}')).toBeNull();
+		expect(parseVmCommand('{"req":1}')).toBeNull();
+	});
+});
+
+describe("runVmCommand", () => {
+	it("executes a parsed command and echoes the verdict", () => {
+		const exec = recordingExecutor();
+		const reply = runVmCommand('{"cmd":"vm-stop"}', exec);
+		expect(exec.requests).toEqual([{ cmd: "vm-stop" }]);
+		expect(reply).toEqual({ type: "vm-cmd-result", cmd: "vm-stop", ok: true, error: null });
+	});
+
+	it("carries the executor's refusal through verbatim", () => {
+		const exec = recordingExecutor({ ok: false, error: "nothing to stop — the sandbox boot mode is off" });
+		const reply = runVmCommand('{"cmd":"vm-stop"}', exec);
+		expect(reply.ok).toBe(false);
+		expect(reply.error).toBe("nothing to stop — the sandbox boot mode is off");
+	});
+
+	it("answers malformed JSON with ok:false naming the problem (never throws)", () => {
+		const exec = recordingExecutor();
+		const reply = runVmCommand("{not json", exec);
+		expect(exec.requests).toHaveLength(0);
+		expect(reply.ok).toBe(false);
+		expect(reply.error).toContain("not JSON");
+		expect(reply.cmd).toBe("{not json");
+	});
+
+	it("answers a wrong-verb payload with ok:false echoing the attempted cmd", () => {
+		const reply = runVmCommand('{"cmd":"vm-open"}', recordingExecutor());
+		expect(reply.ok).toBe(false);
+		expect(reply.error).toContain("not a vm command");
+		expect(reply.cmd).toBe("vm-open");
+	});
+
+	it("bounds the echo of a runaway payload", () => {
+		const reply = runVmCommand("x".repeat(500), recordingExecutor());
+		expect(reply.cmd.length).toBeLessThanOrEqual(80);
+	});
+});
+
+describe("vm-cmd-result is additive across every consumer parser", () => {
+	it("parses to null in parseEventLine / parseChannelStateLine / parseVmStateLine", () => {
+		const line = formatVmCmdResultLine({ type: "vm-cmd-result", cmd: "vm-stop", ok: true, error: null });
+		expect(parseEventLine(line)).toBeNull();
+		expect(parseChannelStateLine(line)).toBeNull();
+		expect(parseVmStateLine(line)).toBeNull();
 	});
 });
 
@@ -313,6 +456,101 @@ describe("handleConnection (fake socket)", () => {
 		expect(socket.lines).toHaveLength(1); // only the event — no vm-state line
 		expect(JSON.parse(socket.lines[0] ?? "{}").tool).toBe("bash");
 	});
+
+	it("wires command intake only when an executor is given (the byte-identical stream pin)", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		handleConnection(socket, recorder, [], null);
+		expect(socket.hasDataListener()).toBe(false);
+		socket.data('{"cmd":"vm-stop"}\n'); // nobody home — no crash, no reply
+		expect(socket.lines).toHaveLength(0);
+	});
+
+	it("executes a command line and answers one result line", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		const exec = recordingExecutor();
+		handleConnection(socket, recorder, [], null, exec);
+		expect(socket.hasDataListener()).toBe(true);
+
+		socket.data('{"cmd":"vm-stop"}\n');
+		expect(exec.requests).toEqual([{ cmd: "vm-stop" }]);
+		expect(socket.lines).toEqual([
+			formatVmCmdResultLine({ type: "vm-cmd-result", cmd: "vm-stop", ok: true, error: null }),
+		]);
+	});
+
+	it("executes several commands from one chunk, in order, one reply each", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		const exec = recordingExecutor();
+		handleConnection(socket, recorder, [], null, exec);
+
+		socket.data('{"cmd":"vm-stop"}\n{"cmd":"vm-restart"}\n');
+		expect(exec.requests.map((r) => r.cmd)).toEqual(["vm-stop", "vm-restart"]);
+		expect(socket.lines).toHaveLength(2);
+	});
+
+	it("reassembles a command split across chunks before executing it", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		const exec = recordingExecutor();
+		handleConnection(socket, recorder, [], null, exec);
+
+		socket.data('{"cmd":"vm-');
+		expect(exec.requests).toHaveLength(0);
+		socket.data('stop"}\n');
+		expect(exec.requests).toEqual([{ cmd: "vm-stop" }]);
+		expect(socket.lines).toHaveLength(1);
+	});
+
+	it("skips blank lines without executing or replying", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		const exec = recordingExecutor();
+		handleConnection(socket, recorder, [], null, exec);
+
+		socket.data("\n \n");
+		expect(exec.requests).toHaveLength(0);
+		expect(socket.lines).toHaveLength(0);
+	});
+
+	it("answers a malformed line with ok:false instead of silence", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		handleConnection(socket, recorder, [], null, recordingExecutor());
+
+		socket.data("open sesame\n");
+		expect(socket.lines).toHaveLength(1);
+		const reply = parseVmCmdResultLine(socket.lines[0] ?? "");
+		expect(reply?.ok).toBe(false);
+		expect(reply?.error).toContain("not JSON");
+	});
+
+	it("destroys the connection when the tail passes the cap without a newline", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		const exec = recordingExecutor();
+		handleConnection(socket, recorder, [], null, exec);
+
+		socket.data(Buffer.alloc(MAX_VM_COMMAND_BYTES + 1, 0x61));
+		expect(socket.wasDestroyed()).toBe(true);
+		expect(exec.requests).toHaveLength(0);
+	});
+
+	it("cleans up when a reply write fails (no further live events)", () => {
+		const recorder = new RequestRecorder();
+		const socket = fakeSocket();
+		const exec = recordingExecutor();
+		handleConnection(socket, recorder, [], null, exec);
+		socket.failNext(true);
+
+		socket.data('{"cmd":"vm-stop"}\n');
+		expect(exec.requests).toHaveLength(1); // executed
+		expect(socket.lines).toHaveLength(0); // the reply write failed → unsubscribed
+		recorder.record(event("2"));
+		expect(socket.lines).toHaveLength(0); // not delivered
+	});
 });
 
 /**
@@ -325,6 +563,7 @@ describe("startStatusSocket (real net)", () => {
 	function collectLines(path: string): {
 		lines: string[];
 		waitFor: (n: number, ms?: number) => Promise<void>;
+		send: (text: string) => void;
 		close: () => void;
 	} {
 		const lines: string[] = [];
@@ -361,6 +600,7 @@ describe("startStatusSocket (real net)", () => {
 					});
 				});
 			},
+			send: (text) => socket.write(text),
 			close: () => socket.destroy(),
 		};
 	}
@@ -500,6 +740,32 @@ describe("startStatusSocket (real net)", () => {
 			expect(JSON.parse(collector.lines[0] ?? "{}")).toMatchObject({ tool: "bash" });
 		} finally {
 			collector.close();
+		}
+		await handle.close();
+	});
+
+	it("answers an operator command on the real socket (deps.commands plumb-through)", async () => {
+		const recorder = new RequestRecorder();
+		const path = join(tempDir(), "openhammer.sock");
+		const exec = recordingExecutor();
+
+		const handle = await startStatusSocket(recorder, { path, commands: exec, warn: () => {} });
+		expect(handle).not.toBeNull();
+		if (handle === null) return;
+
+		const client = collectLines(path);
+		try {
+			client.send('{"cmd":"vm-restart"}\n');
+			await client.waitFor(1); // the reply (nothing else is dumped)
+			expect(exec.requests).toEqual([{ cmd: "vm-restart" }]);
+			expect(parseVmCmdResultLine(client.lines[0] ?? "")).toMatchObject({
+				type: "vm-cmd-result",
+				cmd: "vm-restart",
+				ok: true,
+				error: null,
+			});
+		} finally {
+			client.close();
 		}
 		await handle.close();
 	});

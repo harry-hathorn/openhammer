@@ -49,6 +49,7 @@ import {
 	type ChannelStateLine,
 	type StatusSocketHandle,
 	startStatusSocket,
+	type VmCommandExecutor,
 	type VmStateLine,
 	vmStateLineFromStatus,
 } from "./observability/status-socket.ts";
@@ -188,9 +189,46 @@ export async function main(deps: MainDeps = {}): Promise<void> {
 	// Null-safe — a bind failure logs + continues serving; the bearer gate (not
 	// the socket) is the real gate. Carries the channel-state snapshot (19c-channel)
 	// so a connecting dashboard reads each configured channel's up/down + URL.
+	// Operator commands over the status socket (28i): the dashboard's Stop /
+	// sandbox-start ride `{"cmd":"vm-stop"}` / `{"cmd":"vm-restart"}` request
+	// lines — the ONLY production path for them (no production dashboard ever
+	// holds the service handle: the dashboard spawns this server as a child
+	// process). The reply is ACCEPTED, not completed; progress is the vm-state
+	// feed the command's transitions emit. Built in THIS closure because the
+	// executor's arms are the vmBoot shape: off mode has no service at all (the
+	// tool backend is boot-scoped — genuinely nothing to stop/start, so the
+	// honest answer is a refusal naming the relaunch); a VM mode fire-and-forgets
+	// the async service calls behind the synchronous reply (`stop()` is
+	// epoch-guarded safe from any state; a later `start()` from stopped/failed
+	// re-arms the boot — so `vm-restart` covers both a live restart and
+	// start-from-stopped, owned and attached dashboards alike).
+	const vmCommands: VmCommandExecutor =
+		vmBoot === null
+			? (request) => ({
+					ok: false,
+					error:
+						request.cmd === "vm-stop"
+							? "nothing to stop — the sandbox boot mode is off"
+							: "cannot start — the boot mode is off; relaunch openhammer with --vm or --vm-agent to get a sandbox",
+				})
+			: (request) => {
+					const { service } = vmBoot;
+					if (request.cmd === "vm-stop") {
+						void service.stop().catch(() => {});
+						return { ok: true, error: null };
+					}
+					void service
+						.stop()
+						.catch(() => {})
+						.then(() => service.start())
+						.catch(() => {});
+					return { ok: true, error: null };
+				};
+
 	const statusSocket = await startStatusSocket(recorder, {
 		channels: channelState,
 		vmState: () => latestVmState,
+		commands: vmCommands,
 		warn: (message) => fastify.log.warn(message),
 	});
 	socketHolder.statusSocket = statusSocket;
