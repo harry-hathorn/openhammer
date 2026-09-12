@@ -450,8 +450,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(lines.some((l) => l.includes("Set default agent…"))).toBe(true); // the vm fixture holds a READY line — 28g
 		expect(lines.some((l) => l.includes("Set theme…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Back"))).toBe(true);
-		expect(lines.some((l) => l.includes("re-boots the sandbox on the next server start"))).toBe(true);
-		expect(lines.some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
+		expect(lines.some((l) => l.includes("re-boots on the next server start"))).toBe(true);
+		expect(lines.some((l) => l.includes("a lasting stop is mode off + restart"))).toBe(true);
 		expect(lines.some((l) => l.includes("Install sandbox…"))).toBe(false); // a golden exists — HIDDEN, not disabled
 
 		const goldenless = (await sandboxed([], undefined, { hasGolden: false, vmState: "stopped" })).render(200);
@@ -464,7 +464,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(ENTER); // focus 0 = Stop
 		await flushActions();
 		expect(log).toEqual(["stopSandbox"]);
-		expect(root.render(80).some((l) => l.includes("lasting stop: mode off + restart"))).toBe(true);
+		expect(root.render(80).some((l) => l.includes("the lasting stop is mode off + restart"))).toBe(true);
 	});
 
 	it("enter on Restart runs restartSandbox (the stop→start order is pinned at the action level)", async () => {

@@ -740,7 +740,7 @@ export class DashboardRoot implements Component {
 				if (result === null) return; // confirmation declined — silent (the modal idiom)
 				this.flash(
 					result.ok
-						? "Sandbox stopped — the boot-scoped mode re-boots it on the next server start (lasting stop: mode off + restart)."
+						? "Sandbox stopped — it re-boots on the next server start; the lasting stop is mode off + restart."
 						: result.error.message,
 					result.ok,
 				);

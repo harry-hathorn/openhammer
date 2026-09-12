@@ -228,8 +228,8 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", 
 
 	it("the stop subtitle carries the matrix-row-4 semantics (re-boots on next start; lasting stop = off + restart)", () => {
 		const stop = sandboxItems(true).find((i) => i.label === SANDBOX_STOP_LABEL);
-		expect(stop?.description).toContain("re-boots the sandbox on the next server start");
-		expect(stop?.description).toContain("lasting stop: mode off + restart");
+		expect(stop?.description).toContain("re-boots on the next server start");
+		expect(stop?.description).toContain("a lasting stop is mode off + restart");
 	});
 
 	it("while a session is ACTIVE the Install row is hidden even with no golden (matrix row 5, box 28d)", () => {

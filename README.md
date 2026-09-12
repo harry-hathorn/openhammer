@@ -26,10 +26,11 @@
 
   → Status          server up
     Channels        1 configured
-    Clients & JWT   1 client
+    Clients & login 1 client
     Monitor         quiet
     Settings        037c083b-5923-4b9d-9f33-d7b4ec4828a6
     Doctor          run diagnostics
+    Sandbox         off
     Quit            exit OpenHammer
 ```
 
@@ -126,7 +127,7 @@ npm install && npm run build   # builds dist/, including the `openhammer` CLI (d
 node dist/cli.js               # boot the TUI control center
 ```
 
-On first boot OpenHammer mints a bearer token to `~/.openhammer/credentials.json` (`0600`) and prints the
+On first boot OpenHammer mints a bearer token to `~/.openhammer/credential.json` (`0600`) and prints the
 URL, the token (once), and a ready-to-paste MCP client config block:
 
 ```json
@@ -211,12 +212,13 @@ full-screen, colored menu (built on [`@earendil-works/pi-tui`](https://www.npmjs
 instead of juggling commands. Move with `↑`/`↓`, open a section with `Enter`, go back with `Esc`/`←`,
 quit with `q`/`Ctrl-C`:
 
-- **Status** — server up/down, local + tunnel URL, bearer token
-- **Channels** — configured channels + their live state/URLs; drill into one to **use**/**remove** it, or **add** a channel via the wizard
-- **Clients & JWT** — registered OAuth clients (id + grant type); **issue** a new one and pick its type — **client-credentials** (machine) or **authorization-code (login)** (with redirect URIs + an optional per-client username/password). The `client_id` + `client_secret` are shown once — only the SHA-256 hash is kept. (Set the `/authorize` operator login with `openhammer auth set-login`.)
-- **Monitor** — the live streaming feed of tool calls (who, which tool, duration, size)
+- **Status** — server up/down, local + tunnel URL, bearer token, and a ready-to-paste client-config block (the same `mcpServers` JSON the boot banner prints) with a curl smoke test
+- **Channels** — configured channels + their live state/URLs; drill into one to **use**/**remove** it (a remove asks once), or **add** a channel via the wizard
+- **Clients & login** — registered OAuth clients (id + grant type); **issue** a new one and pick its type — **client-credentials** (machine) or **authorization-code (login)** (with redirect URIs + an optional per-client username/password). The `client_id` + `client_secret` are shown once — only the SHA-256 hash is kept. (Set the `/authorize` operator login with `openhammer auth set-login`.)
+- **Monitor** — the live streaming feed of tool calls (who, which tool, duration, size) + connected clients
 - **Settings** — allowed-client list + default channel; **edit** via the wizard
 - **Doctor** — run the diagnostics checks
+- **Sandbox** — the VM sandbox (opt-in): **Start** in one action (picks the boot mode, boots), Stop/Restart, **Install** the golden image with live build output, serial tail, guest setup, secrets, provision.sh
 
 It's a **view over the running server** (subscribes to its status socket) and manages the server's
 lifecycle, so `openhammer` is the single entry that runs the server + the dashboard; quitting stops
@@ -231,7 +233,7 @@ and it is persisted to `~/.openhammer/config.json` (secrets go to `~/.openhammer
 
 | Channel | Mode | Needs | How the URL is obtained |
 |---|---|---|---|
-| `ngrok` | live | the `ngrok` binary + authtoken | drives `ngrok http`; read from its `:4040` inspector API |
+| `ngrok` | live | the bundled `@ngrok/ngrok` SDK + authtoken | an in-process agent (no system CLI); the URL comes from the SDK |
 | `cloudflare` | live | the `cloudflared` binary | quick-tunnel URL scraped from cloudflared |
 | `nginx` / `static-url` | static | you stand up the endpoint (nginx/reverse-proxy on a server) | you declare the public URL; OpenHammer probes `/health` |
 
@@ -327,7 +329,7 @@ Deterministic, no LLM — the "real client" is the MCP SDK `Client` driven by a 
 - **Containerized** (on-demand): `npm run test:compose`, `npm run test:compose:real`,
   `npm run test:in-container`.
 - **Tunnel E2E** (gated, non-blocking — traverses a live edge): `npm run test:tunnel` (cloudflare) /
-  `npm run test:tunnel:ngrok` (needs `NGROK_AUTHTOKEN` + the `ngrok` binary).
+  `npm run test:tunnel:ngrok` (needs `NGROK_AUTHTOKEN`).
 
 ## Development
 

@@ -15,6 +15,7 @@ interface PromptCall {
 	message: string;
 	defaultValue?: string;
 	initialValue?: string | boolean;
+	help?: string;
 	options?: { value: string; label?: string; hint?: string }[];
 }
 
@@ -36,19 +37,25 @@ function makeFakeIo(
 	};
 	const io: WizardIo = {
 		async select(o) {
-			prompts.push({ method: "select", message: o.message, initialValue: o.initialValue, options: o.options });
+			prompts.push({
+				method: "select",
+				message: o.message,
+				initialValue: o.initialValue,
+				help: o.help,
+				options: o.options,
+			});
 			return take(returns.select);
 		},
 		async text(o) {
-			prompts.push({ method: "text", message: o.message, defaultValue: o.defaultValue });
+			prompts.push({ method: "text", message: o.message, defaultValue: o.defaultValue, help: o.help });
 			return take(returns.text);
 		},
 		async password(o) {
-			prompts.push({ method: "password", message: o.message });
+			prompts.push({ method: "password", message: o.message, help: o.help });
 			return take(returns.password);
 		},
 		async confirm(o) {
-			prompts.push({ method: "confirm", message: o.message, initialValue: o.initialValue });
+			prompts.push({ method: "confirm", message: o.message, initialValue: o.initialValue, help: o.help });
 			return take(returns.confirm);
 		},
 		intro: (t) => {
@@ -164,6 +171,21 @@ describe("runWizard — rendering layer", () => {
 		const fields: ConfigField[] = [{ key: "token", label: "Token", kind: "secret", required: true }];
 		const { io } = makeFakeIo({ password: [""] });
 		await expect(runWizard("t", fields, io, { stream: fakeStream().stream })).resolves.toBeNull();
+	});
+
+	it("threads a declared help text as a display-only hint (28j — help was declared but never shown)", async () => {
+		const fields: ConfigField[] = [
+			{ key: "memoryMb", label: "Guest memory (MiB)", kind: "text", help: "Positive integer MiB. Default 4096." },
+			{ key: "name", label: "Name", kind: "text" },
+		];
+		const { io, prompts } = makeFakeIo({ text: ["4096", "pi"] });
+		await runWizard("t", fields, io, { stream: fakeStream().stream });
+		// The message stays the plain label (the flag io's stable key); the help
+		// rides its own option for the TTY io to render beneath it.
+		expect(prompts[0]?.message).toBe("Guest memory (MiB)");
+		expect(prompts[0]?.help).toBe("Positive integer MiB. Default 4096.");
+		expect(prompts[1]?.message).toBe("Name");
+		expect(prompts[1]?.help).toBeUndefined();
 	});
 
 	it("frames the run with the banner + intro(title) + outro", async () => {
