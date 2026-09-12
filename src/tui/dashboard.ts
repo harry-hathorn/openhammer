@@ -27,23 +27,25 @@
  * + logged to stderr — the terminal is already restored, so the message surfaces
  * in the operator's shell rather than corrupting the dashboard screen.
  *
- * **The owned/unowned wiring state (spec 28, box 28c — recorded, not hidden):**
- * NO production path today runs the dashboard and the `VmService` in ONE process.
- * Bare `openhammer` in a terminal opens the dashboard, which starts the server as
- * a CHILD process (`server-control.ts`'s `ensureServer` → `node dist/main.js`);
+ * **The owned/unowned wiring state (spec 28, box 28c; tiered since 28i):** NO
+ * production path runs the dashboard and the `VmService` in ONE process. Bare
+ * `openhammer` in a terminal opens the dashboard, which starts the server as a
+ * CHILD process (`server-control.ts`'s `ensureServer` → `node dist/main.js`);
  * `openhammer start` / the headless default run `main()` in-process but with NO
- * dashboard. So `deps.vmService` is never wired in production and the Sandbox
- * actions that gate on it (Stop / Restart / Serial tail / Install sandbox) are
- * hint-only for v1 — activations surface {@link VM_UNOWNED_HINT}, never a dead
- * button. Spec-28 follow-up: an in-process dashboard+server entry would thread
- * `vmService` and light every action up at once (the 28h walkthrough gate
- * exercises whatever exists by then). Restart-to-apply (matrix row 3) is the
- * EXCEPTION — it rides `deps.restartServer` (`ServerControl.restart`, the child
- * re-spawn whose fresh boot re-runs preflight + the eager VM boot), which the CLI
- * wiring provides in production; a spawn-owned dashboard therefore applies vm
- * settings live, an attached one gets the restart refusal surfaced + the
- * "restart openhammer to apply" hint, and an unwired (hermetic) dashboard gets
- * the hint alone.
+ * dashboard. The Sandbox lifecycle actions are therefore TIERED: a `vmService`
+ * handle (tests; a future in-process entry) takes the direct service path; the
+ * production default rides `deps.sendVmCommand` — operator commands over the
+ * status socket's 0600 command intake (28i: `vm-stop`/`vm-restart`, accepted-
+ * not-completed, progress on the vm-state feed) — which works for spawn-owned
+ * AND attached dashboards alike; with neither, activations surface
+ * {@link VM_UNOWNED_HINT}, never a dead button. Serial tail is gate-free since
+ * 28i (a same-host file derived from the vm-state line's sessionId); Install
+ * keeps the ownership gate until the build-chain box wires it ungated.
+ * Restart-to-apply (matrix row 3) rides `deps.restartServer` (`ServerControl`
+ * `.restart`, the child re-spawn whose fresh boot re-runs preflight + the eager
+ * VM boot), which the CLI wiring provides in production; an attached server gets
+ * the restart refusal surfaced + the "restart openhammer to apply" hint, and an
+ * unwired (hermetic) dashboard gets the hint alone.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -61,7 +63,7 @@ import { credentialsPath } from "../config/credentials.ts";
 import { type ConfigSection, vmSection } from "../config/sections.ts";
 import { type Settings, saveSettings, settingsPath } from "../config/settings.ts";
 import type { RequestEvent } from "../mcp/telemetry.ts";
-import type { ChannelStateLine } from "../observability/status-socket.ts";
+import type { ChannelStateLine, VmCommandName } from "../observability/status-socket.ts";
 import { err, ok, type Result } from "../tools/result.ts";
 import { removeChannel as removeChannelOp, setDefaultChannel } from "../tunnel/manage.ts";
 import type { VmBootGate } from "../vm/boot-backend.ts";
@@ -73,6 +75,7 @@ import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/ren
 import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
 import { hasPublicChannel, type SerialSource, vmSessionActive, vmSettingsEqual } from "./dashboard/view.ts";
+import { sendVmCommand } from "./dashboard/vm-commands.ts";
 import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
 import { style } from "./style.ts";
@@ -174,6 +177,15 @@ export interface DashboardDeps {
 	 * `<HOME>/.openhammer/vm/sessions/<sessionId>/serial.log` read.
 	 */
 	readSerial?: (sessionId: string) => Promise<Result<SerialSource, Error>>;
+	/**
+	 * The operator-command sender (28i): Stop/Restart reach the server's VM
+	 * service through the status socket's command intake when no `VmService`
+	 * handle exists (the child-process split — see the module header). Default:
+	 * the real {@link sendVmCommand} over the loopback socket; tests inject a
+	 * scripted fake. Consulted only when `vmService` is absent/null (the owned
+	 * direct path wins when a handle exists).
+	 */
+	sendVmCommand?: (cmd: VmCommandName) => Promise<Result<void, Error>>;
 }
 
 /**
@@ -353,12 +365,19 @@ export async function readSerialLog(sessionId: string, homeDir?: string): Promis
 
 /** Deps for {@link createSandboxActions} (the exported, unit-testable core the buildActions wiring wraps). */
 export interface SandboxActionDeps {
-	/** The owned-server gate ({@link DashboardDeps.vmService}). Absent/null → unowned. */
+	/** Tier 1 — the direct service handle ({@link DashboardDeps.vmService}); null → the socket tier. */
 	readonly vmService?: () => VmBootGate | null;
 	/** The serial-log reader. Default: {@link readSerialLog} over the real HOME. */
 	readonly readSerial?: (sessionId: string) => Promise<Result<SerialSource, Error>>;
 	/** The live store — the serial read's sessionId comes from the latest vm-state line. */
 	readonly store: Pick<DashboardStore, "latestVmState">;
+	/**
+	 * The socket-command sender (28i) — the MIDDLE tier of the gate: used when
+	 * `vmService` holds no handle but the server's status-socket command intake
+	 * is reachable (the production shape: the server is a child process, the
+	 * handle can never exist here). Absent → the unowned hint (tier 3).
+	 */
+	readonly sendCommand?: (cmd: VmCommandName) => Promise<Result<void, Error>>;
 	/**
 	 * The golden-build seam (spec 28, box 28c): launches 26c's {@link runInstall} —
 	 * the session-kept, evidence-throwing install runner. `log` receives the run's
@@ -370,15 +389,19 @@ export interface SandboxActionDeps {
 }
 
 /**
- * The Sandbox actions' core (spec 28, box 28b; install added in 28c): the
- * owned-server gate, the UI single-flight guard, and the service calls. Exported
+ * The Sandbox actions' core (spec 28, box 28b; install added in 28c; tiered in
+ * 28i): the three-tier owned/socket/hint gate, the UI single-flight guard, and
+ * the service/command calls. Exported
  * so the hermetic trio can drive them on a scripted gate (the buildActions wiring
  * wraps Stop's `io.confirm` modal around this and honors the per-action overrides).
  *
  * Semantics: `stopSandbox` = `service.stop()` — the clean ACPI powerdown + stop
  * ladder + persist teardown (27e). `restartSandbox` = `await service.stop()` then
  * `void service.start()` — a fresh boot per the persist rules (retain reuses the
- * overlay, discard is fresh; the service owns those semantics). `installSandbox`
+ * overlay, discard is fresh; the service owns those semantics). On the socket
+ * tier the SAME verbs ride one command each (`vm-stop`/`vm-restart`): the
+ * server-side executor owns the stop-then-start sequencing and the reply means
+ * accepted, not completed — progress is the vm-state feed. `installSandbox`
  * runs the install seam to completion and reports the session dir. Surfaced
  * results flow through the vm-state line (service transitions → status socket →
  * socket client → store, 27h), so no direct render poke exists or is needed. The
@@ -390,20 +413,21 @@ export interface SandboxActionDeps {
 export function createSandboxActions(
 	deps: SandboxActionDeps,
 ): Pick<DashboardActions, "stopSandbox" | "restartSandbox" | "readSerial" | "installSandbox"> {
-	const owned = (): Result<VmBootGate, Error> => {
-		const gate = deps.vmService?.() ?? null;
-		return gate === null ? err(new Error(VM_UNOWNED_HINT)) : ok(gate);
-	};
+	// The three-tier gate (28i). Tier 1: a direct `VmService` handle (tests; a
+	// future in-process entry) — the direct service path unchanged. Tier 2: the
+	// status-socket command sender — the PRODUCTION shape (the server is a child
+	// process; the handle can never exist here), working for spawn-owned and
+	// attached dashboards alike. Tier 3: the unowned hint, never a dead button.
+	const directGate = (): VmBootGate | null => deps.vmService?.() ?? null;
+	const sendCommand = deps.sendCommand;
 	let inFlight = false; // the UX guard — VmService itself is the single-flight authority (27e)
 
-	const stopSandbox: DashboardActions["stopSandbox"] = async () => {
-		const gate = owned();
-		if (!gate.ok) return gate;
+	/** Wrap one action body in the single-flight guard (shared by every tier). */
+	const guarded = async <T>(run: () => Promise<Result<T, Error>>): Promise<Result<T, Error>> => {
 		if (inFlight) return err(new Error(VM_IN_FLIGHT_HINT));
 		inFlight = true;
 		try {
-			await gate.value.stop();
-			return ok(undefined);
+			return await run();
 		} catch (e) {
 			return err(e instanceof Error ? e : new Error(String(e)));
 		} finally {
@@ -411,48 +435,54 @@ export function createSandboxActions(
 		}
 	};
 
-	const restartSandbox: DashboardActions["restartSandbox"] = async () => {
-		const gate = owned();
-		if (!gate.ok) return gate;
-		if (inFlight) return err(new Error(VM_IN_FLIGHT_HINT));
-		inFlight = true;
-		try {
-			await gate.value.stop(); // teardown now — the 27e clean stop
-			void gate.value.start(); // fresh boot per the persist rules; the vm-state line reports booting
-			return ok(undefined);
-		} catch (e) {
-			return err(e instanceof Error ? e : new Error(String(e)));
-		} finally {
-			inFlight = false;
+	const stopSandbox: DashboardActions["stopSandbox"] = () => {
+		const gate = directGate();
+		if (gate !== null) {
+			return guarded(async () => {
+				await gate.stop(); // the 27e clean stop, direct
+				return ok(undefined);
+			});
 		}
+		if (sendCommand === undefined) return Promise.resolve(err(new Error(VM_UNOWNED_HINT)));
+		return guarded(() => sendCommand("vm-stop"));
 	};
 
-	const installSandbox: DashboardActions["installSandbox"] = async () => {
-		// The owned/unowned gate, mirrored from Stop/Restart (box 28b): install needs
-		// no service handle for its WORK — it writes the LOCAL vm tree — but an
-		// unowned dashboard is a view over another process's server, whose vm tree is
-		// not necessarily this one; one ownership model, one hint (the module header
-		// records that v1 production is always unowned here). A live session makes a
-		// concurrent install a fight over KVM/RAM — runInstall's own single-flight
-		// scan refuses that with its actionable evidence (matrix row 5).
-		const gate = owned();
-		if (!gate.ok) return gate;
-		if (inFlight) return err(new Error(VM_IN_FLIGHT_HINT));
-		inFlight = true;
-		try {
+	const restartSandbox: DashboardActions["restartSandbox"] = () => {
+		const gate = directGate();
+		if (gate !== null) {
+			return guarded(async () => {
+				await gate.stop(); // teardown now — the 27e clean stop
+				void gate.start(); // fresh boot per the persist rules; the vm-state line reports booting
+				return ok(undefined);
+			});
+		}
+		if (sendCommand === undefined) return Promise.resolve(err(new Error(VM_UNOWNED_HINT)));
+		// The server-side restart: stop() then the re-arming start() — accepted,
+		// not completed; the vm-state feed reports the boot it kicked off.
+		return guarded(() => sendCommand("vm-restart"));
+	};
+
+	const installSandbox: DashboardActions["installSandbox"] = () => {
+		// The ownership gate KEPT here (28i): the socket commands carry only the
+		// lifecycle verbs, and install writes the LOCAL vm tree — the build-chain
+		// box lifts this gate when install becomes a first-class ungated chain.
+		// A live session makes a concurrent install a fight over KVM/RAM —
+		// runInstall's own single-flight scan refuses that with its actionable
+		// evidence (matrix row 5).
+		const gate = directGate();
+		if (gate === null) return Promise.resolve(err(new Error(VM_UNOWNED_HINT)));
+		return guarded(async () => {
 			const install = deps.install ?? ((log: (line: string) => void) => runInstall({ log }, {}));
 			const result = await install(() => {}); // progress: the spinner (wiring) is the live surface
 			return ok({ sessionDir: result.sessionDir });
-		} catch (e) {
-			return err(e instanceof Error ? e : new Error(String(e)));
-		} finally {
-			inFlight = false;
-		}
+		});
 	};
 
 	const readSerial: DashboardActions["readSerial"] = async () => {
-		const gate = owned();
-		if (!gate.ok) return err(gate.error); // same hint — a remote server's serial file isn't here
+		// GATE-FREE since 28i: the serial log is a file derived from the vm-state
+		// line's sessionId — the same loopback file for an owned or an attached
+		// (same-host) dashboard — so no ownership gate; the no-session check is
+		// the only precondition.
 		const sessionId = deps.store.latestVmState?.sessionId ?? null;
 		if (sessionId === null) return err(new Error("no serial yet"));
 		const read = deps.readSerial ?? ((id: string) => readSerialLog(id));
@@ -761,7 +791,15 @@ function buildActions(
 	// run as a modal on the shared terminal, the setLogin prompts' flow). Declined
 	// or aborted → `null` (the cancelled-modal idiom: silent). A successful restart
 	// clears the row-3 pending flag (a fresh boot applied every saved vm change).
-	const sandbox = createSandboxActions({ vmService: deps.vmService, readSerial: deps.readSerial, store });
+	const sandbox = createSandboxActions({
+		vmService: deps.vmService,
+		readSerial: deps.readSerial,
+		// The production default (no handle ever exists here): operator commands
+		// over the status socket's command intake. Tests inject a fake via
+		// DashboardDeps.sendVmCommand.
+		sendCommand: deps.sendVmCommand ?? ((cmd) => sendVmCommand(cmd)),
+		store,
+	});
 	const stopSandboxAction: DashboardActions["stopSandbox"] =
 		overrides.stopSandbox ??
 		(async () => {
