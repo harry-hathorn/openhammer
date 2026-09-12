@@ -63,6 +63,9 @@ function fakeActions(log: string[]): DashboardActions {
 			log.push("runDoctor");
 			return "doctor-report-line";
 		},
+		refreshClients: () => {
+			log.push("refreshClients");
+		},
 		startSandbox: async () => {
 			log.push("startSandbox");
 			return ok(undefined) as Result<void, Error>;
@@ -219,6 +222,20 @@ describe("DashboardRoot — channel detail actions", () => {
 });
 
 describe("DashboardRoot — clients screen", () => {
+	it("entering Clients re-reads the clients snapshot; entering Channels does not (28j)", async () => {
+		const log: string[] = [];
+		const root = rooted(log);
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // → Channels
+		await flushActions();
+		expect(log).toEqual([]); // no refresh on a non-Clients section
+		root.handleInput(ESC); // back to the menu, focus restored to Channels (1)
+		root.handleInput(DOWN); // focus 2 = Clients & login
+		root.handleInput(ENTER); // → Clients
+		await flushActions();
+		expect(log).toEqual(["refreshClients"]);
+	});
+
 	it("the Set-login row runs setLogin", async () => {
 		const log: string[] = [];
 		const root = rooted(log);

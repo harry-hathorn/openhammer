@@ -160,6 +160,13 @@ export interface DashboardActions {
 	 */
 	readSerial(): Promise<Result<SerialSource, Error>>;
 	/**
+	 * Re-read the registered OAuth clients + the operator-login flag into the store
+	 * (28j): the Clients screen's rows are a snapshot, so entering it re-reads —
+	 * DCR-registered clients and out-of-band login changes appear without a
+	 * dashboard restart.
+	 */
+	refreshClients(): void;
+	/**
 	 * Jump into the `vm` settings section (spec 28, box 28c) — the Sandbox screen's
 	 * *Configure* row. The default runs the SAME section wizard the Settings screen
 	 * uses (`setSection`), with the `vm` section preselected (no picker drift: the
@@ -555,6 +562,9 @@ export class DashboardRoot implements Component {
 		this.screen = { kind: "section", section };
 		this.focus = 0;
 		this.flashMessage = null;
+		// The Clients rows are a snapshot (28j): entering the screen re-reads it, so
+		// DCR-registered clients + out-of-band login changes appear without a restart.
+		if (section === "clients") this.actions.refreshClients();
 	}
 
 	/** Activate the focused row (drill in or run an action). Async — fire-and-forget from handleInput. */

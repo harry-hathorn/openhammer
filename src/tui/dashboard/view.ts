@@ -206,11 +206,21 @@ export function secretRevealRows(clientId: string, plaintextSecret?: string): st
 		rows.push(
 			`  client_secret: ${plaintextSecret}`,
 			"",
-			"Store the secret now — it will NOT be shown again.",
+			"Store the secret now — it will NOT be shown again (re-issue the client if lost).",
 			"(Only a SHA-256 hash is kept in ~/.openhammer/credentials.json.)",
+			"",
+			"Exchange it for a bearer token at /oauth/token (machine clients):",
+			`  curl -s https://<your-server>/oauth/token -d grant_type=client_credentials \\`,
+			`    -d client_id=${clientId} -d client_secret=${plaintextSecret}`,
 		);
 	} else {
-		rows.push("", "Public client — no secret; authenticates with PKCE + the /authorize login.");
+		rows.push(
+			"",
+			"Public login client — no secret; it authenticates with PKCE + the /authorize login.",
+			"Point your client's OAuth at this server — discovery is automatic",
+			"(/.well-known/oauth-authorization-server); register its redirect URIs exactly",
+			"as the client sends them, and authorize at /authorize with the operator login.",
+		);
 	}
 	return rows;
 }
