@@ -177,10 +177,13 @@ describe("DashboardRoot — quit", () => {
 		expect(log).toEqual(["quit"]);
 	});
 
-	it("Esc at the menu calls actions.quit() (backs out of the top level)", () => {
+	it("Esc at the menu is a NO-OP — never a quit (28j: the old silent server-kill)", () => {
 		const log: string[] = [];
-		rooted(log).handleInput(ESC);
-		expect(log).toEqual(["quit"]);
+		const root = rooted(log);
+		root.handleInput(ESC);
+		root.handleInput("\x1b[D"); // ← likewise
+		expect(log).toEqual([]); // nothing quit — the server child stays up
+		expect(root.screen).toEqual({ kind: "menu" });
 	});
 });
 
@@ -1004,5 +1007,73 @@ describe("DashboardRoot — provision.sh + apply-to-running (spec 28, box 28g)",
 		await flushActions();
 		expect(log).toEqual(["applyAgent"]);
 		expect(root.render(80).some((l) => l.includes("default agent written"))).toBe(false); // no flash
+	});
+});
+
+describe("DashboardRoot — navigation safety + feedback (28j)", () => {
+	it("the Monitor screen opens with the connected-clients line (activeClients finally renders)", async () => {
+		let storeRef: DashboardStore | undefined;
+		const root = vmRooted([], "vm", (store) => {
+			storeRef = store;
+			return {};
+		});
+		storeRef?.applyEvent({
+			ts: "2026-01-01T00:00:00Z",
+			client: "claude-code/1.0",
+			method: "tools/call",
+			tool: "bash",
+			reqBytes: 1,
+			resBytes: 2,
+			ms: 3,
+			status: 200,
+		});
+		for (let i = 0; i < 3; i++) root.handleInput(DOWN); // menu → Monitor
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(root.render(80).some((l) => l.includes("1 client connected"))).toBe(true);
+	});
+
+	it("a doctor run flashes the report's one-line summary — a run is never silent", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm", () => ({
+			runDoctor: async () => "Ran 10 check(s): 1 fail, 2 warn, 7 pass.\n[fail]\n  x: nope",
+		}));
+		for (let i = 0; i < 5; i++) root.handleInput(DOWN); // menu → Doctor
+		root.handleInput(ENTER);
+		root.handleInput(ENTER); // Run doctor
+		await flushActions();
+		expect(root.render(80).some((l) => l.includes("Ran 10 check(s): 1 fail, 2 warn, 7 pass."))).toBe(true);
+	});
+
+	it("a cancelled wizard (null) flashes Cancelled. — an abort is never silent", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm", () => ({
+			addChannel: async () => {
+				log.push("addChannel");
+				return null;
+			},
+		}));
+		root.handleInput(DOWN); // menu → Channels
+		root.handleInput(ENTER);
+		root.handleInput(DOWN); // focus 1 = the add row
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["addChannel"]);
+		expect(root.render(80).some((l) => l.includes("Cancelled."))).toBe(true);
+	});
+
+	it("the serial drill-in's Refresh row re-reads the log in place", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm");
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER); // → Sandbox
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Serial tail (a ready session hides Start)
+		root.handleInput(ENTER); // → serial (the read resolves in the fire-and-forget activation)
+		await flushActions();
+		expect(root.screen).toEqual({ kind: "serial" });
+		root.handleInput(ENTER); // focus 0 = Refresh
+		await flushActions();
+		expect(log.filter((call) => call === "readSerial")).toHaveLength(2); // the open + the refresh
+		expect(root.screen).toEqual({ kind: "serial" });
 	});
 });

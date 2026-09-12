@@ -96,6 +96,15 @@ export type ScreenState =
 const ADD_CHANNEL_MARKER = "＋";
 const ISSUE_CLIENT_MARKER = "＋";
 
+/** The serial Refresh row's label (matched by exact match in the serial dispatch). */
+const SERIAL_REFRESH_LABEL = "Refresh";
+
+/** The serial drill-in's rows (28j): Refresh re-reads the log in place, then Back. */
+const SERIAL_ITEMS = [
+	{ label: SERIAL_REFRESH_LABEL, description: "re-read the session's serial.log" },
+	{ label: "Back", description: "to the sandbox" },
+];
+
 /**
  * The mutating actions the root calls. Each is wired by `runDashboard` to
  * `suspend()` → run the real flow → `resume()` (so the dashboard loop yields the
@@ -291,6 +300,8 @@ export class DashboardRoot implements Component {
 	private menuFocus = 0;
 	/** A transient feedback line (success/error) shown under the list. */
 	private flashMessage: string | null = null;
+	/** The flash's tone: success renders green, trouble renders yellow (28j). */
+	private flashOk = false;
 	/** The one-time plaintext secret reveal, shown on the Clients screen. */
 	private reveal: SecretReveal | null = null;
 	/** The doctor report, shown on the Doctor screen once run. */
@@ -311,11 +322,17 @@ export class DashboardRoot implements Component {
 		// No cached render state — `render` reads live store/UI state each tick.
 	}
 
+	/** Set the transient flash + its tone in one step (ok renders green, else yellow). */
+	private flash(message: string, ok = false): void {
+		this.flashMessage = message;
+		this.flashOk = ok;
+	}
+
 	/** The footer hint for the active screen. */
 	private hint(): string {
 		switch (this.screen.kind) {
 			case "menu":
-				return "↑↓/jk move · enter/l open · esc/h back · q quit";
+				return "↑↓/jk move · enter/l open · q quit";
 			case "section":
 				return this.screen.section === "monitor" || this.screen.section === "status"
 					? "esc/h back to return"
@@ -363,8 +380,15 @@ export class DashboardRoot implements Component {
 				}
 				if (section === "monitor") {
 					const events = monitorRows(this.store.monitorEvents);
+					// The connected-clients line (28j): `activeClients` was computed by the
+					// reducer and rendered nowhere — now the Monitor screen opens with it.
+					const clients = this.store.activeClients.length;
 					return {
-						header: events.length > 0 ? events : ["(quiet — no calls yet)"],
+						header: [
+							`${clients} client${clients === 1 ? "" : "s"} connected`,
+							"",
+							...(events.length > 0 ? events : ["(quiet — no calls yet)"]),
+						],
 						items: BACK_ONLY,
 						hint: this.hint(),
 					};
@@ -435,11 +459,11 @@ export class DashboardRoot implements Component {
 			}
 			case "serial": {
 				// The serial drill-in (spec 28, box 28b): the one-line window/bytes note,
-				// then the tail-biased lines — a static snapshot, never a live follow.
+				// then the tail-biased lines — a static snapshot (Refresh re-reads, 28j).
 				const tail = this.serialTail;
 				return {
 					header: tail !== null ? [serialTailNote(tail), "", ...tail.lines] : ["(no serial read yet)"],
-					items: BACK_ONLY,
+					items: SERIAL_ITEMS,
 					hint: this.hint(),
 				};
 			}
@@ -476,7 +500,10 @@ export class DashboardRoot implements Component {
 		const maxVisible = Math.max(1, width > 0 ? width : 80);
 		const bottom: string[] = [...renderList(spec.items, this.focus, this.style, maxVisible)];
 		if (this.flashMessage !== null) {
-			bottom.push("", this.style.warning(this.flashMessage));
+			// 28j: the tone matches the news — success green, trouble yellow (the
+			// style layer shipped a `success` fn the root never used until now).
+			const toned = this.flashOk ? this.style.success(this.flashMessage) : this.style.warning(this.flashMessage);
+			bottom.push("", toned);
 		}
 		bottom.push("", footerLine(this.hint(), this.style));
 		// Gap = leftover viewport rows (clamped ≥ 0); inserts blank lines so the list sits
@@ -512,8 +539,11 @@ export class DashboardRoot implements Component {
 			return;
 		}
 		if (isBack) {
-			// `h` at the menu is a no-op (don't quit on a stray keypress); Esc/← still quit.
-			if (data === "h" && this.screen.kind === "menu") return;
+			// At the menu, back is a NO-OP for every back key (28j): Esc/←/h used to
+			// quit HERE — silently killing the server child with the dashboard — the
+			// single most dangerous key on the screen. Quitting is deliberate: the
+			// Quit row, `q`, Ctrl-C.
+			if (this.screen.kind === "menu") return;
 			this.back();
 			return;
 		}
@@ -523,18 +553,17 @@ export class DashboardRoot implements Component {
 			// rejection — flash the message instead (the terminal is already resumed by
 			// the action's suspend/resume `finally`).
 			void this.activate().catch((e: unknown) => {
-				this.flashMessage = `Error: ${e instanceof Error ? e.message : String(e)}`;
+				this.flash(`Error: ${e instanceof Error ? e.message : String(e)}`);
 			});
 		}
 	}
 
-	/** Back out one level (detail → section → menu → quit). */
+	/** Back out one level (detail → section → menu; the menu itself never quits — 28j). */
 	private back(): void {
 		this.flashMessage = null;
 		switch (this.screen.kind) {
 			case "menu":
-				this.actions.quit();
-				return;
+				return; // unreachable via handleInput (it filters menu backs) — never quit here
 			case "section":
 				this.reveal = this.screen.section === "clients" ? null : this.reveal;
 				this.screen = { kind: "menu" };
@@ -597,6 +626,22 @@ export class DashboardRoot implements Component {
 				await this.activateClientDetail(item.label);
 				return;
 			}
+			case "serial": {
+				// The serial drill-in's Refresh row (28j): re-read the log in place —
+				// the snapshot was static before, so a booting guest's tail went stale
+				// until the operator backed out and re-opened it.
+				if (item.label === SERIAL_REFRESH_LABEL) {
+					const result = await this.actions.readSerial();
+					if (!result.ok) {
+						this.flash(result.error.message);
+						return;
+					}
+					this.serialTail = serialTailOf(result.value.content, result.value.totalBytes);
+					this.focus = 0;
+					return;
+				}
+				return;
+			}
 		}
 	}
 
@@ -621,17 +666,24 @@ export class DashboardRoot implements Component {
 		if (section === "clients") {
 			if (label === SET_LOGIN_LABEL) {
 				const result = await this.actions.setLogin();
-				if (result === null) return; // cancelled — silent
-				this.flashMessage = result.ok ? "Operator login set." : result.error.message;
+				// A wizard abort is never silent (28j): "Cancelled." tells the operator
+				// their Enter did something — nothing was saved.
+				if (result === null) {
+					this.flash("Cancelled.");
+					return;
+				}
+				this.flash(result.ok ? "Operator login set." : result.error.message, result.ok);
 				return;
 			}
 			if (label.startsWith(ISSUE_CLIENT_MARKER)) {
 				const result = await this.actions.issueClient();
 				if (result?.ok) {
 					this.reveal = { clientId: result.value.clientId, plaintext: result.value.plaintextSecret };
-					this.flashMessage = "Client issued — secret shown above (once).";
-				} else if (result && !result.ok) {
-					this.flashMessage = result.error.message;
+					this.flash("Client issued — secret shown above (once).", true);
+				} else if (result === null) {
+					this.flash("Cancelled."); // wizard abort — never silent (28j)
+				} else {
+					this.flash(result.error.message);
 				}
 				return;
 			}
@@ -651,7 +703,16 @@ export class DashboardRoot implements Component {
 		}
 		if (section === "doctor" && label === "Run doctor") {
 			this.doctorReport = await this.actions.runDoctor();
-			this.flashMessage = this.doctorReport === "" ? "Doctor failed to run." : null;
+			if (this.doctorReport === "") {
+				this.flash("Doctor failed to run.");
+				return;
+			}
+			// The report's first line IS the summary ("Ran N check(s): X fail, Y warn,
+			// Z pass.") — flash it so a run is never silent (28j); the full block stays
+			// in the header above. Green only when nothing failed.
+			const summary = this.doctorReport.split("\n")[0] ?? "";
+			const fails = /(\d+) fail/.exec(summary);
+			this.flash(summary, fails === null || fails[1] === "0");
 			return;
 		}
 		if (section === "sandbox") {
@@ -666,25 +727,34 @@ export class DashboardRoot implements Component {
 				// pick/declined confirm is `null` — silent (the modal idiom).
 				const result = await this.actions.startSandbox();
 				if (result === null) return;
-				this.flashMessage = result.ok
-					? "Start accepted — the sandbox is booting (the state row flips to booting)."
-					: result.error.message;
+				this.flash(
+					result.ok
+						? "Start accepted — the sandbox is booting (the state row flips to booting)."
+						: result.error.message,
+					result.ok,
+				);
 				return;
 			}
 			if (label === SANDBOX_STOP_LABEL) {
 				const result = await this.actions.stopSandbox();
 				if (result === null) return; // confirmation declined — silent (the modal idiom)
-				this.flashMessage = result.ok
-					? "Sandbox stopped — the boot-scoped mode re-boots it on the next server start (lasting stop: mode off + restart)."
-					: result.error.message;
+				this.flash(
+					result.ok
+						? "Sandbox stopped — the boot-scoped mode re-boots it on the next server start (lasting stop: mode off + restart)."
+						: result.error.message,
+					result.ok,
+				);
 				return;
 			}
 			if (label === SANDBOX_RESTART_LABEL) {
 				const result = await this.actions.restartSandbox();
 				if (result === null) return;
-				this.flashMessage = result.ok
-					? "Restarting the sandbox — teardown done; a fresh boot is starting (the row flips to booting)."
-					: result.error.message;
+				this.flash(
+					result.ok
+						? "Restarting the sandbox — teardown done; a fresh boot is starting (the row flips to booting)."
+						: result.error.message,
+					result.ok,
+				);
 				return;
 			}
 			if (label === SANDBOX_CONFIGURE_LABEL) {
@@ -701,9 +771,10 @@ export class DashboardRoot implements Component {
 				// already saved through 26a's writer on ok, and this only flashes.
 				const result = await this.actions.guestSetup();
 				if (result === null) return; // cancelled / the post-golden warning declined — silent
-				this.flashMessage = result.ok
-					? "Guest setup saved — applies to the next `vm install`."
-					: result.error.message;
+				this.flash(
+					result.ok ? "Guest setup saved — applies to the next `vm install`." : result.error.message,
+					result.ok,
+				);
 				return;
 			}
 			if (label === SANDBOX_SECRETS_LABEL) {
@@ -717,9 +788,10 @@ export class DashboardRoot implements Component {
 				// always loads at the next sandbox boot.
 				const result = await this.actions.secretsSetup();
 				if (result === null) return; // cancelled / declined — silent (the modal idiom)
-				this.flashMessage = result.ok
-					? "Secrets saved — they load at the next sandbox boot."
-					: result.error.message;
+				this.flash(
+					result.ok ? "Secrets saved — they load at the next sandbox boot." : result.error.message,
+					result.ok,
+				);
 				return;
 			}
 			if (label === SANDBOX_PROVISION_LABEL) {
@@ -729,7 +801,7 @@ export class DashboardRoot implements Component {
 				// it runs during the NEXT `vm provision` (provision.ts step (j)).
 				const result = await this.actions.editProvision();
 				if (result === null) return; // unreachable today — the editor's exit IS the outcome
-				this.flashMessage = result.ok ? PROVISION_SAVED_FLASH : result.error.message;
+				this.flash(result.ok ? PROVISION_SAVED_FLASH : result.error.message, result.ok);
 				return;
 			}
 			if (label === SANDBOX_APPLY_AGENT_LABEL || label === SANDBOX_APPLY_THEME_LABEL) {
@@ -742,17 +814,20 @@ export class DashboardRoot implements Component {
 				const result =
 					label === SANDBOX_APPLY_AGENT_LABEL ? await this.actions.applyAgent() : await this.actions.applyTheme();
 				if (result === null) return; // cancelled choice — silent (the modal idiom)
-				this.flashMessage = result.ok
-					? result.value
-					: result.error.message.includes(APPLY_TO_RUNNING_HINT)
-						? result.error.message
-						: `${result.error.message} — ${APPLY_TO_RUNNING_HINT}`;
+				this.flash(
+					result.ok
+						? result.value
+						: result.error.message.includes(APPLY_TO_RUNNING_HINT)
+							? result.error.message
+							: `${result.error.message} — ${APPLY_TO_RUNNING_HINT}`,
+					result.ok,
+				);
 				return;
 			}
 			if (label === SANDBOX_SERIAL_LABEL) {
 				const result = await this.actions.readSerial();
 				if (!result.ok) {
-					this.flashMessage = result.error.message; // incl. "no serial yet" (no session / no file)
+					this.flash(result.error.message); // incl. "no serial yet" (no session / no file)
 					return;
 				}
 				this.serialTail = serialTailOf(result.value.content, result.value.totalBytes);
@@ -772,18 +847,25 @@ export class DashboardRoot implements Component {
 				const result = await this.actions.installSandbox();
 				if (result === null) return;
 				if (!result.ok) {
-					this.flashMessage = result.error.message;
+					this.flash(result.error.message);
 					return;
 				}
 				this.back();
-				this.flashMessage =
-					result.value.chainedStart === true
-						? result.value.chainedError !== undefined
+				if (result.value.chainedStart === true) {
+					this.flash(
+						result.value.chainedError !== undefined
 							? `Golden built — but the start failed: ${result.value.chainedError}`
-							: "Golden built — the sandbox is starting (the state row flips to booting)."
-						: result.value.goldenId !== undefined
+							: "Golden built — the sandbox is starting (the state row flips to booting).",
+						result.value.chainedError === undefined,
+					);
+				} else {
+					this.flash(
+						result.value.goldenId !== undefined
 							? `Golden built: ${result.value.goldenId} — ready to start.`
-							: `Install complete — session ${result.value.sessionDir}.`;
+							: `Install complete — session ${result.value.sessionDir}.`,
+						true,
+					);
+				}
 				return;
 			}
 		}
@@ -803,10 +885,10 @@ export class DashboardRoot implements Component {
 		if (label === "Remove") {
 			const result = await this.actions.removeChannel(id);
 			if (result?.ok) {
-				this.flashMessage = "Channel removed.";
+				this.flash("Channel removed.", true);
 				this.back(); // the channel is gone — return to the list
 			} else if (result && !result.ok) {
-				this.flashMessage = result.error.message;
+				this.flash(result.error.message);
 			}
 		}
 	}
@@ -821,10 +903,10 @@ export class DashboardRoot implements Component {
 		if (label === "Remove") {
 			const result = await this.actions.removeClient(id);
 			if (result?.ok) {
-				this.flashMessage = "Client removed.";
+				this.flash("Client removed.", true);
 				this.back();
 			} else if (result && !result.ok) {
-				this.flashMessage = result.error.message;
+				this.flash(result.error.message);
 			}
 		}
 	}
@@ -844,18 +926,24 @@ export class DashboardRoot implements Component {
 	): Promise<void> {
 		const before = this.store.settings;
 		const result = await run();
-		if (result === null) return; // cancelled — silent
+		// A wizard abort is never silent (28j): "Cancelled." — nothing was saved.
+		if (result === null) {
+			this.flash("Cancelled.");
+			return;
+		}
 		if (result.ok) {
 			const vmTouched = !vmSettingsEqual(before.vm, this.store.settings.vm);
-			this.flashMessage =
+			this.flash(
 				successMsg ??
-				(kind === "channel"
-					? "Channel added."
-					: vmTouched && this.store.vmApplyPending
-						? VM_APPLY_HINT
-						: "Settings updated.");
+					(kind === "channel"
+						? "Channel added."
+						: vmTouched && this.store.vmApplyPending
+							? VM_APPLY_HINT
+							: "Settings updated."),
+				true,
+			);
 		} else {
-			this.flashMessage = result.error.message;
+			this.flash(result.error.message);
 		}
 	}
 }

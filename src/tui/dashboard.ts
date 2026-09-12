@@ -847,6 +847,12 @@ function buildActions(
 	const removeChannelAction: DashboardActions["removeChannel"] =
 		overrides.removeChannel ??
 		(async (id: string) => {
+			// Destructive → one confirm (28j; the Stop idiom): a decline is `null`,
+			// silent — the channel doc is untouched.
+			const confirmed = await withModal(() =>
+				io.confirm({ message: `Remove channel "${id}"? Its entry is deleted from the settings doc.` }),
+			);
+			if (confirmed !== true) return null;
 			const before = store.settings;
 			const result = removeChannelOp(before, id);
 			if (result.ok) {
@@ -873,6 +879,12 @@ function buildActions(
 	const removeClientAction: DashboardActions["removeClient"] =
 		overrides.removeClient ??
 		(async (clientId: string) => {
+			// Destructive → one confirm (28j; the Stop idiom): a decline is `null`,
+			// silent — the client stays registered.
+			const confirmed = await withModal(() =>
+				io.confirm({ message: `Remove client "${clientId}"? Clients connecting with it will be refused.` }),
+			);
+			if (confirmed !== true) return null;
 			const result = removeClient(clientId, credPath);
 			if (result.ok) store.setOauthClients(listClientsSafe(credPath));
 			return result;
