@@ -13,6 +13,7 @@ import { DashboardStore } from "./dashboard/store.ts";
 import {
 	createSandboxActions,
 	createSettingsActions,
+	createStartSandboxAction,
 	type DashboardDeps,
 	readSerialLog,
 	runDashboard,
@@ -415,6 +416,231 @@ describe("createSandboxActions — the socket-command tier (28i)", () => {
 		});
 		expect(await actions.readSerial()).toEqual({ ok: true, value: { content: "line\n", totalBytes: 5 } });
 		expect(reads).toEqual(["vm-attached"]);
+	});
+});
+
+describe("createStartSandboxAction (28j) — the one-action launch", () => {
+	it("no golden errs with the guard line; nothing else runs", async () => {
+		const store = new DashboardStore({ goldenExists: () => false });
+		let picked = 0;
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => {
+				picked += 1;
+				return "vm";
+			},
+			confirm: async () => true,
+			persist: () => {},
+			sendCommand: async () => ok(undefined),
+		});
+		expect(result).toEqual({ ok: false, error: new Error(NO_GOLDEN_GUARD_MESSAGE) });
+		expect(picked).toBe(0);
+	});
+
+	it("mode off: picks vm, persists + adopts the doc, and dispatches the child re-spawn", async () => {
+		const store = new DashboardStore({ goldenExists: () => true });
+		const persisted: Settings[] = [];
+		let restarted = 0;
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => "vm",
+			confirm: async () => true,
+			persist: (s) => persisted.push(s),
+			restartServer: async () => {
+				restarted += 1;
+				return ok(undefined);
+			},
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+		expect(store.settings.vm.mode).toBe("vm"); // adopted into the store
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]?.vm.mode).toBe("vm");
+		expect(restarted).toBe(1); // the boot-scoped backend needs the fresh boot
+	});
+
+	it("mode off: a cancelled pick is null — nothing persisted, no dispatch", async () => {
+		const store = new DashboardStore({ goldenExists: () => true });
+		let persisted = 0;
+		let sent = 0;
+		let restarted = 0;
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => null,
+			confirm: async () => true,
+			persist: () => {
+				persisted += 1;
+			},
+			sendCommand: async () => {
+				sent += 1;
+				return ok(undefined);
+			},
+			restartServer: async () => {
+				restarted += 1;
+				return ok(undefined);
+			},
+		});
+		expect(result).toBeNull();
+		expect(persisted).toBe(0);
+		expect(sent).toBe(0);
+		expect(restarted).toBe(0);
+	});
+
+	it("mode off + attached (no restart seam): the honest hint err, the pick still persisted", async () => {
+		const store = new DashboardStore({ goldenExists: () => true });
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => "agent",
+			confirm: async () => true,
+			persist: () => {},
+			goldenFlavor: () => "agent",
+		});
+		expect(result).toEqual({
+			ok: false,
+			error: new Error(
+				"boot mode saved — restart openhammer to boot the sandbox (the dashboard did not start this server, so it cannot re-spawn it)",
+			),
+		});
+		expect(store.settings.vm.mode).toBe("agent");
+	});
+
+	it("vm mode already configured: a vm-restart socket command — no pick, no re-spawn", async () => {
+		const store = new DashboardStore(
+			{ goldenExists: () => true },
+			{ ...seed, vm: { ...defaultVmSettings(), mode: "vm" } },
+		);
+		const sent: VmCommandName[] = [];
+		let picked = 0;
+		let restarted = 0;
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => {
+				picked += 1;
+				return null;
+			},
+			confirm: async () => true,
+			persist: () => {},
+			sendCommand: async (cmd) => {
+				sent.push(cmd);
+				return ok(undefined);
+			},
+			restartServer: async () => {
+				restarted += 1;
+				return ok(undefined);
+			},
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+		expect(sent).toEqual(["vm-restart"]);
+		expect(picked).toBe(0);
+		expect(restarted).toBe(0);
+	});
+
+	it("agent over a base-flavor golden asks the exact confirm; declining is null with no dispatch", async () => {
+		const store = new DashboardStore(
+			{ goldenExists: () => true },
+			{ ...seed, vm: { ...defaultVmSettings(), mode: "agent" } },
+		);
+		const confirms: string[] = [];
+		let sent = 0;
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => null,
+			confirm: async (message) => {
+				confirms.push(message);
+				return false;
+			},
+			persist: () => {},
+			goldenFlavor: () => "base",
+			sendCommand: async () => {
+				sent += 1;
+				return ok(undefined);
+			},
+		});
+		expect(result).toBeNull();
+		expect(confirms[0]).toContain("base flavor");
+		expect(confirms[0]).toContain("dies at launch");
+		expect(confirms[0]).toContain("Guest setup");
+		expect(sent).toBe(0);
+		expect(store.vmApplyPending).toBe(false); // the doc was never touched — nothing pending
+	});
+
+	it("an UNREADABLE flavor warns too (fail-safe); accepting boots via vm-restart", async () => {
+		const store = new DashboardStore(
+			{ goldenExists: () => true },
+			{ ...seed, vm: { ...defaultVmSettings(), mode: "agent" } },
+		);
+		const sent: VmCommandName[] = [];
+		let asked = 0;
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => null,
+			confirm: async () => {
+				asked += 1;
+				return true;
+			},
+			persist: () => {},
+			goldenFlavor: () => undefined,
+			sendCommand: async (cmd) => {
+				sent.push(cmd);
+				return ok(undefined);
+			},
+		});
+		expect(asked).toBe(1);
+		expect(result).toEqual({ ok: true, value: undefined });
+		expect(sent).toEqual(["vm-restart"]);
+	});
+
+	it("agent-flavor golden: no confirm at all — straight to the vm-restart", async () => {
+		const store = new DashboardStore(
+			{ goldenExists: () => true },
+			{ ...seed, vm: { ...defaultVmSettings(), mode: "agent" } },
+		);
+		let asked = 0;
+		const sent: VmCommandName[] = [];
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => null,
+			confirm: async () => {
+				asked += 1;
+				return true;
+			},
+			persist: () => {},
+			goldenFlavor: () => "agent",
+			sendCommand: async (cmd) => {
+				sent.push(cmd);
+				return ok(undefined);
+			},
+		});
+		expect(asked).toBe(0);
+		expect(sent).toEqual(["vm-restart"]);
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it("off → agent pick + base flavor + declined confirm: the pick stays saved and the pending note is set", async () => {
+		const store = new DashboardStore({ goldenExists: () => true });
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => "agent",
+			confirm: async () => false,
+			persist: () => {},
+			goldenFlavor: () => "base",
+		});
+		expect(result).toBeNull();
+		expect(store.settings.vm.mode).toBe("agent"); // persisted before the confirm
+		expect(store.vmApplyPending).toBe(true); // the saved-but-not-booted honesty (row 3)
+	});
+
+	it("no sendCommand in the vm/agent dispatch errs the unowned hint", async () => {
+		const store = new DashboardStore(
+			{ goldenExists: () => true },
+			{ ...seed, vm: { ...defaultVmSettings(), mode: "vm" } },
+		);
+		const result = await createStartSandboxAction({
+			store,
+			pickMode: async () => null,
+			confirm: async () => true,
+			persist: () => {},
+		});
+		expect(result).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
 	});
 });
 

@@ -63,6 +63,10 @@ function fakeActions(log: string[]): DashboardActions {
 			log.push("runDoctor");
 			return "doctor-report-line";
 		},
+		startSandbox: async () => {
+			log.push("startSandbox");
+			return ok(undefined) as Result<void, Error>;
+		},
 		stopSandbox: async () => {
 			log.push("stopSandbox");
 			return ok(undefined) as Result<void, Error>;
@@ -385,13 +389,15 @@ describe("DashboardRoot — Sandbox screen (spec 28)", () => {
 		expect(lines.some((l) => l.includes("guest root: /srv/guest-work"))).toBe(true);
 	});
 
-	it("off mode + no vm-state line: focus 6 is Quit, not a hidden Sandbox row", async () => {
+	it("off mode + no vm-state line: focus 6 IS the Sandbox row — the feature is discoverable (28j)", async () => {
 		const log: string[] = [];
 		const root = vmRooted(log, "off");
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
+		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
 		await flushActions();
-		expect(log).toContain("quit"); // the row after Doctor IS Quit — nothing new for an off user
+		// The off fixture holds no line → no live session → Start is the top row.
+		expect(root.render(80).some((l) => l.includes("Start sandbox…"))).toBe(true);
 	});
 });
 
@@ -499,6 +505,33 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(log).toEqual([]); // the fake never ran — the wired default gated first
 		expect(root.render(80).some((l) => l.includes(VM_UNOWNED_HINT))).toBe(true);
 	});
+
+	it("enter on Start runs startSandbox and flashes the booting line (28j)", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(log, undefined, { vmState: "stopped" }); // no live session → Start is row 0
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["startSandbox"]);
+		expect(root.render(80).some((l) => l.includes("Start accepted — the sandbox is booting"))).toBe(true);
+	});
+
+	it("a cancelled start (null) is silent — the cancelled-modal idiom (28j)", async () => {
+		const log: string[] = [];
+		const root = await sandboxed(
+			log,
+			() => ({
+				startSandbox: async () => {
+					log.push("startSandbox");
+					return null;
+				},
+			}),
+			{ vmState: "stopped" },
+		);
+		root.handleInput(ENTER);
+		await flushActions();
+		expect(log).toEqual(["startSandbox"]);
+		expect(root.render(80).some((l) => l.includes("Start accepted"))).toBe(false); // no flash
+	});
 });
 
 describe("DashboardRoot — Configure, Install, and the apply-on-restart affordance (spec 28, box 28c)", () => {
@@ -536,7 +569,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Install (no golden + session stopped — the apply rows hide without a ready line, box 28g; Secrets joined at 4)
+		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (no golden + stopped → the Start row leads the list, 28j; the apply rows hide without a ready line, box 28g)
 		root.handleInput(ENTER);
 		await flushActions();
 		const lines = root.render(80);
@@ -553,7 +586,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Install (no golden + stopped — box 28g's apply rows hide; Secrets joined at 4)
+		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (no golden + stopped → the Start row leads, 28j; the apply rows hide — box 28g)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(root.render(80).some((l) => l.includes("vm install: gate failed"))).toBe(true);
@@ -810,7 +843,7 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // line says inactive — the vm-side scan is the race backstop
 		);
-		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Install (stopped → the row exists; Secrets joined at 4, box 28f)
+		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (stopped → the Start row leads, 28j; Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(

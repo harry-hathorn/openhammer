@@ -11,8 +11,8 @@ import {
 	hasPublicChannel,
 	monitorRows,
 	SERIAL_TAIL_LINES,
-	sandboxEntryVisible,
 	sandboxHeaderRows,
+	sandboxStartOffered,
 	sandboxStateRow,
 	secretRevealRows,
 	serialTailNote,
@@ -229,11 +229,14 @@ describe("view — sandbox rows (spec 28)", () => {
 		expect(sandboxHeaderRows(vmState(), null)).toEqual([row]);
 	});
 
-	it("sandboxEntryVisible: off + no report hides; a report or a vm mode shows", () => {
-		expect(sandboxEntryVisible("off", false)).toBe(false);
-		expect(sandboxEntryVisible("off", true)).toBe(true); // the mode-flipped-at-boot escape hatch
-		expect(sandboxEntryVisible("vm", false)).toBe(true); // from settings, before any line
-		expect(sandboxEntryVisible("agent", false)).toBe(true);
+	it("sandboxStartOffered: no live session offers Start; booting/ready hide it (28j)", () => {
+		expect(sandboxStartOffered(vmState())).toBe(false); // ready — the sandbox is up
+		expect(sandboxStartOffered(vmState({ state: "booting", phase: "prepare", sessionId: null, sshPort: null }))).toBe(
+			false,
+		);
+		expect(sandboxStartOffered(vmState({ state: "stopped" }))).toBe(true);
+		expect(sandboxStartOffered(vmState({ state: "failed" }))).toBe(true);
+		expect(sandboxStartOffered(null)).toBe(true); // nothing ever reported
 	});
 });
 
