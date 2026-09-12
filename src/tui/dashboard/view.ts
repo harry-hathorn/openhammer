@@ -325,6 +325,18 @@ export function sandboxHeaderRows(
 	return rows;
 }
 
+/**
+ * The Sandbox screen's setup-advice block (28k, tier 1): the store's
+ * per-environment remedy lines (distro-aware install commands, firmware and
+ * group directives — environment.ts), rendered under the header so the Start
+ * row is never a mystery when the host can't boot yet. Empty advice renders
+ * nothing. Pure.
+ */
+export function sandboxAdviceRows(advice: readonly string[]): string[] {
+	if (advice.length === 0) return [];
+	return ["", "this host cannot boot the sandbox yet:", ...advice.map((line) => `  ${line}`)];
+}
+
 // ---- the vm mode-select guards + the apply-on-restart affordance (spec 28, box 28c) ----
 
 /**

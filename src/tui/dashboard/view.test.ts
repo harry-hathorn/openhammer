@@ -12,6 +12,7 @@ import {
 	hasPublicChannel,
 	monitorRows,
 	SERIAL_TAIL_LINES,
+	sandboxAdviceRows,
 	sandboxHeaderRows,
 	sandboxStartOffered,
 	sandboxStateRow,
@@ -255,6 +256,15 @@ describe("view — sandbox rows (spec 28)", () => {
 		const row = sandboxStateRow(vmState());
 		expect(sandboxHeaderRows(vmState(), "/home/sandbox")).toEqual([row, "guest root: /home/sandbox"]);
 		expect(sandboxHeaderRows(vmState(), null)).toEqual([row]);
+	});
+
+	it("sandboxAdviceRows: empty renders nothing; lines render indented under one header (28k)", () => {
+		expect(sandboxAdviceRows([])).toEqual([]);
+		expect(sandboxAdviceRows(["install the VM stack — sudo pacman -S --needed qemu-desktop qemu-img edk2"])).toEqual([
+			"",
+			"this host cannot boot the sandbox yet:",
+			"  install the VM stack — sudo pacman -S --needed qemu-desktop qemu-img edk2",
+		]);
 	});
 
 	it("sandboxStartOffered: no live session offers Start; booting/ready hide it (28j)", () => {
