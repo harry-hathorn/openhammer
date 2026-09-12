@@ -4,7 +4,10 @@
  * network-reachable) that serves {@link RequestEvent}s as NDJSON. On connect it
  * dumps the recorder's recent buffer, then streams live events as they arrive —
  * the ngrok `:4040` inspector, minus the network exposure. `openhammer monitor`
- * (17t) tails this feed.
+ * (17t) tails this feed. With a command executor wired (`deps.commands`) the
+ * socket also ACCEPTS lines: one operator command ({@link VmCommandRequest})
+ * per NDJSON line in, one {@link VmCmdResultLine} back — accepted, NOT
+ * completed (progress is the state feed the command's effects emit).
  *
  * **Auth-free by design.** A Unix domain socket is filesystem-local, so it is
  * unreachable over any network. The socket file is `0600` under the owner's
@@ -188,14 +191,176 @@ export function vmStateLineFromStatus(status: VmStatus): VmStateLine {
 }
 
 /**
+ * The operator verbs the status socket accepts (one request per NDJSON line).
+ * Only these two: the sandbox lifecycle is operator-owned, and these are the
+ * operators' levers — a stop (any state, epoch-safe) and a restart (stop, then
+ * the re-arming start). Everything else stays a tool/bearer decision.
+ */
+export type VmCommandName = "vm-stop" | "vm-restart";
+
+/** One operator command line, parsed: `{"cmd":"vm-stop"}`. */
+export interface VmCommandRequest {
+	cmd: VmCommandName;
+}
+
+/** Is `v` a structurally-valid {@link VmCommandRequest}? (Extra keys tolerated — the same parse posture as every line kind here.) */
+function isVmCommandRequest(v: unknown): v is VmCommandRequest {
+	return isStringRecord(v) && (v.cmd === "vm-stop" || v.cmd === "vm-restart");
+}
+
+/**
+ * Parse one NDJSON line into a {@link VmCommandRequest}. Returns `null` for a
+ * blank line, malformed JSON, or a payload whose `cmd` isn't one of the two
+ * verbs — the caller answers those with a `vm-cmd-result` naming the problem
+ * instead of guessing. Strict on the verb set: a typo'd command refuses, it
+ * never executes something adjacent.
+ */
+export function parseVmCommand(line: string): VmCommandRequest | null {
+	const trimmed = line.trim();
+	if (trimmed === "") return null;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	return isVmCommandRequest(parsed) ? parsed : null;
+}
+
+/**
+ * The synchronous verdict of a {@link VmCommandExecutor}: `ok` means the
+ * command was ACCEPTED (kicked off), never that it finished — the reply is
+ * accepted-not-completed, and completion arrives as vm-state lines on the same
+ * feed. `error` carries the actionable refusal when the executor won't accept
+ * (e.g. an off-mode server has no sandbox to stop).
+ */
+export interface VmCommandOutcome {
+	ok: boolean;
+	error: string | null;
+}
+
+/**
+ * Executes one accepted-shape command — main.ts builds this in the closure
+ * where the `VmService` lives and fire-and-forgets the async stop/start behind
+ * it (the socket callback stays synchronous: reply now, stream progress later).
+ */
+export type VmCommandExecutor = (request: VmCommandRequest) => VmCommandOutcome;
+
+/**
+ * One reply line to an operator command — the fourth line kind on the stream
+ * (event / channel-state / vm-state / this). `cmd` echoes the attempted
+ * command: a {@link VmCommandName} when the shape parsed, otherwise the raw
+ * (truncated) payload so a malformed request is diagnosable from the reply
+ * alone. `ok: false` + an actionable `error` for refusals and parse failures.
+ */
+export interface VmCmdResultLine {
+	/** The wire discriminator — distinguishes this from the other line kinds. */
+	type: "vm-cmd-result";
+	/** The attempted command (see above). */
+	cmd: string;
+	/** Was the command accepted (kicked off)? Never "completed". */
+	ok: boolean;
+	/** The actionable refusal/parse problem, or `null` when accepted. */
+	error: string | null;
+}
+
+/** Serialize a vm-cmd-result line as one NDJSON line (compact JSON + `\n`). */
+export function formatVmCmdResultLine(line: VmCmdResultLine): string {
+	return `${JSON.stringify(line)}\n`;
+}
+
+/** Is `v` a structurally-valid {@link VmCmdResultLine}? */
+function isVmCmdResultLine(v: unknown): v is VmCmdResultLine {
+	return (
+		isStringRecord(v) &&
+		v.type === "vm-cmd-result" &&
+		typeof v.cmd === "string" &&
+		typeof v.ok === "boolean" &&
+		(v.error === null || typeof v.error === "string")
+	);
+}
+
+/**
+ * Parse one NDJSON line into a {@link VmCmdResultLine}. Returns `null` for a
+ * blank line, malformed JSON, or another line kind — the additive-parse rule
+ * every consumer on this stream shares (an unknown kind skips, never aborts).
+ */
+export function parseVmCmdResultLine(line: string): VmCmdResultLine | null {
+	const trimmed = line.trim();
+	if (trimmed === "") return null;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	return isVmCmdResultLine(parsed) ? parsed : null;
+}
+
+/** Cap for the echoed `cmd` on a failed parse (a runaway line is not echoed whole). */
+const ECHO_MAX = 80;
+
+/** Collapse whitespace + truncate a raw payload for the reply's `cmd` echo. */
+function echoOf(raw: string): string {
+	const oneLine = raw.replace(/\s+/g, " ").trim();
+	return oneLine.length > ECHO_MAX ? `${oneLine.slice(0, ECHO_MAX - 3)}...` : oneLine;
+}
+
+/**
+ * Execute one raw command line against `commands`, producing exactly the reply
+ * line. This is the whole request semantics: parse → execute → reply, with
+ * parse failures answered (never thrown, never silent) so an operator sees
+ * WHAT was wrong. Blank lines never reach here (skipped by the reader).
+ */
+export function runVmCommand(raw: string, commands: VmCommandExecutor): VmCmdResultLine {
+	const trimmed = raw.trim();
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : "not JSON";
+		return {
+			type: "vm-cmd-result",
+			cmd: echoOf(trimmed),
+			ok: false,
+			error: `malformed command — not JSON: ${reason}`,
+		};
+	}
+	const request = isVmCommandRequest(parsed) ? parsed : null;
+	if (request === null) {
+		const echoed = isStringRecord(parsed) && typeof parsed.cmd === "string" ? echoOf(parsed.cmd) : echoOf(trimmed);
+		return {
+			type: "vm-cmd-result",
+			cmd: echoed,
+			ok: false,
+			error: `not a vm command — expected {"cmd":"vm-stop"} or {"cmd":"vm-restart"}`,
+		};
+	}
+	const outcome = commands(request);
+	return { type: "vm-cmd-result", cmd: request.cmd, ok: outcome.ok, error: outcome.error };
+}
+
+/**
+ * Per-connection command-intake cap: a tail that grows past 8 KiB without a
+ * newline is a runaway/foreign client (no real command is this big) — the
+ * connection is destroyed rather than buffered forever.
+ */
+export const MAX_VM_COMMAND_BYTES = 8_192;
+
+/**
  * The minimal sink a connection needs — `net.Socket` satisfies it. Declared so a
- * unit test can inject a recording fake without spinning a real socket. `once`
- * returns `unknown` (we never use the return value); `net.Socket.once` returns
- * `this`, which is assignable.
+ * unit test can inject a recording fake without spinning a real socket. The
+ * listener-returning methods return `unknown` (we never use the return value);
+ * `net.Socket`'s return `this`, which is assignable.
  */
 export interface StatusSocket {
 	write(chunk: string | Uint8Array): boolean;
 	once(event: "close" | "error", listener: () => void): unknown;
+	/** The command-intake listener (`deps.commands` wired only — see {@link handleConnection}). */
+	on(event: "data", listener: (chunk: Buffer) => void): unknown;
+	off(event: "data", listener: (chunk: Buffer) => void): unknown;
+	/** Forcibly drop the connection (the command-cap escape hatch). */
+	destroy(): void;
 }
 
 /** A started status socket — `close()` stops serving, drops clients, removes the file. */
@@ -235,6 +400,15 @@ export interface StartStatusSocketDeps {
 	 * the stream stays byte-for-byte the pre-27h one). Defaults to `() => null`.
 	 */
 	vmState?: () => VmStateLine | null;
+	/**
+	 * The operator-command executor (28i): when wired, each connection also READS
+	 * — one {@link VmCommandRequest} per NDJSON line in, one
+	 * {@link VmCmdResultLine} back. Unset (the default): the connection never
+	 * registers a data listener and the stream is byte-for-byte the read-only
+	 * pre-command one. Auth posture unchanged — the 0600 same-user file is the
+	 * gate, and these verbs are operator levers the same user already owns.
+	 */
+	commands?: VmCommandExecutor;
 	/** Best-effort logger for a server-level socket error. Defaults to `console.warn`. */
 	warn?: (message: string) => void;
 }
@@ -281,25 +455,65 @@ export function safeWrite(socket: StatusSocket, line: string): boolean {
  * Handle one monitor connection: dump the channel-state snapshot (the "what's
  * configured + live now" view), then the vm-state snapshot (the sandbox's boot
  * lifecycle, spec 27h — omitted when `vmState` is `null`), then the recent
- * buffer (history), then stream live events. A write failure or a
- * `close`/`error` on the socket unsubscribes (idempotently) so a dead client
- * never leaks a subscriber. Exported so the dump-then-stream + cleanup logic is
- * unit-tested with a fake socket.
+ * buffer (history), then stream live events. With `commands` wired, the
+ * connection also reads operator command lines (one reply per line; a tail
+ * over {@link MAX_VM_COMMAND_BYTES} without a newline destroys the
+ * connection). A write failure or a `close`/`error` on the socket unsubscribes
+ * (idempotently) so a dead client never leaks a subscriber. Exported so the
+ * dump-then-stream + cleanup logic is unit-tested with a fake socket.
  */
 export function handleConnection(
 	socket: StatusSocket,
 	recorder: RequestRecorder,
 	channels: readonly ChannelStateLine[] = [],
 	vmState: VmStateLine | null = null,
+	commands?: VmCommandExecutor,
 ): void {
 	let closed = false;
 	// Initialized to a no-op so `cleanup` can run before `subscribe` reassigns it.
 	let unsub: () => void = () => {};
+	let offData: () => void = () => {};
 	const cleanup = (): void => {
 		if (closed) return;
 		closed = true;
 		unsub();
+		offData();
 	};
+
+	// Command intake (28i) — only when the executor is wired. Without it the
+	// data listener is never registered and the stream is byte-for-byte the
+	// read-only pre-command one. NDJSON per connection: complete lines execute
+	// one-for-one (each answered), blank lines skip, and a tail over the cap
+	// without a newline destroys the socket (cleanup runs on the close event
+	// this fires).
+	if (commands !== undefined) {
+		const executor = commands;
+		let pending = Buffer.alloc(0);
+		const onData = (chunk: Buffer): void => {
+			pending = Buffer.concat([pending, chunk]);
+			if (pending.length > MAX_VM_COMMAND_BYTES) {
+				socket.destroy();
+				return;
+			}
+			let nl = pending.indexOf(0x0a);
+			while (nl >= 0) {
+				const raw = pending.subarray(0, nl).toString("utf8");
+				pending = pending.subarray(nl + 1);
+				nl = pending.indexOf(0x0a);
+				const trimmed = raw.trim();
+				if (trimmed === "") continue; // a blank line carries no command
+				const result = runVmCommand(trimmed, executor);
+				if (!safeWrite(socket, formatVmCmdResultLine(result))) {
+					cleanup();
+					return;
+				}
+			}
+		};
+		socket.on("data", onData);
+		offData = () => {
+			socket.off("data", onData);
+		};
+	}
 
 	unsub = recorder.subscribe((event) => {
 		if (!safeWrite(socket, formatEventLine(event))) cleanup();
@@ -348,6 +562,7 @@ export async function startStatusSocket(
 	const warn = deps.warn ?? ((message: string) => console.warn(message));
 	const channels = deps.channels ?? [];
 	const vmState = deps.vmState ?? ((): VmStateLine | null => null);
+	const commands = deps.commands;
 	const sockets = new Set<Socket>();
 
 	// Track open connections so `close()` can drop monitor clients promptly. The
@@ -356,7 +571,7 @@ export async function startStatusSocket(
 	server.on("connection", (socket) => {
 		sockets.add(socket);
 		socket.once("close", () => sockets.delete(socket));
-		handleConnection(socket, recorder, channels, vmState());
+		handleConnection(socket, recorder, channels, vmState(), commands);
 	});
 	// A server-level error after listen must not crash the process (connection
 	// errors are handled per-socket in `handleConnection`).
