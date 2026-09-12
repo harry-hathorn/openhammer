@@ -46,6 +46,12 @@ export interface AskSelectOptions {
 	options: SelectOption[];
 	/** Pre-selected value (clack `initialValue`). */
 	initialValue?: string;
+	/**
+	 * Advisory help rendered beneath the message by the TTY io (28j — the vm
+	 * fields' explanations). Display-only: the flag io ignores it, so `message`
+	 * stays the stable prompt key.
+	 */
+	help?: string;
 }
 
 /** Options for `PromptIo.text` (the wizard can pass defaults; `askText` only sets the message). */
@@ -54,12 +60,16 @@ export interface AskTextOptions {
 	placeholder?: string;
 	defaultValue?: string;
 	initialValue?: string;
+	/** Advisory help rendered beneath the message by the TTY io (28j; display-only). */
+	help?: string;
 }
 
 /** Options for `PromptIo.confirm`. */
 export interface AskConfirmOptions {
 	message: string;
 	initialValue?: boolean;
+	/** Advisory help rendered beneath the message by the TTY io (28j; display-only). */
+	help?: string;
 }
 
 /**
@@ -70,7 +80,7 @@ export interface AskConfirmOptions {
 export interface PromptIo {
 	select(options: AskSelectOptions): Promise<string | null>;
 	text(options: AskTextOptions): Promise<string | null>;
-	password(options: { message: string }): Promise<string | null>;
+	password(options: { message: string; help?: string }): Promise<string | null>;
 	confirm(options: AskConfirmOptions): Promise<boolean | null>;
 	intro(title?: string): void;
 	outro(message?: string): void;
@@ -143,6 +153,9 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 	// screen, which is why a bare `Input` previously looked blank).
 	const run = <T>(mount: (resolve: (value: T | null) => void) => Component, message?: string): Promise<T | null> =>
 		runPrompt(mount, { header: message, ...(deps.terminal !== undefined ? { terminal: deps.terminal } : {}) });
+	/** The modal header: the message, with the declared help (28j) muted beneath it. */
+	const headerOf = (o: { message: string; help?: string }): string =>
+		o.help === undefined ? o.message : `${o.message}\n${style.muted(o.help)}`;
 	const out: BannerStream = deps.stdout ?? process.stdout;
 
 	return {
@@ -161,7 +174,7 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 				list.onSelect = (item) => resolve(item.value);
 				list.onCancel = () => resolve(null);
 				return list;
-			}, o.message);
+			}, headerOf(o));
 		},
 		async text(o) {
 			return run<string>((resolve) => {
@@ -173,7 +186,7 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 				input.onSubmit = (value) => resolve(value);
 				input.onEscape = () => resolve(null);
 				return input;
-			}, o.message);
+			}, headerOf(o));
 		},
 		async password(o) {
 			return run<string>((resolve) => {
@@ -181,7 +194,7 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 				input.onSubmit = (value) => resolve(value);
 				input.onEscape = () => resolve(null);
 				return input;
-			}, o.message);
+			}, headerOf(o));
 		},
 		async confirm(o) {
 			const items: SelectItem[] = [
@@ -196,7 +209,7 @@ export function createDefaultIo(deps: DefaultIoDeps = {}): PromptIo {
 				list.onSelect = (item) => resolve(item.value);
 				list.onCancel = () => resolve(null);
 				return list;
-			}, o.message);
+			}, headerOf(o));
 			return choice === null ? null : choice === "yes";
 		},
 		intro(title) {

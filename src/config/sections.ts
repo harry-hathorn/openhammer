@@ -237,7 +237,7 @@ function vmSelectOptions<T extends string>(values: readonly T[], labels: Record<
 const VM_MODE_LABELS: Record<VmSettings["mode"], string> = {
 	off: "off — local tools, no VM (default)",
 	vm: "vm — tools execute in the guest",
-	agent: "agent — guest + in-guest agent (spec 29)",
+	agent: "agent — guest + in-guest agent",
 };
 
 const VM_PERSIST_LABELS: Record<VmSettings["persist"], string> = {
@@ -282,7 +282,7 @@ export const vmSection: ConfigSection = {
 			label: "Boot mode",
 			kind: "select",
 			options: vmSelectOptions(VM_MODE_VALUES, VM_MODE_LABELS),
-			help: "The operator-imposed sandbox posture: off runs tools locally, vm inside the guest, agent adds the in-guest agent (spec 29).",
+			help: "The operator-imposed sandbox posture: off runs tools locally, vm inside the guest, agent adds the in-guest agent.",
 		},
 		{
 			key: "memoryMb",

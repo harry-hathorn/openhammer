@@ -74,18 +74,27 @@ export function reduceFields(fields: ConfigField[], rawAnswers: RawAnswers): Rec
  * select it) — {@link reduceFields} remains the authoritative fallback. Resolves
  * to `null` on cancel (propagated by the caller). The `default` for `secret` is
  * not shown (clack's masked `password` has none) but is still honored by
- * `reduceFields` on an empty answer.
+ * `reduceFields` on an empty answer. The declared `help` rides the prompt as a
+ * DISPLAY-ONLY hint (28j — it was declared across the vm schema and shown
+ * nowhere): the TTY io renders it muted beneath the message, the flag io
+ * ignores it — so `message` stays exactly the field label, the stable key the
+ * non-interactive path answers on.
  */
 async function promptField(field: ConfigField, io: WizardIo): Promise<string | boolean | null> {
 	switch (field.kind) {
 		case "text":
-			return io.text({ message: field.label, defaultValue: field.default });
+			return io.text({ message: field.label, defaultValue: field.default, help: field.help });
 		case "secret":
-			return io.password({ message: field.label });
+			return io.password({ message: field.label, help: field.help });
 		case "select":
-			return io.select({ message: field.label, options: field.options, initialValue: field.default });
+			return io.select({
+				message: field.label,
+				options: field.options,
+				initialValue: field.default,
+				help: field.help,
+			});
 		case "confirm":
-			return io.confirm({ message: field.label, initialValue: field.default });
+			return io.confirm({ message: field.label, initialValue: field.default, help: field.help });
 		default: {
 			// Exhaustiveness guard: adding a `kind` forces a branch here.
 			const _exhaustive: never = field;

@@ -318,7 +318,7 @@ export const SANDBOX_START_LABEL = "Start sandbox…";
  * warning when a public channel is configured).
  */
 export const SANDBOX_STOP_TEXT =
-	"power down now — the boot-scoped mode re-boots the sandbox on the next server start (lasting stop: mode off + restart)";
+	"stop now — it re-boots on the next server start; a lasting stop is mode off + restart";
 
 /**
  * The Sandbox screen's action list: — ONLY when no session is live — the top
