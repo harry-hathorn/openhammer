@@ -34,6 +34,7 @@ import { defaultSettings } from "../../config/settings.ts";
 import { resolveConfig } from "../../config.ts";
 import type { ClientStat, RequestEvent } from "../../mcp/telemetry.ts";
 import { parseVmStateLine, type VmStateLine } from "../../observability/status-socket.ts";
+import { hostSandboxAdvice } from "../../vm/environment.ts";
 import { MonitorState } from "../monitor-view.ts";
 
 /** Default monitor-feed depth — the last N events shown in the monitor screen. */
@@ -99,6 +100,13 @@ export interface DashboardStoreDeps {
 	 * never render the Sandbox screen never touch disk.
 	 */
 	goldenExists?: () => boolean;
+	/**
+	 * The sandbox-setup advice seam (28k, tier 1): the per-environment remedy
+	 * lines behind {@link DashboardStore.sandboxAdvice}. Defaults to the real
+	 * hostSandboxAdvice probe; like `goldenExists`, lazy + memoized, and never
+	 * consulted while the settings' vm mode is `off`.
+	 */
+	sandboxAdvice?: () => string[];
 }
 
 /**
@@ -168,6 +176,10 @@ export class DashboardStore {
 	private readonly goldenExists: () => boolean;
 	/** Memoized has-golden value; `undefined` = not computed yet (lazy, like {@link vmRootCache}). */
 	private hasGoldenCache: boolean | undefined = undefined;
+	/** The setup-advice probe {@link sandboxAdvice} resolves through (injectable; avoids host probes). */
+	private readonly sandboxAdviceProbe: () => string[];
+	/** Memoized advice; `undefined` = not probed yet (lazy, like {@link vmRootCache}). */
+	private sandboxAdviceCache: string[] | undefined = undefined;
 
 	/**
 	 * @param deps.monitorLimit the events-ring cap; `env`/`guestUser` the guest-root
@@ -182,6 +194,7 @@ export class DashboardStore {
 		this.env = deps.env ?? process.env;
 		this.guestUser = deps.guestUser;
 		this.goldenExists = deps.goldenExists ?? goldenManifestExists;
+		this.sandboxAdviceProbe = deps.sandboxAdvice ?? hostSandboxAdvice;
 	}
 
 	/** The configured channels (a view over {@link settings}). */
@@ -329,6 +342,21 @@ export class DashboardStore {
 			this.hasGoldenCache = this.goldenExists();
 		}
 		return this.hasGoldenCache;
+	}
+
+	/**
+	 * Per-environment sandbox setup advice (28k, tier 1) — the distro-aware
+	 * remedy lines for what THIS host is missing (empty = ready, or a non-Linux
+	 * platform's one honest line). OFF mode never probes (the zero-VM-code pin's
+	 * dashboard twin: an off user never touches the host); the probe result is
+	 * memoized after the first vm-mode read like {@link vmRoot}.
+	 */
+	get sandboxAdvice(): string[] {
+		if (this.settings.vm.mode === "off") return [];
+		if (this.sandboxAdviceCache === undefined) {
+			this.sandboxAdviceCache = this.sandboxAdviceProbe();
+		}
+		return this.sandboxAdviceCache;
 	}
 }
 

@@ -273,4 +273,23 @@ describe("DashboardStore — hasGolden + vmApplyPending (spec 28, box 28c)", () 
 		expect(s.buildLog[0]).toBe(`line ${50}`); // the head was dropped
 		expect(s.buildLog.at(-1)).toBe(`line ${BUILD_LOG_LIMIT + 49}`);
 	});
+
+	it("sandboxAdvice is lazy (off mode never probes) and memoized in a vm mode (28k)", () => {
+		let calls = 0;
+		const s = new DashboardStore({
+			sandboxAdvice: () => {
+				calls += 1;
+				return ["install the VM stack — sudo pacman -S --needed qemu-desktop qemu-img edk2"];
+			},
+		});
+		expect(s.settings.vm.mode).toBe("off"); // the default doc
+		expect(s.sandboxAdvice).toEqual([]); // off → no probe, no advice
+		expect(calls).toBe(0);
+
+		s.setSettings({ ...settingsWith([]), vm: { ...defaultVmSettings(), mode: "vm" } });
+		const advice = s.sandboxAdvice;
+		expect(advice).toHaveLength(1);
+		expect(s.sandboxAdvice).toEqual(advice); // second read — cached
+		expect(calls).toBe(1);
+	});
 });

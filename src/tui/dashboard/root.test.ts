@@ -362,10 +362,19 @@ function vmRooted(
 	log: string[],
 	mode: "off" | "vm",
 	actionsOver?: (store: DashboardStore) => Partial<DashboardActions>,
-	opts: { hasGolden?: boolean; vmState?: VmStateLine["state"] | null } = {},
+	opts: {
+		hasGolden?: boolean;
+		vmState?: VmStateLine["state"] | null;
+		/** The setup-advice probe seam (28k) — defaults to `[]` so no test probes the real host. */
+		sandboxAdvice?: () => string[];
+	} = {},
 ): DashboardRoot {
 	const store = new DashboardStore(
-		{ env: { MCP_ROOT_DIR: "/srv/guest-work" }, goldenExists: () => opts.hasGolden ?? true },
+		{
+			env: { MCP_ROOT_DIR: "/srv/guest-work" },
+			goldenExists: () => opts.hasGolden ?? true,
+			sandboxAdvice: opts.sandboxAdvice ?? (() => []),
+		},
 		{
 			version: 1,
 			channels: [],
@@ -1075,5 +1084,36 @@ describe("DashboardRoot — navigation safety + feedback (28j)", () => {
 		await flushActions();
 		expect(log.filter((call) => call === "readSerial")).toHaveLength(2); // the open + the refresh
 		expect(root.screen).toEqual({ kind: "serial" });
+	});
+});
+
+describe("DashboardRoot — sandbox setup advice (28k, tier 1)", () => {
+	it("the Sandbox screen renders the store's per-environment remedies in a vm mode", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm", undefined, {
+			sandboxAdvice: () => ["install the VM stack — sudo pacman -S --needed qemu-desktop qemu-img edk2"],
+		});
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER); // → Sandbox
+		await flushActions();
+		const lines = root.render(200);
+		expect(lines.some((l) => l.includes("this host cannot boot the sandbox yet:"))).toBe(true);
+		expect(lines.some((l) => l.includes("sudo pacman -S --needed qemu-desktop qemu-img edk2"))).toBe(true);
+	});
+
+	it("off mode renders no advice block — the probe is never even consulted", async () => {
+		let probed = 0;
+		const log: string[] = [];
+		const root = vmRooted(log, "off", undefined, {
+			sandboxAdvice: () => {
+				probed += 1;
+				return ["should never appear"];
+			},
+		});
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER); // → Sandbox
+		await flushActions();
+		expect(root.render(200).some((l) => l.includes("cannot boot the sandbox yet"))).toBe(false);
+		expect(probed).toBe(0); // the off-mode store never touched the host
 	});
 });

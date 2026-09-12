@@ -69,6 +69,7 @@ import {
 	SERIAL_TAIL_LINES,
 	type SerialSource,
 	type SerialTail,
+	sandboxAdviceRows,
 	sandboxHeaderRows,
 	secretRevealRows,
 	serialTailNote,
@@ -413,7 +414,12 @@ export class DashboardRoot implements Component {
 				// build input and the runtime secrets store, 28e/28f/28g).
 				if (section === "sandbox") {
 					return {
-						header: sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
+						header: [
+							...sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
+							// The setup-advice block (28k, tier 1): distro-aware remedies when
+							// the host can't boot yet — copyable commands, never auto-installs.
+							...sandboxAdviceRows(this.store.sandboxAdvice),
+						],
 						items: sandboxItems(
 							this.store.hasGolden,
 							vmSessionActive(this.store.latestVmState),
