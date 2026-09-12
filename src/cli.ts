@@ -215,7 +215,7 @@ const defaultDashboard = async (parsed: ParsedArgs): Promise<number> => {
 
 	const settings = loadSettings();
 	const config = loadConfig();
-	const control = await ensureServer(config, { args: serverArgs(parsed.tunnel, parsed.channel) });
+	const control = await ensureServer(config, { args: serverArgs(parsed.tunnel, parsed.channel, parsed.vmMode) });
 	if (!control.ok) {
 		process.stderr.write(`${control.error.message}\n`);
 		return 1;
