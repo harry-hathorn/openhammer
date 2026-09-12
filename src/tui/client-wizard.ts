@@ -97,17 +97,46 @@ export function clientConfigFromFlags(flags: ClientConfigFlags): ClientConfig {
 
 /**
  * Prompt the client config step by step via `io`. Resolves to the config, or `null` the
- * moment the prompt is cancelled.
+ * moment a prompt is cancelled.
  *
- * The interactive wizard issues a **machine** (`client_credentials`) client — the kind with a
- * `client_secret` a script or service presents at `/oauth/token`. Login (`authorization_code`)
- * clients are **not** created manually: an MCP client (Claude, Cursor) registers dynamically
- * via `/register` and the operator authorizes it at `/authorize` with the operator login (set
- * from the dashboard or `auth set-login`). The CLI `--type authorization_code` flag still
- * offers the manual escape hatch for a non-DCR client via {@link clientConfigFromFlags}.
+ * Since 28j the wizard offers BOTH client kinds through {@link CLIENT_TYPE_OPTIONS}
+ * (the picker was exported but never wired): a **machine** (`client_credentials`)
+ * client — the kind with a `client_secret` a script or service presents at
+ * `/oauth/token` — or a **login** (`authorization_code`) client, the manual escape
+ * hatch for a non-DCR client: the wizard then collects its redirect URIs + an
+ * optional per-client login, mirroring the CLI's `--type authorization_code
+ * --redirect-uris … [--username … --password …]` flags through the same parse
+ * helpers. (DCR-capable clients — Claude, Cursor — still register themselves via
+ * `/register` and are authorized at `/authorize` with the operator login.)
  */
 export async function collectClientConfig(io: PromptIo): Promise<ClientConfig | null> {
 	const label = await io.text({ message: "Label (optional, press Enter to skip)" });
 	if (label === null) return null;
-	return { label, grantTypes: [GRANT_CLIENT_CREDENTIALS] };
+	const picked = await io.select({
+		message: CLIENT_TYPE_PROMPT,
+		options: CLIENT_TYPE_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+		initialValue: GRANT_CLIENT_CREDENTIALS,
+	});
+	if (picked === null) return null;
+	if (picked !== GRANT_AUTHORIZATION_CODE) {
+		return { label, grantTypes: [GRANT_CLIENT_CREDENTIALS] };
+	}
+	// The login-client branch — the CLI flags' interactive twin.
+	const rawUris = await io.text({ message: "Redirect URIs (comma-separated; the client's OAuth redirect targets)" });
+	if (rawUris === null) return null;
+	const config: ClientConfig = { label, grantTypes: [GRANT_AUTHORIZATION_CODE] };
+	const redirectUris = parseRedirectUris(rawUris);
+	if (redirectUris.length > 0) config.redirectUris = redirectUris;
+	const username = await io.text({
+		message: "Per-client login username (optional — the operator login also authorizes this client)",
+	});
+	if (username === null) return null;
+	const trimmed = username.trim();
+	if (trimmed !== "") {
+		config.username = trimmed;
+		const password = await io.password({ message: "Per-client login password (empty = operator login authorizes)" });
+		if (password === null) return null;
+		if (password !== "") config.password = password;
+	}
+	return config;
 }

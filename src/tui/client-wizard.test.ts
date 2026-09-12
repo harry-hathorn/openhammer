@@ -68,8 +68,8 @@ describe("clientConfigFromFlags", () => {
 });
 
 describe("collectClientConfig", () => {
-	it("collects a machine (client_credentials) client from a label", async () => {
-		const cfg = await collectClientConfig(fakeIo({ texts: ["bot"] }));
+	it("collects a machine (client_credentials) client through the type picker", async () => {
+		const cfg = await collectClientConfig(fakeIo({ texts: ["bot"], selects: ["client_credentials"] }));
 		expect(cfg).toEqual({ label: "bot", grantTypes: [GRANT_CLIENT_CREDENTIALS] });
 	});
 
@@ -77,9 +77,53 @@ describe("collectClientConfig", () => {
 		expect(await collectClientConfig(fakeIo({ texts: [null] }))).toBeNull();
 	});
 
-	it("does not offer the authorization-code type interactively (login clients connect dynamically)", async () => {
-		// The interactive wizard is machine-only; a queued `selects` answer is never consumed.
-		const cfg = await collectClientConfig(fakeIo({ texts: ["bot"], selects: ["authorization_code"] }));
-		expect(cfg?.grantTypes).toEqual([GRANT_CLIENT_CREDENTIALS]);
+	it("returns null when the type picker is cancelled", async () => {
+		expect(await collectClientConfig(fakeIo({ texts: ["bot"], selects: [null] }))).toBeNull();
+	});
+
+	it("collects a login (authorization_code) client: URIs + per-client login (the CLI flags' twin)", async () => {
+		const cfg = await collectClientConfig(
+			fakeIo({
+				texts: ["web", "https://a, https://b", "op"],
+				selects: ["authorization_code"],
+				passwords: ["pw"],
+			}),
+		);
+		expect(cfg).toEqual({
+			label: "web",
+			grantTypes: [GRANT_AUTHORIZATION_CODE],
+			redirectUris: ["https://a", "https://b"],
+			username: "op",
+			password: "pw",
+		});
+	});
+
+	it("a login client with blank URIs and a blank username omits both", async () => {
+		const cfg = await collectClientConfig(fakeIo({ texts: ["web", "  ", "  "], selects: ["authorization_code"] }));
+		expect(cfg).toEqual({ label: "web", grantTypes: [GRANT_AUTHORIZATION_CODE] });
+	});
+
+	it("a login username with an empty password keeps the username, drops the password", async () => {
+		const cfg = await collectClientConfig(
+			fakeIo({ texts: ["web", "https://a", "op"], selects: ["authorization_code"], passwords: [""] }),
+		);
+		expect(cfg).toEqual({
+			label: "web",
+			grantTypes: [GRANT_AUTHORIZATION_CODE],
+			redirectUris: ["https://a"],
+			username: "op",
+		});
+	});
+
+	it("a cancel at the URIs / username / password prompts aborts the whole flow", async () => {
+		expect(await collectClientConfig(fakeIo({ texts: ["web", null], selects: ["authorization_code"] }))).toBeNull();
+		expect(
+			await collectClientConfig(fakeIo({ texts: ["web", "https://a", null], selects: ["authorization_code"] })),
+		).toBeNull();
+		expect(
+			await collectClientConfig(
+				fakeIo({ texts: ["web", "https://a", "op"], selects: ["authorization_code"], passwords: [null] }),
+			),
+		).toBeNull();
 	});
 });

@@ -883,6 +883,16 @@ function buildActions(
 		return withModal(() => runner());
 	};
 
+	// The Clients screen's snapshot re-read (28j): the store comment always claimed
+	// "snapshotted when the Clients screen opens" — now it actually is. DCR-registered
+	// clients and out-of-band `auth` changes appear without a dashboard restart.
+	const refreshClientsAction: DashboardActions["refreshClients"] =
+		overrides.refreshClients ??
+		(() => {
+			store.setOauthClients(listClientsSafe(credPath));
+			store.setLoginConfigured(hasOperatorLogin(credPath));
+		});
+
 	// `setLogin` mirrors the CLI `auth set-login`: prompt username + password, call
 	// `setOperatorLogin`, and refresh `store.loginConfigured` so the Clients screen reflects
 	// it next frame. This is the gate login (authorization-code) clients authenticate against
@@ -1081,6 +1091,7 @@ function buildActions(
 		removeClient: removeClientAction,
 		setLogin: setLoginAction,
 		runDoctor: runDoctorAction,
+		refreshClients: refreshClientsAction,
 		startSandbox: startSandboxAction,
 		stopSandbox: stopSandboxAction,
 		restartSandbox: restartSandboxAction,

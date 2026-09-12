@@ -417,13 +417,14 @@ describe("authCommand — routing", () => {
 	});
 });
 
-describe("authCommand — add-client (interactive is machine-only)", () => {
-	it("issues a machine client interactively; the authorization-code type is not offered", async () => {
+describe("authCommand — add-client (interactive)", () => {
+	it("issues a machine client interactively through the type picker", async () => {
 		const { path, cleanup } = tempCredPath();
 		try {
-			// A queued `authorization_code` select is never consumed — the interactive wizard is
-			// label-only (login clients connect dynamically + authenticate via the operator login).
-			const prompt = fakeFullIo({ texts: ["bot"], selects: ["authorization_code"] });
+			// The interactive wizard offers BOTH kinds (28j): the picker answered with
+			// the default machine type issues a confidential client. (The login-type
+			// branch is pinned in client-wizard.test.ts.)
+			const prompt = fakeFullIo({ texts: ["bot"], selects: ["client_credentials"] });
 			const { io, out } = recordingIo();
 			const code = await authCommand("add-client", [], io, { io: prompt, credPath: path });
 			expect(code).toBe(0);

@@ -144,6 +144,22 @@ describe("view — clientRows + secretRevealRows", () => {
 		expect(rows.some((r) => r.includes("secret123"))).toBe(true);
 		expect(rows.some((r) => r.includes("NOT be shown again"))).toBe(true);
 	});
+
+	it("a machine client's reveal carries the /oauth/token exchange example (28j)", () => {
+		const text = secretRevealRows("oh_abc", "secret123").join("\n");
+		expect(text).toContain("/oauth/token");
+		expect(text).toContain("grant_type=client_credentials");
+		expect(text).toContain("client_id=oh_abc");
+		expect(text).toContain("client_secret=secret123");
+	});
+
+	it("a login client's reveal points at OAuth discovery + the /authorize login (28j)", () => {
+		const text = secretRevealRows("oh_web").join("\n");
+		expect(text).toContain("discovery is automatic");
+		expect(text).toContain("PKCE");
+		expect(text).toContain("/authorize");
+		expect(text).not.toContain("client_secret");
+	});
 });
 
 describe("view — monitorRows + settingsRows", () => {

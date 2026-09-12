@@ -208,7 +208,7 @@ export function clientItems(store: DashboardStore): ListItem[] {
 			description: `${c.clientId} · ${c.grantType} · ${c.createdAt}`,
 		})),
 	];
-	rows.push({ label: "＋  Issue new client…", description: "machine client — label + secret" });
+	rows.push({ label: "＋  Issue new client…", description: "machine or login — the wizard asks" });
 	return rows;
 }
 
