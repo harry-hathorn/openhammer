@@ -140,6 +140,23 @@ describe("createAuthMiddleware", () => {
 			'resource_metadata="http://tunnel.example:9999/.well-known/oauth-protected-resource"',
 		);
 	});
+
+	it("uses the public OAuth issuer for WWW-Authenticate behind a TLS-terminating proxy", async () => {
+		await app.close();
+		app = await buildApp(TOKEN, [], {
+			...OAUTH,
+			issuer: "https://tunnel.example",
+			audience: "https://tunnel.example/mcp",
+		});
+		const res = await app.inject({ method: "POST", url: "/mcp", headers: { host: "tunnel.example" } });
+
+		// The proxy terminates TLS, so `request.protocol` reads `http` here — the
+		// request-derived fallback would advertise a plaintext discovery URL.
+		expect(String(res.headers["www-authenticate"])).toContain(
+			'resource_metadata="https://tunnel.example/.well-known/oauth-protected-resource"',
+		);
+		expect(String(res.headers["www-authenticate"])).not.toContain("http://tunnel.example");
+	});
 });
 
 describe("isClientAllowed (17r)", () => {

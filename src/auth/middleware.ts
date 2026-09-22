@@ -84,9 +84,17 @@ function constantTimeEquals(presented: string, expected: Buffer): boolean {
 
 /**
  * Resolve the base URL for `WWW-Authenticate`/discovery links from the live
- * request so it stays correct under the tunnel. The `Host` header carries the
- * authority *and* port (non-default/ephemeral ports survive); falls back to the
- * configured `host:port` when no Host header is present.
+ * request. The `Host` header carries the authority *and* port (non-default/
+ * ephemeral ports survive); falls back to the configured `host:port` when no
+ * Host header is present.
+ *
+ * This is only the **fallback** for a server with OAuth unconfigured:
+ * `request.protocol` is the scheme of the *inbound hop*, so behind a
+ * TLS-terminating proxy (a named ngrok/cloudflared tunnel, nginx) it reads
+ * `http` while the public URL is `https` — advertising that would aim the
+ * client's discovery at a plaintext URL. When OAuth *is* configured the caller
+ * advertises `oauth.issuer` (the operator's declared public base URL, which the
+ * rest of the AS metadata is built from) instead.
  *
  * (Fastify v4 exposes no `request.host` property — only `hostname`, which for
  * HTTP/1.1 returns the raw `Host` header value anyway. Reading the header
@@ -206,7 +214,14 @@ export function createAuthMiddleware(
 		// 3. Neither credential validated (wrong opaque, no/invalid JWT, or OAuth not
 		//    configured) → 401. The credential gate always wins over the allowlist:
 		//    a wrong token + disallowed client is 401, not 403.
-		const baseUrl = resolveBaseUrl(request, config);
+		//
+		//    Prefer `oauth.issuer` over the request-derived URL: it is the operator's
+		//    declared public base URL — the same one `server.ts` builds the discovery
+		//    documents from — so the advert and the documents cannot disagree, and a
+		//    TLS-terminating proxy (which makes `request.protocol` read `http`) cannot
+		//    downgrade the advert. Without OAuth there is no declared URL, so the
+		//    request-derived fallback still applies.
+		const baseUrl = oauth?.issuer ?? resolveBaseUrl(request, config);
 		reply
 			.code(401)
 			.header(
