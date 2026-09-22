@@ -11,6 +11,7 @@ describe("loadConfig", () => {
 			rootDir: resolve(process.cwd()),
 			authToken: undefined,
 			maxResponseBytes: 512_000,
+			responseMode: "sse",
 			logLevel: "info",
 		});
 	});
@@ -23,6 +24,20 @@ describe("loadConfig", () => {
 
 	it("coerces MCP_MAX_RESPONSE_BYTES", () => {
 		expect(loadConfig({ MCP_MAX_RESPONSE_BYTES: "1024" }).maxResponseBytes).toBe(1024);
+	});
+
+	it("streams by default and honors MCP_RESPONSE_MODE=json (the legacy single-body mode)", () => {
+		expect(loadConfig({}).responseMode).toBe("sse");
+		expect(loadConfig({ MCP_RESPONSE_MODE: "sse" }).responseMode).toBe("sse");
+		expect(loadConfig({ MCP_RESPONSE_MODE: "json" }).responseMode).toBe("json");
+	});
+
+	it("falls back to the streaming default when MCP_RESPONSE_MODE is unrecognized or empty", () => {
+		// A typo must never silently select the mode that breaks long tool calls
+		// behind a proxy read timeout.
+		expect(loadConfig({ MCP_RESPONSE_MODE: "SSE" }).responseMode).toBe("sse");
+		expect(loadConfig({ MCP_RESPONSE_MODE: "xml" }).responseMode).toBe("sse");
+		expect(loadConfig({ MCP_RESPONSE_MODE: "" }).responseMode).toBe("sse");
 	});
 
 	it("preserves a genuine PORT of 0 (ephemeral port, used by tests)", () => {

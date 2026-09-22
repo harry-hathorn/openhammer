@@ -51,6 +51,17 @@ export async function buildFastify(
 				: { level: config.logLevel },
 	});
 
+	// Socket posture for long tool calls behind a reverse proxy (spec 12c).
+	// `bash` legitimately runs for minutes, so Node's default 5-minute
+	// `requestTimeout` — the guard aimed at slow uploads — must not be what ends
+	// a tool call. `keepAliveTimeout` is raised above the idle window a front
+	// proxy reuses upstream connections for (Cloudflare holds them ~90s), so the
+	// server isn't closing sockets the proxy is about to write a request to;
+	// `headersTimeout` stays above it, as Node requires.
+	fastify.server.requestTimeout = 0;
+	fastify.server.keepAliveTimeout = 65_000;
+	fastify.server.headersTimeout = 66_000;
+
 	// Open CORS — MCP clients (Inspector, third-party browser UIs) hit /mcp from
 	// origins we can't enumerate; `origin:true` reflects the request Origin
 	// (which is required when combining with credentials). Bearer tokens aren't

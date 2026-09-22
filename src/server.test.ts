@@ -26,6 +26,7 @@ function makeConfig(rootDir: string): Config {
 		authToken: undefined,
 		publicUrl: undefined,
 		maxResponseBytes: 512_000,
+		responseMode: "sse",
 		logLevel: "silent",
 	};
 }

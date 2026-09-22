@@ -31,7 +31,7 @@ const TOOL_NAMES = ["guide", "read", "bash", "edit", "write", "grep", "find", "l
 
 /** Build + listen the real server on an ephemeral port; close the app + clean the temp root after `fn`. */
 async function withServer<T>(
-	options: { maxResponseBytes?: number } = {},
+	options: { maxResponseBytes?: number; responseMode?: Config["responseMode"] } = {},
 	fn: (ctx: { app: FastifyInstance; baseUrl: string; rootDir: string }) => Promise<T>,
 ): Promise<T> {
 	const rootDir = mkdtempSync(join(tmpdir(), "openhammer-e2e-"));
@@ -42,6 +42,7 @@ async function withServer<T>(
 		authToken: undefined,
 		publicUrl: undefined,
 		maxResponseBytes: options.maxResponseBytes ?? 512_000,
+		responseMode: options.responseMode ?? "sse",
 		// Silent keeps `npm test` output clean — the SDK transport + per-request
 		// server are otherwise chatty on every request.
 		logLevel: "silent",
@@ -93,6 +94,32 @@ function firstText(result: unknown): string | undefined {
 		return block.text;
 	}
 	return undefined;
+}
+
+/** Read at most one chunk off a streaming response, then tear the stream down. */
+async function readFirstChunk(response: Response): Promise<string> {
+	const body = response.body;
+	if (body === null) return "";
+	const reader = body.getReader();
+	try {
+		const { value } = await reader.read();
+		return value === undefined ? "" : new TextDecoder().decode(value);
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+}
+
+/** A raw `POST /mcp` with the bearer + the SDK's own Accept pair (both required). */
+function postMcp(baseUrl: string, body: unknown): Promise<Response> {
+	return fetch(`${baseUrl}/mcp`, {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			accept: "application/json, text/event-stream",
+			authorization: `Bearer ${TOKEN}`,
+		},
+		body: JSON.stringify(body),
+	});
 }
 
 /** Connect, call one tool, close — returns the isError flag + first text block. */
@@ -228,6 +255,27 @@ describe("Tier-1 real: SDK client ↔ buildFastify", () => {
 				}),
 			});
 			expect(res.status).toBe(401);
+		});
+	});
+
+	it("streams the response as SSE by default (what lets a tool call outlive a proxy read timeout)", async () => {
+		// Regression: with `enableJsonResponse: true` the whole answer is one silent
+		// body, and Cloudflare cuts such a request at ~100s (524). SSE keeps data
+		// flowing (the SDK sends `: keepalive` every 15s), so long `bash` calls survive.
+		await withServer({}, async ({ baseUrl }) => {
+			const res = await postMcp(baseUrl, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+			expect(res.status).toBe(200);
+			expect(res.headers.get("content-type")).toContain("text/event-stream");
+			expect(await readFirstChunk(res)).toContain('"tools"');
+		});
+	});
+
+	it("answers with a single JSON body when the response mode is json (legacy escape hatch)", async () => {
+		await withServer({ responseMode: "json" }, async ({ baseUrl }) => {
+			const res = await postMcp(baseUrl, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+			expect(res.status).toBe(200);
+			expect(res.headers.get("content-type")).toContain("application/json");
+			expect(await res.text()).toContain('"tools"');
 		});
 	});
 

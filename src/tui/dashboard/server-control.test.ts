@@ -11,6 +11,7 @@ function config(port = 3000): Config {
 		authToken: undefined,
 		publicUrl: undefined,
 		maxResponseBytes: 512_000,
+		responseMode: "sse",
 		logLevel: "silent",
 	};
 }

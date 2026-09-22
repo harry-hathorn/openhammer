@@ -241,6 +241,7 @@ Settings persist under `~/.openhammer` (`config.json` for non-secret config + `d
 | `MCP_PUBLIC_URL` | _derived_ | Public base URL advertised in OAuth discovery (issuer/endpoints). Auto from a managed tunnel; set it for a manual ngrok/cloudflare URL, else `http://$HOST:$PORT`. |
 | `OAUTH_JWT_SECRET` | _minted_ | HS256 secret for the OAuth AS (`POST /oauth/token` — client-credentials + auth-code + refresh); minted into `credentials.json` on first use. |
 | `MCP_MAX_RESPONSE_BYTES` | `512000` | Universal `tools/call` size backstop. |
+| `MCP_RESPONSE_MODE` | `sse` | Response shape on `POST /mcp`: `sse` streams each result (the default — it keeps a long `bash` call alive through a proxy read timeout); `json` sends a single body, which Cloudflare and similar proxies cut at ~100s. |
 | `MCP_ALLOWED_CLIENTS` | _any_ | Comma-list of allowed MCP client `User-Agent`s (opt-in `403` gate). |
 | `LOG_LEVEL` | `info` | pino level. |
 

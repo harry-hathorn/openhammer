@@ -22,6 +22,7 @@ function configWith(authToken?: string): Config {
 		authToken,
 		publicUrl: undefined,
 		maxResponseBytes: 512_000,
+		responseMode: "sse",
 		logLevel: "info",
 	};
 }

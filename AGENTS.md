@@ -29,7 +29,7 @@ Run all three until green before checking off a task. Fix the errors you introdu
 - **No LLM.** OpenHammer only executes tools; the agent loop lives in the MCP client (the LLM provider).
 - **Node ≥20, ESM** (`"type":"module"`), TypeScript `strict`. Do not relax `tsconfig`. Node 22 LTS is the dev/CI runtime.
 - **No dependency without a clear need; prefer the `node:` standard library.** No `jose`/`sharp`/`dotenv`/`diff`/`zod`.
-- **Stateless MCP**: per-request `Server` + `Transport`, no `sessionIdGenerator` (Streamable HTTP, `enableJsonResponse:true`).
+- **Stateless MCP**: per-request `Server` + `Transport`, no `sessionIdGenerator` (Streamable HTTP). Responses stream as SSE by default (`MCP_RESPONSE_MODE`, `sse`|`json`) because a single-body `json` response is cut by any proxy read timeout — Cloudflare kills it at ~100s, which is shorter than a legitimate `bash` call; `json` is the opt-in escape hatch only.
 - **Isolation = containerize** (mount the target dir, set `MCP_ROOT_DIR`); not hard-jailed — `bash` reaches anything the OS user can, gated by the bearer token.
 - Do not hand-edit `dist/`, the lockfile, or generated files.
 

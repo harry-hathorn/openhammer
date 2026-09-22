@@ -12,8 +12,28 @@ export interface Config {
 	authToken: string | undefined; // MCP_AUTH_TOKEN override; undefined → mint on boot
 	publicUrl: string | undefined; // MCP_PUBLIC_URL override; undefined → tunnel/host:port at boot
 	maxResponseBytes: number; // MCP_MAX_RESPONSE_BYTES, default 512_000
+	responseMode: ResponseMode; // MCP_RESPONSE_MODE, default "sse"
 	logLevel: string; // LOG_LEVEL, default "info"
 }
+
+/**
+ * The two MCP response shapes over Streamable HTTP, as a const object + derived
+ * union (no `enum` — `erasableSyntaxOnly`). `sse` streams each POST's response as
+ * Server-Sent Events (the spec's default shape, and the SDK's own default); `json`
+ * answers with a single response body.
+ *
+ * Why the streaming default matters in production: a tool call can legitimately
+ * run for minutes (`bash` on a build or an install), and a single non-streamed
+ * response gives every intermediary a silent window to time out. Cloudflare's
+ * proxied read timeout cuts exactly that shape at ~100s (measured: `524` at 126s
+ * against a JSON-mode server, while the same call streamed with SSE keep-alives
+ * was still open past 180s).
+ */
+export const RESPONSE_MODES = {
+	sse: "sse",
+	json: "json",
+} as const;
+export type ResponseMode = (typeof RESPONSE_MODES)[keyof typeof RESPONSE_MODES];
 
 /**
  * The parsed command-line flags that select configuration (see `src/cli/args.ts`,
@@ -41,6 +61,7 @@ export interface ResolvedConfig extends Config {
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_MAX_RESPONSE_BYTES = 512_000;
+const DEFAULT_RESPONSE_MODE: ResponseMode = RESPONSE_MODES.sse;
 const DEFAULT_LOG_LEVEL = "info";
 
 /**
@@ -54,6 +75,20 @@ function coerceNumber(value: string | undefined, defaultValue: number): number {
 	}
 	const n = Number(value);
 	return Number.isNaN(n) ? defaultValue : n;
+}
+
+/** A {@link ResponseMode} type guard — the boundary narrowing (no `as`). */
+function isResponseMode(value: string): value is ResponseMode {
+	return value === RESPONSE_MODES.sse || value === RESPONSE_MODES.json;
+}
+
+/**
+ * Resolve `MCP_RESPONSE_MODE` leniently, like {@link coerceNumber}: absent or
+ * unrecognized falls back to the default. An unrecognized value never selects
+ * `json` — a typo must not disable streaming.
+ */
+export function resolveResponseMode(value: string | undefined): ResponseMode {
+	return value !== undefined && isResponseMode(value) ? value : DEFAULT_RESPONSE_MODE;
 }
 
 /**
@@ -70,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		authToken: env.MCP_AUTH_TOKEN || undefined,
 		publicUrl: env.MCP_PUBLIC_URL || undefined,
 		maxResponseBytes: coerceNumber(env.MCP_MAX_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES),
+		responseMode: resolveResponseMode(env.MCP_RESPONSE_MODE),
 		logLevel: env.LOG_LEVEL || DEFAULT_LOG_LEVEL,
 	};
 }

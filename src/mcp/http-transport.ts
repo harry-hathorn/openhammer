@@ -20,7 +20,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { FastifyInstance } from "fastify";
 import { createAuthMiddleware, type OauthMiddlewareOptions } from "../auth/middleware.ts";
-import type { Config } from "../config.ts";
+import { type Config, RESPONSE_MODES } from "../config.ts";
 import { createMcpServer } from "./server.ts";
 import { attachRequestRecorder, type RequestRecorder } from "./telemetry.ts";
 
@@ -58,7 +58,13 @@ export async function mcpHttpRoutes(fastify: FastifyInstance, opts: McpHttpRoute
 			// Per-request server + transport — stateless, isolates clients.
 			const server = createMcpServer(config.rootDir, config.maxResponseBytes);
 			// Stateless mode: omit `sessionIdGenerator` (per SDK docs).
-			const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
+			// `enableJsonResponse: false` (the default `sse` mode) streams each POST's
+			// result as Server-Sent Events with the SDK's built-in keep-alive comments —
+			// the only shape that survives a proxy read timeout on a long tool call
+			// (see `RESPONSE_MODES` in `src/config.ts` for the measurements).
+			const transport = new StreamableHTTPServerTransport({
+				enableJsonResponse: config.responseMode === RESPONSE_MODES.json,
+			});
 
 			// Best-effort teardown when the raw response closes. Each promise is
 			// caught individually (the repo's established idiom, e.g. `server.test.ts`)
