@@ -1,7 +1,8 @@
 version: 2
 
 updates:
-  # npm dependencies
+  # npm dependencies — minor/patch bumps arrive as ONE grouped PR; major bumps
+  # stay individual (deliberate review). Security updates are never grouped.
   - package-ecosystem: npm
     directory: "/"
     schedule:
@@ -10,6 +11,12 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
 
   # GitHub Actions used in workflows
   - package-ecosystem: github-actions
@@ -20,3 +27,9 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
