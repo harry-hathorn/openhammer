@@ -157,13 +157,15 @@ export function connectRows(
 ): string[] {
 	if (status.localUrl === null || status.token === null) return [];
 	const endpoint = `${status.localUrl}/mcp`;
+	// One line per array element — a joined multi-line string is a single
+	// pi-tui "line" whose visible width (newlines and all) blows past the
+	// terminal and hard-crashes the render loop (the 236-wide-line crash).
 	const lines: string[] = [
 		"",
 		"connect — hand this to your MCP client:",
-		JSON.stringify(mcpServersConfig(endpoint, status.token), null, 2)
+		...JSON.stringify(mcpServersConfig(endpoint, status.token), null, 2)
 			.split("\n")
-			.map((line) => `  ${line}`)
-			.join("\n"),
+			.map((line) => `  ${line}`),
 		"",
 		`  smoke test:  curl -s -X POST ${endpoint} -H "Authorization: Bearer ${status.token}" \\`,
 		`               -H "Content-Type: application/json" \\`,

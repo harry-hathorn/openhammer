@@ -296,6 +296,13 @@ describe("view — connectRows (28j: the TUI finally prints what the boot banner
 		expect(text).toContain("credential.json");
 	});
 
+	it("emits the snippet one line per row — never a single string with embedded newlines (the 236-wide-line crash)", () => {
+		const rows = connectRows(status, { loginConfigured: true, channelCount: 1 });
+		for (const row of rows) expect(row).not.toContain("\n");
+		expect(rows).toContain("  {");
+		expect(rows).toContain('    "mcpServers": {');
+	});
+
 	it("the ONE next step: an unset login wins; else no channel suggests one; else nothing", () => {
 		const loginFirst = connectRows(status, { loginConfigured: false, channelCount: 1 }).join("\n");
 		expect(loginFirst).toContain("Set operator login");
