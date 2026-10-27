@@ -996,11 +996,9 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 		for (let i = 0; i < 9; i++) root.handleInput(DOWN); // focus 9 = Install (stopped → Start + Turn-sandboxing-off lead; Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
-		expect(
-			root
-				.render(200)
-				.some((l) => l.includes("stop the session first: Sandbox → Turn sandboxing off")),
-		).toBe(true);
+		expect(root.render(200).some((l) => l.includes("stop the session first: Sandbox → Turn sandboxing off"))).toBe(
+			true,
+		);
 	});
 });
 
