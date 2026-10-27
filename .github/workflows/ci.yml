@@ -39,11 +39,13 @@ jobs:
         run: npm run build
 
       # `fd` ships as `fdfind` on Debian/Ubuntu; the doctor binary check (and the
-      # `find` tool) expect the `fd` name on PATH.
-      - name: Install fd
+      # `find` tool) expect the `fd` name on PATH. `rg` (ripgrep) is the grep
+      # tool's engine (spec 23f) — apt's ripgrep is current enough and installs
+      # under the right name.
+      - name: Install runtime binaries (fd, rg)
         run: |
           sudo apt-get update
-          sudo apt-get install -y fd-find
+          sudo apt-get install -y fd-find ripgrep
           sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
 
       - name: Test
