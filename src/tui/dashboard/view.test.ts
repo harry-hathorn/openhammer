@@ -279,7 +279,9 @@ describe("view — sandbox rows (spec 28)", () => {
 });
 
 describe("view — connectRows (28j: the TUI finally prints what the boot banner always did)", () => {
-	const status = { up: true, localUrl: "http://127.0.0.1:3000", publicUrl: null, token: "tok" };
+	// `localUrl` is the FULL endpoint (server-control's `base + "/mcp"` shape) —
+	// connectRows must use it verbatim, never append another `/mcp`.
+	const status = { up: true, localUrl: "http://127.0.0.1:3000/mcp", publicUrl: null, token: "tok" };
 
 	it("empty until the endpoint AND token are known (nothing to connect to yet)", () => {
 		expect(connectRows({ ...status, token: null }, { loginConfigured: true, channelCount: 1 })).toEqual([]);
@@ -290,6 +292,7 @@ describe("view — connectRows (28j: the TUI finally prints what the boot banner
 		const text = connectRows(status, { loginConfigured: true, channelCount: 1 }).join("\n");
 		expect(text).toContain('"mcpServers"');
 		expect(text).toContain("http://127.0.0.1:3000/mcp");
+		expect(text).not.toContain("/mcp/mcp"); // the doubled-path 404 bug
 		expect(text).toContain("Bearer tok");
 		expect(text).toContain("curl -s -X POST http://127.0.0.1:3000/mcp");
 		expect(text).toContain('"method":"tools/list"');

@@ -331,7 +331,7 @@ describe("DashboardRoot — render", () => {
 		const store = new DashboardStore({}, seed());
 		store.setStatus({
 			up: true,
-			localUrl: "http://127.0.0.1:3000",
+			localUrl: "http://127.0.0.1:3000/mcp",
 			publicUrl: null,
 			token: "3UnB-AJ81UPc-kAOAcwU98TPp_c8tBq3E4A9KyzT8lQ",
 		});
