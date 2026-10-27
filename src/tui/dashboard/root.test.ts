@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { ChannelEntry, Settings } from "../../config/settings.ts";
@@ -321,6 +322,31 @@ describe("DashboardRoot — render", () => {
 		expect(lines.some((l) => l.includes("Channels"))).toBe(true);
 		expect(lines.at(-1)).toMatch(/move|quit|esc/); // footer hint
 	});
+
+	it("clips EVERY frame line to the terminal width — the Status connect block cannot crash the render loop", () => {
+		// Regression: the mcpServers snippet was one string with embedded newlines (236
+		// wide on a 95-wide terminal) and the curl smoke test alone is 133 wide — pi-tui
+		// throws on any line wider than the terminal. The view-model now emits one row
+		// per line and the root clips the whole frame, so even a narrow terminal renders.
+		const store = new DashboardStore({}, seed());
+		store.setStatus({
+			up: true,
+			localUrl: "http://127.0.0.1:3000",
+			publicUrl: null,
+			token: "3UnB-AJ81UPc-kAOAcwU98TPp_c8tBq3E4A9KyzT8lQ",
+		});
+		const root = new DashboardRoot({ store, style: createStyle(false), actions: fakeActions([]) });
+		root.handleInput(ENTER); // menu focus 0 = Status
+		expect(root.screen).toEqual({ kind: "section", section: "status" });
+		for (const narrow of [95, 60]) {
+			const lines = root.render(narrow);
+			expect(lines.some((l) => l.includes("mcpServers"))).toBe(true); // the block IS shown
+			for (const line of lines) {
+				expect(line).not.toContain("\n"); // one row per line
+				expect(visibleWidth(line)).toBeLessThanOrEqual(narrow); // and none too wide
+			}
+		}
+	});
 });
 
 /** Let any fire-and-forget `activate()` microtasks settle before asserting on action side-effects. */
@@ -473,7 +499,9 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(ENTER); // focus 0 = Stop
 		await flushActions();
 		expect(log).toEqual(["stopSandbox"]);
-		expect(root.render(80).some((l) => l.includes("the lasting stop is mode off + restart"))).toBe(true);
+		// render(120): the flash is ~98 visible chars — a real 80-col terminal CLIPS it
+		// (frame-wide truncation), so assert the full text at a width that fits it.
+		expect(root.render(120).some((l) => l.includes("the lasting stop is mode off + restart"))).toBe(true);
 	});
 
 	it("enter on Restart runs restartSandbox (the stop→start order is pinned at the action level)", async () => {
@@ -532,7 +560,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		root.handleInput(ENTER); // Stop
 		await flushActions();
 		expect(log).toEqual([]); // the fake never ran — the wired default gated first
-		expect(root.render(80).some((l) => l.includes(VM_UNOWNED_HINT))).toBe(true);
+		// render(120): the hint is 86 visible chars — clipped below that width.
+		expect(root.render(120).some((l) => l.includes(VM_UNOWNED_HINT))).toBe(true);
 	});
 
 	it("enter on Start runs startSandbox and flashes the booting line (28j)", async () => {

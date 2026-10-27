@@ -22,7 +22,7 @@
  * doctor/secret/issue flows are reached purely through the action seams.
  */
 import type { Component } from "@earendil-works/pi-tui";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { IssuedClient } from "../../auth/oauth/clients.ts";
 import type { Settings } from "../../config/settings.ts";
 import type { Result } from "../../tools/result.ts";
@@ -496,6 +496,7 @@ export class DashboardRoot implements Component {
 	 *  the frame (not scrollback) so it survives the force-clear + redraw after a modal. */
 	render(width: number): string[] {
 		const spec = this.currentSpec();
+		const frameWidth = Math.max(1, width > 0 ? width : 80);
 		// Top: banner + title + the screen's header (field rows / monitor feed / reveal).
 		const top: string[] = [...BANNER.split("\n"), "", titleLine(this.style)];
 		if ((spec.header ?? []).length > 0) {
@@ -503,8 +504,7 @@ export class DashboardRoot implements Component {
 			for (const line of spec.header ?? []) top.push(line);
 		}
 		// Bottom: the focused list + flash + footer.
-		const maxVisible = Math.max(1, width > 0 ? width : 80);
-		const bottom: string[] = [...renderList(spec.items, this.focus, this.style, maxVisible)];
+		const bottom: string[] = [...renderList(spec.items, this.focus, this.style, frameWidth)];
 		if (this.flashMessage !== null) {
 			// 28j: the tone matches the news — success green, trouble yellow (the
 			// style layer shipped a `success` fn the root never used until now).
@@ -516,7 +516,13 @@ export class DashboardRoot implements Component {
 		// at the bottom. When the content is tall (e.g. a long monitor feed) the gap is 0
 		// and the frame flows top-to-bottom (the banner scrolls off only if it overflows).
 		const gap = Math.max(0, this.getRows() - top.length - bottom.length);
-		return [...top, ...Array.from({ length: gap }, () => ""), ...bottom];
+		// pi-tui hard-crashes when ANY line exceeds the terminal width, so the frame
+		// is the clip seam: every line — banner, header (the 133-wide curl smoke test),
+		// flash, footer — is ANSI-aware truncated (the renderList precedent, applied
+		// frame-wide). Content builders stay single-source and full-fidelity; they clip here.
+		return [...top, ...Array.from({ length: gap }, () => ""), ...bottom].map((line) =>
+			truncateToWidth(line, frameWidth, ""),
+		);
 	}
 
 	/** Route a raw keystroke to navigation or an activation. */
