@@ -156,7 +156,10 @@ export function connectRows(
 	opts: { loginConfigured: boolean; channelCount: number },
 ): string[] {
 	if (status.localUrl === null || status.token === null) return [];
-	const endpoint = `${status.localUrl}/mcp`;
+	// `localUrl` is the FULL endpoint (`server-control.ts` builds `base + "/mcp"`;
+	// the status screen displays it verbatim). Appending another `/mcp` here doubled
+	// the path into a 404-ing `/mcp/mcp` in every connect block the TUI printed.
+	const endpoint = status.localUrl;
 	// One line per array element — a joined multi-line string is a single
 	// pi-tui "line" whose visible width (newlines and all) blows past the
 	// terminal and hard-crashes the render loop (the 236-wide-line crash).
