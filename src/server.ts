@@ -109,20 +109,21 @@ export async function buildFastify(
 	// Global error handler — preserves Fastify's `statusCode` (e.g. 400 on a
 	// malformed JSON body) and otherwise 500s. The `/mcp` POST handler calls
 	// `reply.hijack()`, so its own errors bypass this; it catches everything
-	// else. `errorInput` is `Error` by default — `statusCode` is narrowed
-	// honestly via the `in` guard (no `as`), matching the repo convention.
+	// else. Fastify 5 types `errorInput` as `unknown` — narrowed to `Error` via
+	// `instanceof` (a non-Error throw is stringified), `statusCode` via the
+	// `in` guard (no `as`), matching the repo convention.
 	fastify.setErrorHandler((errorInput, request, reply) => {
-		const statusCode =
-			"statusCode" in errorInput && typeof errorInput.statusCode === "number" ? errorInput.statusCode : 500;
+		const error = errorInput instanceof Error ? errorInput : new Error(String(errorInput));
+		const statusCode = "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : 500;
 		fastify.log.error({
-			error: errorInput.message,
-			stack: errorInput.stack,
+			error: error.message,
+			stack: error.stack,
 			url: request.url,
 			method: request.method,
 		});
 		reply.status(statusCode).send({
-			error: errorInput.name,
-			message: errorInput.message,
+			error: error.name,
+			message: error.message,
 			statusCode,
 		});
 	});
