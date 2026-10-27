@@ -5,6 +5,29 @@ All notable changes to OpenHammer are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-27
+
+The VM sandbox release: OpenHammer can now contain every tool call inside a QEMU virtual machine instead of the host OS user, with the dashboard as the control surface.
+
+### Added
+- **VM sandbox mode (specs 22–29).** `vm.mode = vm|agent` boots a pinned, unattended Arch Linux QEMU guest (KVM, OVMF) whose SSH transport becomes the tools' filesystem/spawn boundary — bash, read/write/edit/ls, grep and find all execute inside the guest. Includes the QMP control client, session lifecycle with stale/orphan sweeps, fail-fatal preflight (Linux + KVM only), a `vm install` flow (pinned ISO → SSH gate → idempotent provision), snapshot golden promotion (0600 manifests), `vm list/reset/gc` with dry-run defaults, boot-time orphan sweep, and status-socket `vm-state`/`vm-stop`/`vm-restart` commands surfaced in the monitor and dashboard.
+- **Sandbox screen in the dashboard.** Live sandbox state row, Start (gated on golden + flavor), Stop/Restart riding status-socket commands, serial.log tail drill-in, Install sandbox, Guest setup and Secrets editors (masked, 0700 store), provision.sh editor, apply-to-running agent/theme actions, and per-environment setup advice when the host can't boot a sandbox yet.
+- **Agent-flavor provisioning.** Guests provision for a chosen agent flavor with an idempotent tmux agent session and dual env/file secrets injection; the `guide` tool gains an agent-mode supervision variant.
+- **`ToolBackend` execution seam (spec 23).** Every tool's fs/spawn goes through one backend interface — `LocalBackend` for host mode, `FsBackend` for VM mode — with a scripted `FakeBackend` keeping unit tests spawn-free.
+- **Status connect block.** The Status screen now prints what the headless boot always printed: the ready-to-paste `mcpServers` JSON, a curl smoke test, the credential path, and the one next step for your state. Down-reasons ride channel state so a down tunnel is never silent.
+- **Operator login clients in the TUI wizard**, with a clients snapshot refresh; wizard fields render their help text.
+- **Doctor vm checks** — preflight, golden, RAM headroom, footprint, and root-path checks.
+- Gated `test:vm` tier with hermetic skip logic.
+
+### Changed
+- CI runs the test suite as a **hard gate** (installs `fd`; no `continue-on-error`).
+- Menu `Esc` is a no-op instead of quitting — quitting is deliberate (`q`, Ctrl-C, or the Quit row); destructive removes lost their confirms in favor of aborts + doctor flash.
+
+### Fixed
+- **Dashboard crash on narrow terminals.** A rendered line wider than the terminal crashed pi-tui's render loop outright (the connect block's JSON measured 236 wide on a 95-column terminal). Content now emits one line per row and the whole frame is ANSI-aware clipped to the terminal width.
+- **The connect block pointed at a 404.** It appended `/mcp` to a `localUrl` that already carried the path, printing `…/mcp/mcp` in every block the dashboard showed; it now uses the endpoint verbatim.
+- vm-mode `bash` overflow spills externally with a guest-path footer; `flagIo` select falls back to its initial value on single-field writes; doctor resolves check paths at run time; logind power-key drop-in so guest ACPI powerdown works; golden files are chmod 0600 at the promote boundary; provision uses `pacman -Sy` so fresh installs have package databases.
+
 ## [1.1.1] - 2026-07-09
 
 ### Fixed
