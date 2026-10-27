@@ -14,6 +14,7 @@ import {
 	createSandboxActions,
 	createSettingsActions,
 	createStartSandboxAction,
+	createTurnOffSandboxAction,
 	type DashboardDeps,
 	readSerialLog,
 	runDashboard,
@@ -646,6 +647,106 @@ describe("createStartSandboxAction (28j) — the one-action launch", () => {
 			persist: () => {},
 		});
 		expect(result).toEqual({ ok: false, error: new Error(VM_UNOWNED_HINT) });
+	});
+});
+
+describe("createTurnOffSandboxAction — the one-action mode exit", () => {
+	const vmSeed = (channels: ChannelEntry[] = []): Settings => ({
+		version: 1,
+		channels,
+		defaultChannel: null,
+		mcp: { allowedClients: [] },
+		vm: { ...defaultVmSettings(), mode: "vm" },
+	});
+
+	it("already off → a silent no-op success; nothing persisted, no restart", async () => {
+		const store = new DashboardStore({}, { ...vmSeed(), vm: { ...defaultVmSettings(), mode: "off" } });
+		let persisted = 0;
+		let restarted = 0;
+		const result = await createTurnOffSandboxAction({
+			store,
+			confirm: async () => true,
+			persist: () => {
+				persisted += 1;
+			},
+			restartServer: async () => {
+				restarted += 1;
+				return ok(undefined);
+			},
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+		expect(persisted).toBe(0);
+		expect(restarted).toBe(0);
+	});
+
+	it("no public channel: persists + adopts mode off, restarts, clears the pending flag", async () => {
+		const store = new DashboardStore({}, vmSeed());
+		const persisted: Settings[] = [];
+		let restarted = 0;
+		const result = await createTurnOffSandboxAction({
+			store,
+			confirm: async () => {
+				throw new Error("confirm must not be asked without a public channel");
+			},
+			persist: (s) => persisted.push(s),
+			restartServer: async () => {
+				restarted += 1;
+				return ok(undefined);
+			},
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+		expect(store.settings.vm.mode).toBe("off"); // adopted
+		expect(persisted.map((s) => s.vm.mode)).toEqual(["off"]);
+		expect(restarted).toBe(1);
+		expect(store.vmApplyPending).toBe(false); // applied by the fresh boot
+	});
+
+	it("a public channel asks the row-1 confirm; declining persists nothing (null)", async () => {
+		const live: ChannelEntry = { id: "c1", kind: "ngrok", mode: "live", options: {} };
+		const store = new DashboardStore({}, vmSeed([live]));
+		let asked = 0;
+		let persisted = 0;
+		const result = await createTurnOffSandboxAction({
+			store,
+			confirm: async () => {
+				asked += 1;
+				return false;
+			},
+			persist: () => {
+				persisted += 1;
+			},
+		});
+		expect(result).toBeNull();
+		expect(asked).toBe(1);
+		expect(persisted).toBe(0);
+		expect(store.settings.vm.mode).toBe("vm"); // unchanged
+	});
+
+	it("an unwired restart (unowned): the write stands, pending set, err carries the apply hint", async () => {
+		const store = new DashboardStore({}, vmSeed());
+		const persisted: Settings[] = [];
+		const result = await createTurnOffSandboxAction({
+			store,
+			confirm: async () => true,
+			persist: (s) => persisted.push(s),
+		});
+		expect(result?.ok).toBe(false);
+		expect((result as { error: Error }).error.message).toContain("restart openhammer to apply");
+		expect(persisted.map((s) => s.vm.mode)).toEqual(["off"]); // saved for the next boot
+		expect(store.vmApplyPending).toBe(true);
+	});
+
+	it("a failed restart: err surfaces the failure and the change stays pending (honest)", async () => {
+		const store = new DashboardStore({}, vmSeed());
+		const result = await createTurnOffSandboxAction({
+			store,
+			confirm: async () => true,
+			persist: () => {},
+			restartServer: async () => err(new Error("child exit 1")),
+		});
+		expect(result).toEqual({ ok: false, error: new Error("child exit 1") });
+		expect(store.settings.vm.mode).toBe("off"); // adopted — the doc IS the next boot's truth
+		expect(store.vmApplyPending).toBe(true);
 	});
 });
 

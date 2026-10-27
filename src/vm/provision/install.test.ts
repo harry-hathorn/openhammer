@@ -447,8 +447,8 @@ describe("runInstall — shutdown fallback + single-flight", () => {
 		const h = harness({ scan: [live] });
 		try {
 			await expect(runInstall(h.deps, { sessionName: "build-refused" })).rejects.toThrow(
-				"vm install: a VM session is active — stop the session first: mode off + restart, " +
-					"or Sandbox → Stop sandbox — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
+				"vm install: a VM session is active — stop the session first: Sandbox → Turn sandboxing off " +
+					"(or Stop sandbox for a teardown now) — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
 			);
 			expect(h.isoCalls).toEqual([]); // nothing ran: no iso, no qemu, no session dir
 			expect(h.sshCalls).toEqual([]);

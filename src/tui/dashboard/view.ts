@@ -331,6 +331,19 @@ export function sandboxHeaderRows(
 }
 
 /**
+ * The tools-gate warning (the recovery path): when a vm/agent mode is
+ * configured but NO session is live, every tool call errors ("sandbox
+ * stopped — no VM session is running") until the sandbox boots — an operator
+ * staring at `Sandbox  stopped` has no idea their client is broken. This row
+ * says it and names both exits (Start, or turn sandboxing off). Hidden when
+ * mode is `off` (nothing is gated) or a session is live (tools work). Pure.
+ */
+export function sandboxGateRows(mode: VmSettings["mode"], line: VmStateLine | null): string[] {
+	if (mode === "off" || vmSessionActive(line)) return [];
+	return ["", "tools are gated on this sandbox while it isn't running — Start it, or Turn sandboxing off…"];
+}
+
+/**
  * The Sandbox screen's setup-advice block (28k, tier 1): the store's
  * per-environment remedy lines (distro-aware install commands, firmware and
  * group directives — environment.ts), rendered under the header so the Start

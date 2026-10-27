@@ -362,8 +362,8 @@ describe("vmReset — discard stale sessions", () => {
 		try {
 			seedSession(h.dirs, "build-stale", STALE_PID);
 			await expect(vmReset(h.deps)).rejects.toThrow(
-				"vm reset: a VM session is active — stop the session first: mode off + restart, " +
-					"or Sandbox → Stop sandbox — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
+				"vm reset: a VM session is active — stop the session first: Sandbox → Turn sandboxing off " +
+					"(or Stop sandbox for a teardown now) — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
 			);
 			expect(existsSync(join(h.dirs.sessions, "build-stale"))).toBe(true);
 		} finally {
@@ -492,8 +492,8 @@ describe("vmGc — the aggregate-footprint reclaimer", () => {
 		try {
 			seedWorld(h);
 			await expect(vmGc(h.deps, { yes: true })).rejects.toThrow(
-				"vm gc: a VM session is active — stop the session first: mode off + restart, " +
-					"or Sandbox → Stop sandbox — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
+				"vm gc: a VM session is active — stop the session first: Sandbox → Turn sandboxing off " +
+					"(or Stop sandbox for a teardown now) — /home/x/.openhammer/vm/sessions/live-one holds qemu pid 999",
 			);
 			expect(existsSync(join(h.dirs.sessions, "build-stale"))).toBe(true);
 			expect(existsSync(join(h.dirs.images, OLDEST))).toBe(true);
@@ -519,8 +519,8 @@ describe("vmGc — the aggregate-footprint reclaimer", () => {
 			};
 			seedWorld(h); // a full reclaim plan waiting (stale session + orphan cidata + old golden)
 			await expect(vmGc(deps, { yes: true })).rejects.toThrow(
-				"vm gc: a VM session is active — stop the session first: mode off + restart, " +
-					`or Sandbox → Stop sandbox — ${pinnedDir} holds qemu pid ${OURS_PID}`,
+				"vm gc: a VM session is active — stop the session first: Sandbox → Turn sandboxing off " +
+					`(or Stop sandbox for a teardown now) — ${pinnedDir} holds qemu pid ${OURS_PID}`,
 			);
 			// Nothing was a candidate: every reclaimable path survives untouched.
 			expect(existsSync(pinnedDir)).toBe(true);

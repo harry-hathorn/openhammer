@@ -76,7 +76,13 @@ import { collectClientConfig, toIssueOptions } from "./client-wizard.ts";
 import { createDashboardRenderer, type DashboardRenderer } from "./dashboard/render.ts";
 import { type DashboardActions, DashboardRoot, type InstallOutcome } from "./dashboard/root.ts";
 import { type ChannelLiveState, DashboardStore, emptyStatus, type ServerStatusState } from "./dashboard/store.ts";
-import { hasPublicChannel, type SerialSource, vmSessionActive, vmSettingsEqual } from "./dashboard/view.ts";
+import {
+	hasPublicChannel,
+	type SerialSource,
+	VM_APPLY_HINT,
+	vmSessionActive,
+	vmSettingsEqual,
+} from "./dashboard/view.ts";
 import { sendVmCommand } from "./dashboard/vm-commands.ts";
 import { runSpinner } from "./prompt-loop.ts";
 import { createDefaultIo, type PromptIo } from "./prompts.ts";
@@ -328,7 +334,7 @@ export const VM_IN_FLIGHT_HINT = "a sandbox action is already in flight — wait
 
 /** The Stop confirmation's modal message (the matrix-row-4 semantics, restated). */
 export const SANDBOX_STOP_CONFIRM_MESSAGE =
-	"Stop the sandbox now? The boot-scoped mode re-boots it on the next server start — the lasting stop is mode off + restart.";
+	"Stop the sandbox now? It re-boots on the next server start, and tools stay sandbox-gated until it boots — the lasting off is Turn sandboxing off…";
 
 /**
  * The row-1 mode-select confirm's modal message (spec 28, matrix row 1 — the
@@ -616,6 +622,60 @@ export async function createStartSandboxAction(deps: StartSandboxDeps): Promise<
 	const send = deps.sendCommand;
 	if (send === undefined) return err(new Error(VM_UNOWNED_HINT));
 	return send("vm-restart");
+}
+
+// ---- the one-action mode exit (the Stop row's named remedy) ------------------------
+
+/** Deps for {@link createTurnOffSandboxAction} — the Start core's mirror. */
+export interface TurnOffSandboxDeps {
+	/** The live store: the configured mode, the doc adoption, the row-3 pending flag. */
+	readonly store: Pick<DashboardStore, "settings" | "setSettings" | "setVmApplyPending">;
+	/** The row-1 confirm modal (off with a public channel exposes the host filesystem). */
+	readonly confirm: (message: string) => Promise<boolean | null>;
+	/** Persist the settings doc (the runDashboard `persist` seam). */
+	readonly persist: (s: Settings) => void;
+	/**
+	 * The child re-spawn seam — the tool backend is boot-scoped, so the off
+	 * mode only takes effect at a fresh boot; this restarts the owned server
+	 * so it applies NOW. Absent (unowned/attached) → the write still persists,
+	 * the pending flag carries the apply-on-restart honesty.
+	 */
+	readonly restartServer?: () => Promise<Result<void, Error>>;
+}
+
+/**
+ * The Turn-sandboxing-off core — the one-action counterpart of
+ * {@link createStartSandboxAction}: the mode exit an operator in trouble can
+ * find, instead of the buried Configure → boot-mode wizard. Guards, in order:
+ *
+ * 1. **Already off** → a silent no-op success (the row is hidden then anyway).
+ * 2. **A public channel is configured** → the row-1 confirm
+ *    ({@link VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE} — the identical guard the
+ *    Configure path asks); declining → `null`, nothing persisted.
+ * 3. **Persist + adopt** `vm.mode = off`.
+ * 4. **Apply now**: restart the owned server (the fresh boot routes tools to
+ *    the host filesystem). Unwired → the write stands, the row-3 pending flag
+ *    is set, and the returned err carries the apply-on-restart hint (never a
+ *    dishonest success flash). A failed restart leaves the change pending too.
+ */
+export async function createTurnOffSandboxAction(deps: TurnOffSandboxDeps): Promise<Result<void, Error> | null> {
+	const before = deps.store.settings;
+	if (before.vm.mode === "off") return ok(undefined); // nothing to exit — silent no-op
+	const next: Settings = { ...before, vm: { ...before.vm, mode: "off" } };
+	if (hasPublicChannel(next)) {
+		const go = await deps.confirm(VM_OFF_PUBLIC_CHANNEL_CONFIRM_MESSAGE);
+		if (go !== true) return null; // declined — nothing persisted (the modal idiom)
+	}
+	deps.persist(next);
+	deps.store.setSettings(next);
+	const restart = deps.restartServer;
+	if (restart === undefined) {
+		deps.store.setVmApplyPending(true);
+		return err(new Error(`sandboxing-off saved — ${VM_APPLY_HINT}`));
+	}
+	const r = await restart();
+	deps.store.setVmApplyPending(!r.ok); // a failed restart leaves the change pending (honest)
+	return r;
 }
 
 // ---- the settings actions + the mode-select guards (spec 28, box 28c) ------------
@@ -988,6 +1048,34 @@ function buildActions(
 					sendCommand: deps.sendVmCommand ?? ((cmd) => sendVmCommand(cmd)),
 				}),
 			));
+	// The Turn-sandboxing-off action (the Stop row's named remedy): the exported
+	// core owns the guards + apply; the wiring dresses the confirm as a modal and
+	// the child re-spawn as the restart spinner (the Start/apply path's pattern —
+	// a re-spawn is a server restart the operator should SEE).
+	const turnOffSandboxAction: DashboardActions["turnOffSandbox"] =
+		overrides.turnOffSandbox ??
+		(async () =>
+			withModal(() =>
+				createTurnOffSandboxAction({
+					store,
+					confirm: (message) => io.confirm({ message }),
+					persist,
+					restartServer: restartServerSeam
+						? (): Promise<Result<void, Error>> =>
+								withModal(() =>
+									runSpinner(
+										"Turning sandboxing off — restarting the server so tools reach this machine's files…",
+										() => restartServerSeam(),
+										(r) =>
+											r.ok
+												? "server restarted — tools now reach this machine's files"
+												: `restart failed: ${r.error.message}`,
+										{ terminal },
+									),
+								)
+						: undefined,
+				}),
+			));
 	const stopSandboxAction: DashboardActions["stopSandbox"] =
 		overrides.stopSandbox ??
 		(async () => {
@@ -1105,6 +1193,7 @@ function buildActions(
 		runDoctor: runDoctorAction,
 		refreshClients: refreshClientsAction,
 		startSandbox: startSandboxAction,
+		turnOffSandbox: turnOffSandboxAction,
 		stopSandbox: stopSandboxAction,
 		restartSandbox: restartSandboxAction,
 		readSerial: readSerialAction,

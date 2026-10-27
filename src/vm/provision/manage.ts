@@ -48,8 +48,8 @@
  * removing state out from under a running boot is not a judgment call. The refusal is
  * install.ts's SHARED builder ({@link activeSessionRefusal} — one message across the vm
  * tree, so the CLI stderr and the dashboard's inline flash can never drift) and it names
- * the session dir, the pid, and the escape (mode off + restart, or Sandbox → Stop
- * sandbox — spec 28 matrix rows 4/5).
+ * the session dir, the pid, and the escape (Sandbox → Turn sandboxing off, or Stop
+ * sandbox for a teardown now — spec 28 matrix rows 4/5).
  *
  * Error model: process layer, not a tool. Expected failures THROW actionable errors
  * (the snapshot.ts posture); the CLI boundary maps them to exit 1.

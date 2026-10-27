@@ -48,6 +48,7 @@ import {
 	SANDBOX_CONFIGURE_LABEL,
 	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
+	SANDBOX_OFF_LABEL,
 	SANDBOX_PROVISION_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SECRETS_LABEL,
@@ -70,6 +71,7 @@ import {
 	type SerialSource,
 	type SerialTail,
 	sandboxAdviceRows,
+	sandboxGateRows,
 	sandboxHeaderRows,
 	secretRevealRows,
 	serialTailNote,
@@ -141,12 +143,22 @@ export interface DashboardActions {
 	 */
 	startSandbox(): Promise<Result<void, Error> | null>;
 	/**
+	 * Turn sandboxing OFF — the one-action mode exit (dashboard.ts's
+	 * {@link createTurnOffSandboxAction}): the public-channel confirm, then
+	 * `vm.mode = off` persisted + adopted, then the owned-server restart so the
+	 * fresh boot routes tools straight to this machine's filesystem. `null` =
+	 * declined confirm (silent). Unwired restart → the write stands, `err`
+	 * carries the apply-on-restart hint. The Sandbox screen shows the row
+	 * exactly while the mode is `vm`/`agent`.
+	 */
+	turnOffSandbox(): Promise<Result<void, Error> | null>;
+	/**
 	 * Stop the VM sandbox (spec 28, matrix row 4): the `VmService` teardown — clean
 	 * ACPI powerdown + stop ladder + persist policy (spec 27e). The wired action asks
 	 * ONE confirmation first (the `io.confirm` modal) and returns `null` when declined
 	 * (the cancelled-modal idiom: silent). After a stop the state row reads `stopped`:
-	 * the boot-scoped mode re-boots the sandbox on the next server start — the lasting
-	 * stop is mode `off` + restart.
+	 * tools stay sandbox-gated until it boots again — the lasting off is the
+	 * Turn-sandboxing-off row.
 	 */
 	stopSandbox(): Promise<Result<void, Error> | null>;
 	/**
@@ -416,6 +428,11 @@ export class DashboardRoot implements Component {
 					return {
 						header: [
 							...sandboxHeaderRows(this.store.latestVmState, this.store.vmRoot, this.store.vmApplyPending),
+							// The tools-gate warning: vm/agent mode with NO live session means
+							// every tool call errors — say it and name both exits (Start, or
+							// turn sandboxing off) instead of letting a dead client be the
+							// discoverer.
+							...sandboxGateRows(this.store.settings.vm.mode, this.store.latestVmState),
 							// The setup-advice block (28k, tier 1): distro-aware remedies when
 							// the host can't boot yet — copyable commands, never auto-installs.
 							...sandboxAdviceRows(this.store.sandboxAdvice),
@@ -424,6 +441,7 @@ export class DashboardRoot implements Component {
 							this.store.hasGolden,
 							vmSessionActive(this.store.latestVmState),
 							applyToRunningReady(this.store.latestVmState),
+							this.store.settings.vm.mode,
 						),
 						hint: this.hint(),
 					};
@@ -747,12 +765,27 @@ export class DashboardRoot implements Component {
 				);
 				return;
 			}
+			if (label === SANDBOX_OFF_LABEL) {
+				// The one-action mode exit (the Stop row's named remedy): confirm →
+				// mode off persisted → owned-server restart → tools reach the host
+				// filesystem again. The tunnel URL rotates on the restart — say so,
+				// or the operator's client silently breaks on the next connect.
+				const result = await this.actions.turnOffSandbox();
+				if (result === null) return; // declined confirm — silent (the modal idiom)
+				this.flash(
+					result.ok
+						? "Sandboxing off — tools reach this machine's files; the tunnel URL changed (Status has the new one)."
+						: result.error.message,
+					result.ok,
+				);
+				return;
+			}
 			if (label === SANDBOX_STOP_LABEL) {
 				const result = await this.actions.stopSandbox();
 				if (result === null) return; // confirmation declined — silent (the modal idiom)
 				this.flash(
 					result.ok
-						? "Sandbox stopped — it re-boots on the next server start; the lasting stop is mode off + restart."
+						? "Sandbox stopped — it re-boots on the next server start; for keeps-off use Turn sandboxing off…"
 						: result.error.message,
 					result.ok,
 				);
