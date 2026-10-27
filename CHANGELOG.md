@@ -5,6 +5,15 @@ All notable changes to OpenHammer are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-27
+
+### Security
+- **All 19 `npm audit` advisories cleared** (1 critical, 11 high, 7 moderate → 0).
+- **fastify 4.29.1 → 5.12.7** (with `@fastify/cors` 8→11, `@fastify/formbody` 7→8) — clears the fastify advisory stack, including authentication bypass via malformed URLs reaching encapsulated not-found handlers, request body replacement via an async validation collision (CVSS 8.1), schema/header validation bypasses, and `X-Forwarded-Proto`/`Host` spoofing — plus find-my-way's HTTP/2 DDoS.
+- **`@modelcontextprotocol/sdk` 1.29 → 1.32** — the SDK's OAuth client could send credentials to a malicious authorization server.
+- 16 in-range transitive bumps, including the **critical `proxy-addr`** (IP spoofing via IPv4-mapped IPv6 trust subnets), `body-parser` DoS, `qs` parsing, `ip-address`, `nanoid`, and `postcss`.
+- `dependabot.yml` now groups minor/patch bumps into one PR per ecosystem (majors and security updates stay individual).
+
 ## [1.2.0] - 2026-10-27
 
 The VM sandbox release: OpenHammer can now contain every tool call inside a QEMU virtual machine instead of the host OS user, with the dashboard as the control surface.
