@@ -71,6 +71,10 @@ function fakeActions(log: string[]): DashboardActions {
 			log.push("startSandbox");
 			return ok(undefined) as Result<void, Error>;
 		},
+		turnOffSandbox: async () => {
+			log.push("turnOffSandbox");
+			return ok(undefined) as Result<void, Error>;
+		},
 		stopSandbox: async () => {
 			log.push("stopSandbox");
 			return ok(undefined) as Result<void, Error>;
@@ -454,6 +458,36 @@ describe("DashboardRoot — Sandbox screen (spec 28)", () => {
 		// The off fixture holds no line → no live session → Start is the top row.
 		expect(root.render(80).some((l) => l.includes("Start sandbox…"))).toBe(true);
 	});
+
+	it("vm mode with no live session: the tools-gate warning names both exits; off mode stays silent", async () => {
+		const log: string[] = [];
+		const stopped = vmRooted(log, "vm", undefined, { vmState: "stopped" });
+		for (let i = 0; i < 6; i++) stopped.handleInput(DOWN);
+		stopped.handleInput(ENTER);
+		await flushActions();
+		const warning = stopped.render(120).find((l) => l.includes("tools are gated on this sandbox"));
+		expect(warning).toContain("Turn sandboxing off");
+		const off = vmRooted(log, "off");
+		for (let i = 0; i < 6; i++) off.handleInput(DOWN);
+		off.handleInput(ENTER);
+		await flushActions();
+		expect(off.render(120).some((l) => l.includes("tools are gated"))).toBe(false);
+	});
+
+	it("the Turn-sandboxing-off row: shown under Start in vm mode, dispatches the action, flashes the URL note", async () => {
+		const log: string[] = [];
+		const root = vmRooted(log, "vm", undefined, { vmState: "stopped" });
+		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
+		root.handleInput(ENTER); // -> Sandbox
+		await flushActions();
+		// rows: Start(0), Turn sandboxing off(1), Stop(2)…
+		root.handleInput(DOWN);
+		root.handleInput(ENTER); // activate Turn sandboxing off…
+		await flushActions();
+		expect(log).toContain("turnOffSandbox");
+		const flash = root.render(160).find((l) => l.includes("Sandboxing off"));
+		expect(flash).toContain("tunnel URL changed");
+	});
 });
 
 describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
@@ -467,6 +501,10 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		// The Turn-sandboxing-off row shifted everything below it: pre-position the
+		// focus on Stop (row 1) for live-session fixtures so the tests' Stop-relative
+		// arithmetic reads true. Stopped/failed fixtures keep focus at Start (row 0).
+		if ((opts.vmState ?? "ready") === "ready" || opts.vmState === "booting") root.handleInput(DOWN);
 		return root;
 	}
 
@@ -475,6 +513,7 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		// subtitle only fits its full semantics text on a wide terminal — at 80 the
 		// first clause ("power down now — the boot-scoped mode re-boots…") is what shows.
 		const lines = (await sandboxed([])).render(200);
+		expect(lines.some((l) => l.includes("Turn sandboxing off…"))).toBe(true); // vm mode → the exit is visible
 		expect(lines.some((l) => l.includes("Stop sandbox…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Restart sandbox…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Configure…"))).toBe(true);
@@ -485,8 +524,8 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 		expect(lines.some((l) => l.includes("Set default agent…"))).toBe(true); // the vm fixture holds a READY line — 28g
 		expect(lines.some((l) => l.includes("Set theme…"))).toBe(true);
 		expect(lines.some((l) => l.includes("Back"))).toBe(true);
-		expect(lines.some((l) => l.includes("re-boots on the next server start"))).toBe(true);
-		expect(lines.some((l) => l.includes("a lasting stop is mode off + restart"))).toBe(true);
+		expect(lines.some((l) => l.includes("tools stay sandbox-gated"))).toBe(true);
+		expect(lines.some((l) => l.includes("the lasting off is Turn sandboxing off"))).toBe(true);
 		expect(lines.some((l) => l.includes("Install sandbox…"))).toBe(false); // a golden exists — HIDDEN, not disabled
 
 		const goldenless = (await sandboxed([], undefined, { hasGolden: false, vmState: "stopped" })).render(200);
@@ -496,12 +535,12 @@ describe("DashboardRoot — Sandbox actions (spec 28, box 28b)", () => {
 	it("enter on Stop runs stopSandbox once and flashes the lasting-stop semantics (matrix row 4)", async () => {
 		const log: string[] = [];
 		const root = await sandboxed(log);
-		root.handleInput(ENTER); // focus 0 = Stop
+		root.handleInput(ENTER); // focus sits on Stop (pre-positioned past Turn sandboxing off)
 		await flushActions();
 		expect(log).toEqual(["stopSandbox"]);
 		// render(120): the flash is ~98 visible chars — a real 80-col terminal CLIPS it
 		// (frame-wide truncation), so assert the full text at a width that fits it.
-		expect(root.render(120).some((l) => l.includes("the lasting stop is mode off + restart"))).toBe(true);
+		expect(root.render(120).some((l) => l.includes("for keeps-off use Turn sandboxing off"))).toBe(true);
 	});
 
 	it("enter on Restart runs restartSandbox (the stop→start order is pinned at the action level)", async () => {
@@ -603,6 +642,8 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		// Turn-sandboxing-off shifted the rows: focus on Stop for live sessions (see 28b).
+		if ((opts.vmState ?? "ready") === "ready" || opts.vmState === "booting") root.handleInput(DOWN);
 		return root;
 	}
 
@@ -638,7 +679,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			},
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (no golden + stopped → the Start row leads the list, 28j; the apply rows hide without a ready line, box 28g)
+		for (let i = 0; i < 9; i++) root.handleInput(DOWN); // focus 9 = Install (stopped → Start + Turn-sandboxing-off lead the list; apply rows hide — box 28g)
 		root.handleInput(ENTER);
 		await flushActions();
 		// Completion returns to the Sandbox screen with the golden-id flash — Start is right there.
@@ -669,7 +710,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			},
 			{ hasGolden: false, vmState: "stopped" },
 		);
-		for (let i = 0; i < 8; i++) root.handleInput(DOWN);
+		for (let i = 0; i < 9; i++) root.handleInput(DOWN); // focus 9 = Install (stopped → Start + Turn-sandboxing-off lead)
 		root.handleInput(ENTER); // → the build screen while the chain runs
 		expect(root.screen).toEqual({ kind: "build" });
 		storeRef?.appendBuildLog("golden build 2/3 — provision: 8/8 checks ok");
@@ -690,7 +731,7 @@ describe("DashboardRoot — Configure, Install, and the apply-on-restart afforda
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // no active session — the row-5 exclusion must not fire
 		);
-		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (no golden + stopped → the Start row leads, 28j; the apply rows hide — box 28g)
+		for (let i = 0; i < 9; i++) root.handleInput(DOWN); // focus 9 = Install (stopped → Start + Turn-sandboxing-off lead, 28j; the apply rows hide — box 28g)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(root.screen).toEqual({ kind: "build" });
@@ -758,6 +799,7 @@ describe("DashboardRoot — Guest setup entry (spec 28, box 28e)", () => {
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		root.handleInput(DOWN); // past Turn sandboxing off (live fixture) — focus on Stop
 		return root;
 	}
 
@@ -830,6 +872,7 @@ describe("DashboardRoot — Secrets entry (spec 28, box 28f)", () => {
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		root.handleInput(DOWN); // past Turn sandboxing off (live fixture) — focus on Stop
 		return root;
 	}
 
@@ -899,6 +942,8 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		// Turn-sandboxing-off shifted the rows: focus on Stop for live sessions (see 28b).
+		if ((opts.vmState ?? "ready") === "ready" || opts.vmState === "booting") root.handleInput(DOWN);
 		return root;
 	}
 
@@ -948,13 +993,13 @@ describe("DashboardRoot — Install × active session (spec 28, matrix row 5, bo
 			}),
 			{ hasGolden: false, vmState: "stopped" }, // line says inactive — the vm-side scan is the race backstop
 		);
-		for (let i = 0; i < 8; i++) root.handleInput(DOWN); // focus 8 = Install (stopped → the Start row leads, 28j; Secrets joined at 4, box 28f)
+		for (let i = 0; i < 9; i++) root.handleInput(DOWN); // focus 9 = Install (stopped → Start + Turn-sandboxing-off lead; Secrets joined at 4, box 28f)
 		root.handleInput(ENTER);
 		await flushActions();
 		expect(
 			root
 				.render(200)
-				.some((l) => l.includes("stop the session first: mode off + restart, or Sandbox → Stop sandbox")),
+				.some((l) => l.includes("stop the session first: Sandbox → Turn sandboxing off")),
 		).toBe(true);
 	});
 });
@@ -970,6 +1015,8 @@ describe("DashboardRoot — provision.sh + apply-to-running (spec 28, box 28g)",
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER);
 		expect(root.screen).toEqual({ kind: "section", section: "sandbox" });
+		// Turn-sandboxing-off shifted the rows: focus on Stop for live sessions (see 28b).
+		if ((opts.vmState ?? "ready") === "ready" || opts.vmState === "booting") root.handleInput(DOWN);
 		return root;
 	}
 
@@ -1105,7 +1152,7 @@ describe("DashboardRoot — navigation safety + feedback (28j)", () => {
 		const root = vmRooted(log, "vm");
 		for (let i = 0; i < 6; i++) root.handleInput(DOWN);
 		root.handleInput(ENTER); // → Sandbox
-		for (let i = 0; i < 6; i++) root.handleInput(DOWN); // focus 6 = Serial tail (a ready session hides Start)
+		for (let i = 0; i < 7; i++) root.handleInput(DOWN); // focus 7 = Serial tail (Turn sandboxing off leads the ready-session list)
 		root.handleInput(ENTER); // → serial (the read resolves in the fire-and-forget activation)
 		await flushActions();
 		expect(root.screen).toEqual({ kind: "serial" });

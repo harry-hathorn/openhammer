@@ -13,6 +13,7 @@ import {
 	monitorRows,
 	SERIAL_TAIL_LINES,
 	sandboxAdviceRows,
+	sandboxGateRows,
 	sandboxHeaderRows,
 	sandboxStartOffered,
 	sandboxStateRow,
@@ -256,6 +257,22 @@ describe("view — sandbox rows (spec 28)", () => {
 		const row = sandboxStateRow(vmState());
 		expect(sandboxHeaderRows(vmState(), "/home/sandbox")).toEqual([row, "guest root: /home/sandbox"]);
 		expect(sandboxHeaderRows(vmState(), null)).toEqual([row]);
+	});
+
+	it("sandboxGateRows warns exactly when sandboxing is ON but no session is live (the dead-client recovery)", () => {
+		const warning = [
+			"",
+			"tools are gated on this sandbox while it isn't running — Start it, or Turn sandboxing off…",
+		];
+		// vm/agent mode with a stopped/failed/absent session → the warning names both exits
+		expect(sandboxGateRows("vm", null)).toEqual(warning);
+		expect(sandboxGateRows("agent", vmState({ state: "stopped", sessionId: null, sshPort: null }))).toEqual(warning);
+		expect(sandboxGateRows("vm", vmState({ state: "failed", sessionId: null, sshPort: null }))).toEqual(warning);
+		// tools WORK — mode off (nothing gated) or a live booting/ready session → silent
+		expect(sandboxGateRows("off", null)).toEqual([]);
+		expect(sandboxGateRows("off", vmState({ state: "stopped", sessionId: null, sshPort: null }))).toEqual([]);
+		expect(sandboxGateRows("vm", vmState())).toEqual([]); // ready
+		expect(sandboxGateRows("agent", vmState({ state: "booting" }))).toEqual([]); // booting counts as live
 	});
 
 	it("sandboxAdviceRows: empty renders nothing; lines render indented under one header (28k)", () => {

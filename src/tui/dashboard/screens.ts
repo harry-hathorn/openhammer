@@ -21,6 +21,7 @@
  * directly (the `view.test.ts` precedent).
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { VmSettings } from "../../config/settings.ts";
 import type { Style } from "../style.ts";
 import type { DashboardStore } from "./store.ts";
 import {
@@ -312,13 +313,21 @@ export const SANDBOX_INSTALL_LABEL = "Install sandbox…";
 export const SANDBOX_START_LABEL = "Start sandbox…";
 
 /**
- * The Stop row's subtitle — the matrix-row-4 semantics verbatim: a stop is a
- * teardown NOW; the boot-scoped mode re-boots the sandbox on the next server
- * start, and the lasting stop is mode `off` + restart (with the row-1 channel
- * warning when a public channel is configured).
+ * The Stop row's subtitle — the matrix-row-4 semantics: a stop is a teardown
+ * NOW (tools stay sandbox-gated — they break until the sandbox boots again);
+ * the lasting off is the Turn-sandboxing-off row, named so the operator
+ * lands on it instead of hunting through Configure.
  */
-export const SANDBOX_STOP_TEXT =
-	"stop now — it re-boots on the next server start; a lasting stop is mode off + restart";
+export const SANDBOX_STOP_TEXT = "stop this boot — tools stay sandbox-gated; the lasting off is Turn sandboxing off";
+
+/**
+ * The Turn-sandboxing-off row's label — the one-action mode exit the Stop row
+ * points at: sets `vm.mode = off`, restarts the owned server (the fresh boot
+ * routes tools straight to this machine's filesystem), and never asks the
+ * operator to dig through Configure. Matched by EXACT match in the root's
+ * dispatch. Hidden when the mode is already `off` (nothing to exit).
+ */
+export const SANDBOX_OFF_LABEL = "Turn sandboxing off…";
 
 /**
  * The Sandbox screen's action list: — ONLY when no session is live — the top
@@ -345,7 +354,12 @@ export const SANDBOX_STOP_TEXT =
  * start) — runInstall's own single-flight scan stays the race authority for
  * the window a vm-state line can't see, and its refusal surfaces inline. Pure.
  */
-export function sandboxItems(hasGolden: boolean, sessionActive = false, applyReady = false): ListItem[] {
+export function sandboxItems(
+	hasGolden: boolean,
+	sessionActive = false,
+	applyReady = false,
+	mode: VmSettings["mode"] = "off",
+): ListItem[] {
 	const rows: ListItem[] = [];
 	if (!sessionActive) {
 		// The top row (28j): Start is the headline action, offered exactly when no
@@ -354,6 +368,15 @@ export function sandboxItems(hasGolden: boolean, sessionActive = false, applyRea
 		rows.push({
 			label: SANDBOX_START_LABEL,
 			description: "boot the sandbox now — the state row flips to booting",
+		});
+	}
+	if (mode !== "off") {
+		// The one-action mode exit — shown exactly while sandboxing is ON, so an
+		// operator whose tools just broke finds it without a wizard. Hidden when
+		// already off (there is nothing to exit).
+		rows.push({
+			label: SANDBOX_OFF_LABEL,
+			description: "tools reach this machine's files again — mode off, applied now",
 		});
 	}
 	rows.push(

@@ -20,6 +20,7 @@ import {
 	SANDBOX_CONFIGURE_LABEL,
 	SANDBOX_GUEST_SETUP_LABEL,
 	SANDBOX_INSTALL_LABEL,
+	SANDBOX_OFF_LABEL,
 	SANDBOX_PROVISION_LABEL,
 	SANDBOX_RESTART_LABEL,
 	SANDBOX_SECRETS_LABEL,
@@ -170,6 +171,18 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", 
 		expect(sandboxItems(true, true).map((i) => i.label)).not.toContain(SANDBOX_START_LABEL);
 	});
 
+	it("Turn sandboxing off sits right under Start, exactly while the mode is vm/agent (never when off)", () => {
+		// off mode (the default) — nothing to exit, the row is hidden
+		expect(sandboxItems(true).map((i) => i.label)).not.toContain(SANDBOX_OFF_LABEL);
+		// vm/agent — the one-action exit sits directly under Start
+		const vm = sandboxItems(true, false, false, "vm").map((i) => i.label);
+		expect(vm[0]).toBe(SANDBOX_START_LABEL);
+		expect(vm[1]).toBe(SANDBOX_OFF_LABEL);
+		// …and survives a live session (Stop/Restart era) — the exit never disappears
+		const agentLive = sandboxItems(true, true, false, "agent").map((i) => i.label);
+		expect(agentLive[0]).toBe(SANDBOX_OFF_LABEL);
+	});
+
 	it("the Guest setup row sits beside Configure and frames itself as a local build input (box 28e)", () => {
 		const items = sandboxItems(true);
 		const configure = items.findIndex((i) => i.label === SANDBOX_CONFIGURE_LABEL);
@@ -226,10 +239,10 @@ describe("screens — sandboxItems (spec 28, box 28b + 28c + 28e + 28f + 28g)", 
 		expect(labels.indexOf(SANDBOX_INSTALL_LABEL)).toBe(labels.length - 2); // just before Back
 	});
 
-	it("the stop subtitle carries the matrix-row-4 semantics (re-boots on next start; lasting stop = off + restart)", () => {
+	it("the stop subtitle carries the matrix-row-4 semantics (teardown now; tools stay gated; lasting off = the named row)", () => {
 		const stop = sandboxItems(true).find((i) => i.label === SANDBOX_STOP_LABEL);
-		expect(stop?.description).toContain("re-boots on the next server start");
-		expect(stop?.description).toContain("a lasting stop is mode off + restart");
+		expect(stop?.description).toContain("tools stay sandbox-gated");
+		expect(stop?.description).toContain("the lasting off is Turn sandboxing off");
 	});
 
 	it("while a session is ACTIVE the Install row is hidden even with no golden (matrix row 5, box 28d)", () => {

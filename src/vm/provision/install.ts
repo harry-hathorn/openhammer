@@ -358,13 +358,13 @@ export async function scanActiveVmSessions(
  * The single-flight refusal, SHARED by every vm-tree command that must not run under a
  * live session — install (here), reset/gc (manage.ts imports this builder) — so the CLI
  * stderr line and the dashboard's inline flash render the SAME text. The message names
- * the escape, not just the evidence (spec 28, matrix rows 4/5): a lasting stop is mode
- * `off` + restart, and the dashboard's Sandbox → Stop sandbox tears down now.
+ * the escape, not just the evidence (spec 28, matrix rows 4/5): the dashboard's
+ * Turn-sandboxing-off row is the lasting exit; Stop sandbox tears down now.
  */
 export function activeSessionRefusal(command: string, active: ActiveSession): Error {
 	return new Error(
-		`vm ${command}: a VM session is active — stop the session first: mode off + restart, ` +
-			`or Sandbox → Stop sandbox — ${active.sessionDir} holds qemu pid ${active.pid}`,
+		`vm ${command}: a VM session is active — stop the session first: Sandbox → Turn sandboxing off ` +
+			`(or Stop sandbox for a teardown now) — ${active.sessionDir} holds qemu pid ${active.pid}`,
 	);
 }
 
